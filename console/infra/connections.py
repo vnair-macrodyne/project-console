@@ -42,8 +42,11 @@ _BUDGET_COMPARE = ["POShipDate", "CustAgreedShipDate", "MaterialBudget",
 
 
 def _d(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
+    try:
+        if x is None or pd.isna(x):          # None, NaN, NaT, pd.NA
+            return None
+    except (TypeError, ValueError):
+        pass
     if isinstance(x, _dt.datetime):
         x = x.date()
     if isinstance(x, _dt.date):
@@ -193,9 +196,11 @@ def sync(conn, pack_path, all_weeks=True, effective=None, by="console_sync"):
             "POShipDate,CustAgreedShipDate,MaterialBudget,LabourBudgetHours,PMHours,"
             "MechanicalHours,ElectricalHours,HydraulicHours,ManufacturingHours,OtherHours,CreatedBy) "
             "OUTPUT INSERTED.BudgetVersionID VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)",
-            pid, effective, f"Budgets.xlsx@{effective}", new["POShipDate"], new["CustAgreedShipDate"],
-            new["MaterialBudget"], new["LabourBudgetHours"], new["PMHours"], new["MechanicalHours"],
-            new["ElectricalHours"], new["HydraulicHours"], new["ManufacturingHours"], new["OtherHours"], by)
+            pid, effective, f"Budgets.xlsx@{effective}",
+            _d(new["POShipDate"]), _d(new["CustAgreedShipDate"]),
+            _n(new["MaterialBudget"]), _n(new["LabourBudgetHours"]), _n(new["PMHours"]),
+            _n(new["MechanicalHours"]), _n(new["ElectricalHours"]), _n(new["HydraulicHours"]),
+            _n(new["ManufacturingHours"]), _n(new["OtherHours"]), by)
         vid = cur.fetchone()[0]
         for _, dr in detail_by_pid.get(str(pid), pd.DataFrame()).iterrows():
             cur.execute("INSERT INTO Reporting.tblProjectBudgetDetail(BudgetVersionID,HourDescription,BudgetHours) "
@@ -212,12 +217,12 @@ def sync(conn, pack_path, all_weeks=True, effective=None, by="console_sync"):
             "TotalLineItems,LLTPOrdered,LLTPReleasedLate,LLTPOrderedLate,LLTPDeliveredLate,"
             "PartsReleasedLate,PartsOrderedLate,Delta1WkPercentDone,Delta1WkMaterial,IncludeFlag,ReRank) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            int(r["ProjectID"]), r["FiscalYear"], r["WeekNo"], int(r["YearWeekKey"]),
-            r["PlannedShipDate"], r["PercentComplete"], r["LabourRunout"], r["MaterialRunout"],
-            r["MaterialActual"], r["MaterialBudget"], r["TotalLineItems"], r["LLTPOrdered"],
-            r["LLTPReleasedLate"], r["LLTPOrderedLate"], r["LLTPDeliveredLate"], r["PartsReleasedLate"],
-            r["PartsOrderedLate"], r["Delta1WkPercentDone"], r["Delta1WkMaterial"],
-            r["IncludeFlag"], r["ReRank"])
+            int(r["ProjectID"]), _i(r["FiscalYear"]), _i(r["WeekNo"]), int(r["YearWeekKey"]),
+            _d(r["PlannedShipDate"]), _n(r["PercentComplete"]), _n(r["LabourRunout"]), _n(r["MaterialRunout"]),
+            _n(r["MaterialActual"]), _n(r["MaterialBudget"]), _i(r["TotalLineItems"]), _i(r["LLTPOrdered"]),
+            _i(r["LLTPReleasedLate"]), _i(r["LLTPOrderedLate"]), _i(r["LLTPDeliveredLate"]), _i(r["PartsReleasedLate"]),
+            _i(r["PartsOrderedLate"]), _n(r["Delta1WkPercentDone"]), _n(r["Delta1WkMaterial"]),
+            _i(r["IncludeFlag"]), _i(r["ReRank"]))
         stats["pm_upserted"] += 1
 
     conn.commit()
