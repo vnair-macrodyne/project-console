@@ -5,6 +5,7 @@ budget roll-ups and ETO actual re-codes share one mapping.
 """
 from dataclasses import dataclass
 
+from console.infra.db import exmany
 from console.infra.errors import StoreReadError, StoreWriteError
 from console.infra.logging_config import get_logger
 
@@ -45,9 +46,9 @@ class CrosswalkDAO:
         try:
             cur = self._conn.cursor()
             cur.execute("DELETE FROM Reporting.tlkpDisciplineCrosswalk")
-            cur.executemany(
-                "INSERT INTO Reporting.tlkpDisciplineCrosswalk(HourDescription, Discipline) "
-                "VALUES (?, ?)", rows)
+            exmany(cur,
+                   "INSERT INTO Reporting.tlkpDisciplineCrosswalk(HourDescription, Discipline) "
+                   "VALUES (?, ?)", rows)
             self._conn.commit()
             log.info("crosswalk replaced: %d mappings", len(rows))
             return len(rows)

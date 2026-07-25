@@ -42,8 +42,11 @@ _BUDGET_COMPARE = ["POShipDate", "CustAgreedShipDate", "MaterialBudget",
 
 
 def _d(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
+    try:
+        if x is None or pd.isna(x):          # None, NaN, NaT, pd.NA
+            return None
+    except (TypeError, ValueError):
+        pass
     if isinstance(x, _dt.datetime):
         x = x.date()
     if isinstance(x, _dt.date):
@@ -70,6 +73,28 @@ def _i(x):
         return int(float(x))
     except (TypeError, ValueError):
         return None
+
+
+import numpy as _np
+
+
+def _scrub(x):
+    """Make ANY value pyodbc-safe: numpy scalar → native python; NaN/NaT/NA → None.
+    This is the single guard that stops DataFrame values (which turn None into NaN,
+    and dates into NaT) from ever reaching the SQL driver as an invalid type."""
+    if isinstance(x, _np.generic):
+        x = x.item()
+    try:
+        if x is None or pd.isna(x):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return x
+
+
+def _ex(cur, sql, *params):
+    """Execute with every bound parameter scrubbed. Use for ALL parameterised writes."""
+    return cur.execute(sql, *[_scrub(p) for p in params])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,53 +196,55 @@ def sync(conn, pack_path, all_weeks=True, effective=None, by="console_sync"):
     # crosswalk (delete+insert; tiny table)
     cur.execute("DELETE FROM Reporting.tlkpDisciplineCrosswalk;")
     for _, r in xw.iterrows():
-        cur.execute("INSERT INTO Reporting.tlkpDisciplineCrosswalk(HourDescription,Discipline) VALUES(?,?)",
-                    r["HourDescription"], r["Discipline"])
+        _ex(cur, "INSERT INTO Reporting.tlkpDisciplineCrosswalk(HourDescription,Discipline) VALUES(?,?)",
+            r["HourDescription"], r["Discipline"])
 
-    # budgets — SCD-2
+    # budgets — SCD-2.  Every parameterised write goes through _ex → scrubbed binds.
     detail_by_pid = {pid: g for pid, g in detail.groupby(detail["ProjectID"])} if not detail.empty else {}
     for _, new in headers.iterrows():
         pid = int(new["ProjectID"])
-        cur.execute(f"SELECT BudgetVersionID,{','.join(_BUDGET_COMPARE)} "
-                    f"FROM Reporting.tblProjectBudget WHERE ProjectID=? AND IsCurrent=1", pid)
+        _ex(cur, f"SELECT BudgetVersionID,{','.join(_BUDGET_COMPARE)} "
+                 f"FROM Reporting.tblProjectBudget WHERE ProjectID=? AND IsCurrent=1", pid)
         row = cur.fetchone()
         cur_row = dict(zip(["BudgetVersionID"] + _BUDGET_COMPARE, row)) if row else None
         if cur_row and not _changed(cur_row, new):
             stats["budget_unchanged"] += 1
             continue
         if cur_row:
-            cur.execute("UPDATE Reporting.tblProjectBudget SET IsCurrent=0,EffectiveTo=? "
-                        "WHERE BudgetVersionID=?", effective, cur_row["BudgetVersionID"])
-        cur.execute(
+            _ex(cur, "UPDATE Reporting.tblProjectBudget SET IsCurrent=0,EffectiveTo=? "
+                     "WHERE BudgetVersionID=?", effective, cur_row["BudgetVersionID"])
+        _ex(cur,
             "INSERT INTO Reporting.tblProjectBudget(ProjectID,EffectiveFrom,IsCurrent,Source,"
             "POShipDate,CustAgreedShipDate,MaterialBudget,LabourBudgetHours,PMHours,"
             "MechanicalHours,ElectricalHours,HydraulicHours,ManufacturingHours,OtherHours,CreatedBy) "
             "OUTPUT INSERTED.BudgetVersionID VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)",
-            pid, effective, f"Budgets.xlsx@{effective}", new["POShipDate"], new["CustAgreedShipDate"],
-            new["MaterialBudget"], new["LabourBudgetHours"], new["PMHours"], new["MechanicalHours"],
-            new["ElectricalHours"], new["HydraulicHours"], new["ManufacturingHours"], new["OtherHours"], by)
+            pid, effective, f"Budgets.xlsx@{effective}",
+            _d(new["POShipDate"]), _d(new["CustAgreedShipDate"]),
+            _n(new["MaterialBudget"]), _n(new["LabourBudgetHours"]), _n(new["PMHours"]),
+            _n(new["MechanicalHours"]), _n(new["ElectricalHours"]), _n(new["HydraulicHours"]),
+            _n(new["ManufacturingHours"]), _n(new["OtherHours"]), by)
         vid = cur.fetchone()[0]
         for _, dr in detail_by_pid.get(str(pid), pd.DataFrame()).iterrows():
-            cur.execute("INSERT INTO Reporting.tblProjectBudgetDetail(BudgetVersionID,HourDescription,BudgetHours) "
-                        "VALUES(?,?,?)", vid, dr["HourDescription"], _n(dr["BudgetHours"]))
+            _ex(cur, "INSERT INTO Reporting.tblProjectBudgetDetail(BudgetVersionID,HourDescription,BudgetHours) "
+                     "VALUES(?,?,?)", vid, dr["HourDescription"], _n(dr["BudgetHours"]))
         stats["budget_new"] += 1
 
     # PM entries — upsert by (ProjectID, YearWeekKey)
     for _, r in pm.iterrows():
-        cur.execute("DELETE FROM Reporting.tblProjectPMEntry WHERE ProjectID=? AND YearWeekKey=?",
-                    int(r["ProjectID"]), int(r["YearWeekKey"]))
-        cur.execute(
+        _ex(cur, "DELETE FROM Reporting.tblProjectPMEntry WHERE ProjectID=? AND YearWeekKey=?",
+            int(r["ProjectID"]), int(r["YearWeekKey"]))
+        _ex(cur,
             "INSERT INTO Reporting.tblProjectPMEntry(ProjectID,FiscalYear,WeekNo,YearWeekKey,"
             "PlannedShipDate,PercentComplete,LabourRunout,MaterialRunout,MaterialActual,MaterialBudget,"
             "TotalLineItems,LLTPOrdered,LLTPReleasedLate,LLTPOrderedLate,LLTPDeliveredLate,"
             "PartsReleasedLate,PartsOrderedLate,Delta1WkPercentDone,Delta1WkMaterial,IncludeFlag,ReRank) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            int(r["ProjectID"]), r["FiscalYear"], r["WeekNo"], int(r["YearWeekKey"]),
-            r["PlannedShipDate"], r["PercentComplete"], r["LabourRunout"], r["MaterialRunout"],
-            r["MaterialActual"], r["MaterialBudget"], r["TotalLineItems"], r["LLTPOrdered"],
-            r["LLTPReleasedLate"], r["LLTPOrderedLate"], r["LLTPDeliveredLate"], r["PartsReleasedLate"],
-            r["PartsOrderedLate"], r["Delta1WkPercentDone"], r["Delta1WkMaterial"],
-            r["IncludeFlag"], r["ReRank"])
+            int(r["ProjectID"]), _i(r["FiscalYear"]), _i(r["WeekNo"]), int(r["YearWeekKey"]),
+            _d(r["PlannedShipDate"]), _n(r["PercentComplete"]), _n(r["LabourRunout"]), _n(r["MaterialRunout"]),
+            _n(r["MaterialActual"]), _n(r["MaterialBudget"]), _i(r["TotalLineItems"]), _i(r["LLTPOrdered"]),
+            _i(r["LLTPReleasedLate"]), _i(r["LLTPOrderedLate"]), _i(r["LLTPDeliveredLate"]), _i(r["PartsReleasedLate"]),
+            _i(r["PartsOrderedLate"]), _n(r["Delta1WkPercentDone"]), _n(r["Delta1WkMaterial"]),
+            _i(r["IncludeFlag"]), _i(r["ReRank"]))
         stats["pm_upserted"] += 1
 
     conn.commit()

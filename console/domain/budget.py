@@ -6,6 +6,7 @@ allocation roll-ups) + tblProjectBudgetDetail (fine-grain hours). One DO per pro
 from dataclasses import dataclass, field
 from datetime import date
 
+from console.infra.db import ex
 from console.infra.errors import StoreReadError, StoreWriteError
 from console.infra.logging_config import get_logger
 
@@ -112,10 +113,10 @@ class BudgetDAO:
         """SCD-2 upsert: new version only when values changed. Returns BudgetVersionID."""
         try:
             cur = self._conn.cursor()
-            cur.execute("UPDATE Reporting.tblProjectBudget SET IsCurrent=0, EffectiveTo=? "
-                        "WHERE ProjectID=? AND IsCurrent=1", effective, budget.project_id)
+            ex(cur, "UPDATE Reporting.tblProjectBudget SET IsCurrent=0, EffectiveTo=? "
+                    "WHERE ProjectID=? AND IsCurrent=1", effective, budget.project_id)
             dh = budget.discipline_hours
-            cur.execute(
+            ex(cur,
                 "INSERT INTO Reporting.tblProjectBudget(ProjectID,EffectiveFrom,IsCurrent,Source,"
                 "POShipDate,CustAgreedShipDate,MaterialBudget,LabourBudgetHours,PMHours,"
                 "MechanicalHours,ElectricalHours,HydraulicHours,ManufacturingHours,OtherHours,CreatedBy) "
@@ -127,9 +128,9 @@ class BudgetDAO:
                 dh.get("Manufacturing"), dh.get("Other"), created_by)
             vid = cur.fetchone()[0]
             for line in budget.detail:
-                cur.execute("INSERT INTO Reporting.tblProjectBudgetDetail"
-                            "(BudgetVersionID,HourDescription,BudgetHours) VALUES(?,?,?)",
-                            vid, line.hour_description, line.budget_hours)
+                ex(cur, "INSERT INTO Reporting.tblProjectBudgetDetail"
+                        "(BudgetVersionID,HourDescription,BudgetHours) VALUES(?,?,?)",
+                        vid, line.hour_description, line.budget_hours)
             self._conn.commit()
             log.info("budget v%s written for project %s", vid, budget.project_id)
             return vid
