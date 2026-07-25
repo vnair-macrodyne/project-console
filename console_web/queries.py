@@ -616,8 +616,8 @@ _COLS_SPEND = [("ProjectID","Project ID","id","left",False),("JobName","Job Name
     ("LabourCost","Labour Cost","money","right",False)]
 
 _LAB_NOTE = ("Applied-rate cost (HourTime × HourRate × HourFactor), live from ETO. "
-             "Labour Cat. = Hour Description · Reg/OT = Hour Class · Machine/Code = spec · "
-             "Job Detail = ProcessSummary (confirm on live run).")
+             "Labour Cat. = Hour Description · Reg/OT = Hour Class · Job Detail = spec/line-item "
+             "(SDescription) · Mach.Code = SpecID · Machine = equipment type.")
 
 
 def _cols(defs):
@@ -639,14 +639,14 @@ def _live_labour_costing(cur, pids, dfrom, dto):
     """Finest grain shared by Project Costing + Departmental Costing."""
     cur.execute(f"""
         SELECT t.ProjectID, t.PDescription AS JobName, t.DeptName AS Department,
-               t.HourDescription AS LaborCategory, t.ProcessSummary AS JobDetail, t.Customer,
-               CAST(t.SpecID AS int) AS MachineCode, t.SDescription AS Machine, t.HourClass AS RegularOT,
+               t.HourDescription AS LaborCategory, t.SDescription AS JobDetail, t.Customer,
+               CAST(t.SpecID AS int) AS MachineCode, t.MachineTypeName AS Machine, t.HourClass AS RegularOT,
                COUNT(DISTINCT t.EmployeeID) AS Employees, COUNT(*) AS Entries,
                SUM(t.HourTime) AS Hours, SUM({_APPLIED}) AS LabourCost
         FROM dbo.vwTimecards t
         WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        GROUP BY t.ProjectID, t.PDescription, t.DeptName, t.HourDescription, t.ProcessSummary,
-                 t.Customer, CAST(t.SpecID AS int), t.SDescription, t.HourClass
+        GROUP BY t.ProjectID, t.PDescription, t.DeptName, t.HourDescription, t.SDescription,
+                 t.Customer, CAST(t.SpecID AS int), t.MachineTypeName, t.HourClass
     """)
     return [{"ProjectID": _int(r[0]), "JobName": r[1], "Department": r[2], "LaborCategory": r[3],
              "JobDetail": r[4], "Customer": r[5], "MachineCode": _int(r[6]), "Machine": r[7],
@@ -668,14 +668,14 @@ def _live_labour_wages(cur, pids, dfrom, dto):
     cur.execute(f"""
         SELECT TOP {_DETAIL_CAP + 1} t.EmpNumber AS EmpNo, {_EMP_NAME} AS Employee,
                t.DeptName AS Department, t.ProjectID, t.PDescription AS JobName,
-               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.SDescription AS Machine,
-               CAST(t.SpecID AS int) AS MachineCode, t.ProcessSummary AS JobDetail,
+               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.MachineTypeName AS Machine,
+               CAST(t.SpecID AS int) AS MachineCode, t.SDescription AS JobDetail,
                CAST(t.TimeDate AS date) AS WorkDate, COUNT(*) AS Entries, SUM(t.HourTime) AS Hours,
                t.HourRate AS Rate, SUM({_APPLIED}) AS WagesPayable
         FROM dbo.vwTimecards t {_EMP_JOIN}
         WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
         GROUP BY t.EmpNumber, {_EMP_NAME}, t.DeptName, t.ProjectID, t.PDescription, t.HourDescription,
-                 t.HourClass, t.SDescription, CAST(t.SpecID AS int), t.ProcessSummary,
+                 t.HourClass, t.MachineTypeName, CAST(t.SpecID AS int), t.SDescription,
                  CAST(t.TimeDate AS date), t.HourRate
         ORDER BY t.DeptName, {_EMP_NAME}, CAST(t.TimeDate AS date) DESC
     """)
@@ -693,8 +693,8 @@ def _live_labour_detail(cur, pids, dfrom, dto):
     cur.execute(f"""
         SELECT TOP {_DETAIL_CAP + 1} t.DeptName AS Department, t.EmpNumber AS EmpNo,
                {_EMP_NAME} AS Employee, t.ProjectID, t.PDescription AS JobName,
-               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.SDescription AS Machine,
-               CAST(t.SpecID AS int) AS MachineCode, t.ProcessSummary AS JobDetail, t.Customer,
+               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.MachineTypeName AS Machine,
+               CAST(t.SpecID AS int) AS MachineCode, t.SDescription AS JobDetail, t.Customer,
                t.HourRate AS Rate, t.HourFactor AS Factor, CAST(t.TimeDate AS date) AS WorkDate,
                t.HourTime AS Hours, {_APPLIED} AS Cost
         FROM dbo.vwTimecards t {_EMP_JOIN}
@@ -1134,7 +1134,8 @@ class DemoQueryService(QueryService):
                 out.append({"Department": dept, "EmpNo": emp, "Employee": f"Emp {emp}",
                             "ProjectID": pid, "JobName": e["name"], "LaborCategory": hd,
                             "RegularOT": ("Overtime" if ot == "OT" else "Regular"),
-                            "Machine": "Press Frame", "MachineCode": 1, "JobDetail": f"{dept} build",
+                            "Machine": f"Equipment - {dept.split()[0]}", "MachineCode": 1,
+                            "JobDetail": e["name"],
                             "Customer": e["client"], "Rate": float(rate), "Factor": factor,
                             "WorkDate": d, "Hours": float(hrs), "Cost": round(hrs * rate * factor, 2)})
         return out
