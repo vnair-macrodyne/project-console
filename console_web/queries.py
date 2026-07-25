@@ -66,12 +66,12 @@ class QueryResult:
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
-              "labour_summary", "labour_detail", "labour_by_dept",
+              "labour_proj", "labour_dept", "labour_wages", "labour_detail", "labour_spend",
               "po_summary", "po_detail", "po_exception",
               "nc_summary", "nc_detail"}
 
 # reports that read ETO live and honour the optional date range
-ETO_REPORT_IDS = {"labour_summary", "labour_detail", "labour_by_dept",
+ETO_REPORT_IDS = {"labour_proj", "labour_dept", "labour_wages", "labour_detail", "labour_spend",
                   "po_summary", "po_detail", "po_exception", "nc_summary", "nc_detail"}
 
 
@@ -100,15 +100,21 @@ def catalogue():
         {"id": "crosswalk", "menu": "Dashboards", "label": f"{L('crosswalk')} (map)",
          "desc": f"The {L('hour_description')} → {disc.lower()} mapping (reference).",
          "needs_projects": False},
-        # ── Labour ────────────────────────────────────────────────────────
-        {"id": "labour_summary", "menu": labour, "label": "Summary",
-         "desc": f"Actual hours & cost (applied rate) by {proj.lower()} and department.",
+        # ── Labour (replicates the eto-reporting labour suite) ─────────────
+        {"id": "labour_proj", "menu": labour, "label": "Project Costing",
+         "desc": f"{proj} → department → labour category → job detail: hours & applied-rate cost.",
          "needs_projects": True},
-        {"id": "labour_detail", "menu": labour, "label": "Details — All",
-         "desc": "Timecard-level audit trail — date, employee, department, hours, rate, cost.",
+        {"id": "labour_dept", "menu": labour, "label": "Departmental Costing",
+         "desc": f"Department → {proj.lower()} → labour category: hours & applied-rate cost.",
          "needs_projects": True},
-        {"id": "labour_by_dept", "menu": labour, "label": "Details — Department-wise",
-         "desc": f"Hours & cost rolled up department → {proj.lower()} (applied rate).",
+        {"id": "labour_wages", "menu": labour, "label": "Wages Payable",
+         "desc": f"Employee → {proj.lower()} → job detail by date, with rate and payable.",
+         "needs_projects": True},
+        {"id": "labour_detail", "menu": labour, "label": "Labour Detail",
+         "desc": "Full timecard audit trail — every line, applied-rate cost.",
+         "needs_projects": True},
+        {"id": "labour_spend", "menu": labour, "label": "Project Labour Spend",
+         "desc": f"{proj}s by department & employee — hours & applied-rate cost.",
          "needs_projects": True},
         # ── Purchasing ────────────────────────────────────────────────────
         {"id": "po_summary", "menu": "Purchasing", "label": "Summary",
@@ -293,14 +299,20 @@ class LiveQueryService(QueryService):
         return _crosswalk_result(rows)
 
     # -- ETO report families (read from ETO, scoped to projects + date window) --
-    def _q_labour_summary(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_labour_summary(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _q_labour_proj(self, project_ids, date_from=None, date_to=None, **kw):
+        return _labour_proj_result(_live_labour_costing(self._eto_conn().cursor(), project_ids, date_from, date_to))
+
+    def _q_labour_dept(self, project_ids, date_from=None, date_to=None, **kw):
+        return _labour_dept_result(_live_labour_costing(self._eto_conn().cursor(), project_ids, date_from, date_to))
+
+    def _q_labour_wages(self, project_ids, date_from=None, date_to=None, **kw):
+        return _live_labour_wages(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
     def _q_labour_detail(self, project_ids, date_from=None, date_to=None, **kw):
         return _live_labour_detail(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
-    def _q_labour_by_dept(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_labour_by_dept(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _q_labour_spend(self, project_ids, date_from=None, date_to=None, **kw):
+        return _live_labour_spend(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
     def _q_po_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _live_po_summary(self._eto_conn().cursor(), project_ids, date_from, date_to)
@@ -561,119 +573,157 @@ def _date_clause(col, dfrom, dto):
     return (" AND " + " AND ".join(parts)) if parts else ""
 
 
-# ---- Labour --------------------------------------------------------------
-def _labour_summary_result(rows):
-    proj, labour = L("project"), L("labour")
-    cols = [
-        QueryColumn("ProjectID", "Proj ID", "id", "left"),
-        QueryColumn("Project", proj, "text", "left", wrap=True),
-        QueryColumn("Department", "Department", "text", "left"),
-        QueryColumn("Employees", "Employees", "int", "right"),
-        QueryColumn("Entries", "Entries", "int", "right"),
-        QueryColumn("Hours", "Hours", "hours", "right"),
-        QueryColumn("Cost", "Cost", "money", "right"),
-    ]
-    cards = [
-        Card("Total hours", _fmt_hours(sum(r.get("Hours") or 0 for r in rows))),
-        Card("Total cost", _fmt_money(sum(r.get("Cost") or 0 for r in rows))),
-        Card("Lines", str(len(rows))),
-    ]
-    note = f"{labour} — applied-rate cost (HourTime × HourRate × HourFactor), live from ETO."
-    return QueryResult("labour_summary", f"{labour} Summary", cols, rows, cards, note)
+# ---- Labour (eto-reporting report set — vwTimecards / applied-rate) ----------
+_APPLIED = "t.HourTime * t.HourRate * t.HourFactor"
+_EMP_NAME = "ISNULL(e.EmpLastName + ', ' + e.EmpFirstName, t.EmpNumber)"
+_EMP_JOIN = "LEFT JOIN dbo.tblEmployee e ON e.EmployeeID = t.EmployeeID"
+
+# Column contracts mirror eto_config.py COLS_* — (key, label, type, align, wrap)
+_COLS_PROJ = [("ProjectID","Project ID","id","left",False),("JobName","Job Name","text","left",True),
+    ("Department","Department","text","left",False),("LaborCategory","Labour Cat.","text","left",False),
+    ("JobDetail","Job Detail","text","left",False),("Customer","Customer","text","left",False),
+    ("MachineCode","Mach.Code","id","left",False),("Machine","Machine","text","left",False),
+    ("RegularOT","Reg/OT","text","left",False),("Employees","Employees","int","right",False),
+    ("Entries","Entries","int","right",False),("Hours","Hours","hours","right",False),
+    ("LabourCost","Labour Cost","money","right",False)]
+_COLS_DEPT = [("Department","Department","text","left",False),("ProjectID","Project ID","id","left",False),
+    ("JobName","Job Name","text","left",True),("Customer","Customer","text","left",False),
+    ("LaborCategory","Labour Cat.","text","left",False),("MachineCode","Mach.Code","id","left",False),
+    ("Machine","Machine","text","left",False),("JobDetail","Job Detail","text","left",False),
+    ("RegularOT","Reg/OT","text","left",False),("Employees","Employees","int","right",False),
+    ("Entries","Entries","int","right",False),("Hours","Hours","hours","right",False),
+    ("LabourCost","Labour Cost","money","right",False)]
+_COLS_WAGES = [("EmpNo","Emp No","id","left",False),("Employee","Employee","text","left",False),
+    ("Department","Department","text","left",False),("ProjectID","Project ID","id","left",False),
+    ("JobName","Job Name","text","left",True),("LaborCategory","Labour Cat.","text","left",False),
+    ("RegularOT","Reg/OT","text","left",False),("Machine","Machine","text","left",False),
+    ("MachineCode","Mach.Code","id","left",False),("JobDetail","Job Detail","text","left",False),
+    ("WorkDate","Date","date","left",False),("Entries","Entries","int","right",False),
+    ("Hours","Hours","hours","right",False),("Rate","Rate","money","right",False),
+    ("WagesPayable","Wages Payable","money","right",False)]
+_COLS_DETAIL = [("Department","Department","text","left",False),("EmpNo","Emp No","id","left",False),
+    ("Employee","Employee","text","left",False),("ProjectID","Project ID","id","left",False),
+    ("JobName","Job Name","text","left",True),("LaborCategory","Labour Cat.","text","left",False),
+    ("RegularOT","Reg/OT","text","left",False),("Machine","Machine","text","left",False),
+    ("MachineCode","Mach.Code","id","left",False),("JobDetail","Job Detail","text","left",False),
+    ("Customer","Customer","text","left",False),("Rate","Rate","money","right",False),
+    ("Factor","Factor","num","right",False),("WorkDate","Date","date","left",False),
+    ("Hours","Hours","hours","right",False),("Cost","Cost","money","right",False)]
+_COLS_SPEND = [("ProjectID","Project ID","id","left",False),("JobName","Job Name","text","left",True),
+    ("Department","Department","text","left",False),("Employee","Employee","text","left",False),
+    ("EmpNo","Emp No","id","left",False),("RegularOT","Reg/OT","text","left",False),
+    ("Entries","Entries","int","right",False),("Hours","Hours","hours","right",False),
+    ("LabourCost","Labour Cost","money","right",False)]
+
+_LAB_NOTE = ("Applied-rate cost (HourTime × HourRate × HourFactor), live from ETO. "
+             "Labour Cat. = Hour Description · Reg/OT = Hour Class · Machine/Code = spec · "
+             "Job Detail = ProcessSummary (confirm on live run).")
 
 
-def _labour_detail_result(rows, capped=False):
-    labour = L("labour")
-    cols = [
-        QueryColumn("WorkDate", "Date", "date", "left"),
-        QueryColumn("ProjectID", "Proj ID", "id", "left"),
-        QueryColumn("Employee", "Employee", "text", "left"),
-        QueryColumn("Department", "Department", "text", "left"),
-        QueryColumn("HourDescription", L("hour_description"), "text", "left", wrap=True),
-        QueryColumn("HourClass", "Class", "text", "left"),
-        QueryColumn("Hours", "Hours", "hours", "right"),
-        QueryColumn("Rate", "Rate", "money", "right"),
-        QueryColumn("Cost", "Cost", "money", "right"),
-    ]
-    cards = [Card("Timecards", str(len(rows))),
-             Card("Total hours", _fmt_hours(sum(r.get("Hours") or 0 for r in rows))),
-             Card("Total cost", _fmt_money(sum(r.get("Cost") or 0 for r in rows)))]
-    note = (f"{L('labour')} detail — applied-rate cost, live from ETO, newest first."
-            + (_cap_note(rows, "WorkDate") if capped else ""))
-    return QueryResult("labour_detail", f"{L('labour')} Detail", cols, rows, cards, note)
+def _cols(defs):
+    return [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in defs]
 
 
-def _live_labour_summary(cur, pids, dfrom, dto):
+def _lab_cards(rows, cost_key):
+    return [Card("Rows", str(len(rows))),
+            Card("Total hours", _fmt_hours(sum(r.get("Hours") or 0 for r in rows))),
+            Card("Total cost", _fmt_money(sum(r.get(cost_key) or 0 for r in rows)))]
+
+
+def _labour_result(qid, title, defs, rows, cost_key, capped=False):
+    note = _LAB_NOTE + (_cap_note(rows, "WorkDate") if capped else "")
+    return QueryResult(qid, title, _cols(defs), rows, _lab_cards(rows, cost_key), note)
+
+
+def _live_labour_costing(cur, pids, dfrom, dto):
+    """Finest grain shared by Project Costing + Departmental Costing."""
     cur.execute(f"""
-        SELECT t.ProjectID, MAX(t.PDescription) AS Project, t.DeptName AS Department,
+        SELECT t.ProjectID, t.PDescription AS JobName, t.DeptName AS Department,
+               t.HourDescription AS LaborCategory, t.ProcessSummary AS JobDetail, t.Customer,
+               CAST(t.SpecID AS int) AS MachineCode, t.SDescription AS Machine, t.HourClass AS RegularOT,
                COUNT(DISTINCT t.EmployeeID) AS Employees, COUNT(*) AS Entries,
-               SUM(t.HourTime) AS Hours,
-               SUM(t.HourTime * t.HourRate * t.HourFactor) AS Cost
+               SUM(t.HourTime) AS Hours, SUM({_APPLIED}) AS LabourCost
         FROM dbo.vwTimecards t
         WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        GROUP BY t.ProjectID, t.DeptName
-        ORDER BY t.ProjectID, t.DeptName
+        GROUP BY t.ProjectID, t.PDescription, t.DeptName, t.HourDescription, t.ProcessSummary,
+                 t.Customer, CAST(t.SpecID AS int), t.SDescription, t.HourClass
     """)
-    rows = [{"ProjectID": int(r[0]), "Project": r[1], "Department": r[2],
-             "Employees": _int(r[3]), "Entries": _int(r[4]),
-             "Hours": _num(r[5]), "Cost": _num(r[6])} for r in cur.fetchall()]
-    return _labour_summary_result(rows)
+    return [{"ProjectID": _int(r[0]), "JobName": r[1], "Department": r[2], "LaborCategory": r[3],
+             "JobDetail": r[4], "Customer": r[5], "MachineCode": _int(r[6]), "Machine": r[7],
+             "RegularOT": r[8], "Employees": _int(r[9]), "Entries": _int(r[10]),
+             "Hours": _num(r[11]), "LabourCost": _num(r[12])} for r in cur.fetchall()]
+
+
+def _labour_proj_result(rows):
+    rows = sorted(rows, key=lambda x: (x["ProjectID"] or 0, x["Department"] or "", x["LaborCategory"] or ""))
+    return _labour_result("labour_proj", f"{L('labour')} — Project Costing", _COLS_PROJ, rows, "LabourCost")
+
+
+def _labour_dept_result(rows):
+    rows = sorted(rows, key=lambda x: (x["Department"] or "", x["ProjectID"] or 0, x["LaborCategory"] or ""))
+    return _labour_result("labour_dept", f"{L('labour')} — Departmental Costing", _COLS_DEPT, rows, "LabourCost")
+
+
+def _live_labour_wages(cur, pids, dfrom, dto):
+    cur.execute(f"""
+        SELECT TOP {_DETAIL_CAP + 1} t.EmpNumber AS EmpNo, {_EMP_NAME} AS Employee,
+               t.DeptName AS Department, t.ProjectID, t.PDescription AS JobName,
+               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.SDescription AS Machine,
+               CAST(t.SpecID AS int) AS MachineCode, t.ProcessSummary AS JobDetail,
+               CAST(t.TimeDate AS date) AS WorkDate, COUNT(*) AS Entries, SUM(t.HourTime) AS Hours,
+               t.HourRate AS Rate, SUM({_APPLIED}) AS WagesPayable
+        FROM dbo.vwTimecards t {_EMP_JOIN}
+        WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
+        GROUP BY t.EmpNumber, {_EMP_NAME}, t.DeptName, t.ProjectID, t.PDescription, t.HourDescription,
+                 t.HourClass, t.SDescription, CAST(t.SpecID AS int), t.ProcessSummary,
+                 CAST(t.TimeDate AS date), t.HourRate
+        ORDER BY t.DeptName, {_EMP_NAME}, CAST(t.TimeDate AS date) DESC
+    """)
+    raw = cur.fetchall(); capped = len(raw) > _DETAIL_CAP
+    rows = [{"EmpNo": r[0], "Employee": r[1], "Department": r[2], "ProjectID": _int(r[3]),
+             "JobName": r[4], "LaborCategory": r[5], "RegularOT": r[6], "Machine": r[7],
+             "MachineCode": _int(r[8]), "JobDetail": r[9], "WorkDate": _iso(r[10]),
+             "Entries": _int(r[11]), "Hours": _num(r[12]), "Rate": _num(r[13]),
+             "WagesPayable": _num(r[14])} for r in raw[:_DETAIL_CAP]]
+    return _labour_result("labour_wages", f"{L('labour')} — Wages Payable", _COLS_WAGES, rows,
+                          "WagesPayable", capped)
 
 
 def _live_labour_detail(cur, pids, dfrom, dto):
     cur.execute(f"""
-        SELECT TOP {_DETAIL_CAP + 1} CAST(t.TimeDate AS date) AS WorkDate, t.ProjectID,
-               t.EmpNumber AS Employee, t.DeptName AS Department,
-               t.HourDescription, t.HourClass,
-               t.HourTime AS Hours, t.HourRate AS Rate,
-               t.HourTime * t.HourRate * t.HourFactor AS Cost
-        FROM dbo.vwTimecards t
+        SELECT TOP {_DETAIL_CAP + 1} t.DeptName AS Department, t.EmpNumber AS EmpNo,
+               {_EMP_NAME} AS Employee, t.ProjectID, t.PDescription AS JobName,
+               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.SDescription AS Machine,
+               CAST(t.SpecID AS int) AS MachineCode, t.ProcessSummary AS JobDetail, t.Customer,
+               t.HourRate AS Rate, t.HourFactor AS Factor, CAST(t.TimeDate AS date) AS WorkDate,
+               t.HourTime AS Hours, {_APPLIED} AS Cost
+        FROM dbo.vwTimecards t {_EMP_JOIN}
         WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        ORDER BY t.TimeDate DESC, t.ProjectID
+        ORDER BY t.TimeDate DESC, t.DeptName, t.EmpNumber
     """)
-    raw = cur.fetchall()
-    capped = len(raw) > _DETAIL_CAP
-    rows = [{"WorkDate": _iso(r[0]), "ProjectID": int(r[1]), "Employee": str(r[2]),
-             "Department": r[3], "HourDescription": r[4], "HourClass": r[5],
-             "Hours": _num(r[6]), "Rate": _num(r[7]), "Cost": _num(r[8])}
-            for r in raw[:_DETAIL_CAP]]
-    return _labour_detail_result(rows, capped)
+    raw = cur.fetchall(); capped = len(raw) > _DETAIL_CAP
+    rows = [{"Department": r[0], "EmpNo": r[1], "Employee": r[2], "ProjectID": _int(r[3]),
+             "JobName": r[4], "LaborCategory": r[5], "RegularOT": r[6], "Machine": r[7],
+             "MachineCode": _int(r[8]), "JobDetail": r[9], "Customer": r[10], "Rate": _num(r[11]),
+             "Factor": _num(r[12]), "WorkDate": _iso(r[13]), "Hours": _num(r[14]),
+             "Cost": _num(r[15])} for r in raw[:_DETAIL_CAP]]
+    return _labour_result("labour_detail", f"{L('labour')} Detail", _COLS_DETAIL, rows, "Cost", capped)
 
 
-def _labour_by_dept_result(rows):
-    proj, labour = L("project"), L("labour")
-    cols = [
-        QueryColumn("Department", "Department", "text", "left"),
-        QueryColumn("ProjectID", "Proj ID", "id", "left"),
-        QueryColumn("Project", proj, "text", "left", wrap=True),
-        QueryColumn("Employees", "Employees", "int", "right"),
-        QueryColumn("Entries", "Entries", "int", "right"),
-        QueryColumn("Hours", "Hours", "hours", "right"),
-        QueryColumn("Cost", "Cost", "money", "right"),
-    ]
-    depts = {r.get("Department") for r in rows}
-    cards = [Card("Departments", str(len(depts))),
-             Card("Total hours", _fmt_hours(sum(r.get("Hours") or 0 for r in rows))),
-             Card("Total cost", _fmt_money(sum(r.get("Cost") or 0 for r in rows)))]
-    return QueryResult("labour_by_dept", f"{labour} — Department-wise", cols, rows, cards,
-                       "Hours & applied-rate cost rolled up department → project, live from ETO.")
-
-
-def _live_labour_by_dept(cur, pids, dfrom, dto):
+def _live_labour_spend(cur, pids, dfrom, dto):
     cur.execute(f"""
-        SELECT t.DeptName AS Department, t.ProjectID, MAX(t.PDescription) AS Project,
-               COUNT(DISTINCT t.EmployeeID) AS Employees, COUNT(*) AS Entries,
-               SUM(t.HourTime) AS Hours,
-               SUM(t.HourTime * t.HourRate * t.HourFactor) AS Cost
-        FROM dbo.vwTimecards t
+        SELECT t.ProjectID, t.PDescription AS JobName, t.DeptName AS Department,
+               {_EMP_NAME} AS Employee, t.EmpNumber AS EmpNo, t.HourClass AS RegularOT,
+               COUNT(*) AS Entries, SUM(t.HourTime) AS Hours, SUM({_APPLIED}) AS LabourCost
+        FROM dbo.vwTimecards t {_EMP_JOIN}
         WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        GROUP BY t.DeptName, t.ProjectID
-        ORDER BY t.DeptName, t.ProjectID
+        GROUP BY t.ProjectID, t.PDescription, t.DeptName, {_EMP_NAME}, t.EmpNumber, t.HourClass
+        ORDER BY t.ProjectID, t.DeptName, {_EMP_NAME}
     """)
-    rows = [{"Department": r[0], "ProjectID": int(r[1]), "Project": r[2],
-             "Employees": _int(r[3]), "Entries": _int(r[4]),
-             "Hours": _num(r[5]), "Cost": _num(r[6])} for r in cur.fetchall()]
-    return _labour_by_dept_result(rows)
+    rows = [{"ProjectID": _int(r[0]), "JobName": r[1], "Department": r[2], "Employee": r[3],
+             "EmpNo": r[4], "RegularOT": r[5], "Entries": _int(r[6]), "Hours": _num(r[7]),
+             "LabourCost": _num(r[8])} for r in cur.fetchall()]
+    return _labour_result("labour_spend", f"{L('labour')} — Project Spend", _COLS_SPEND, rows, "LabourCost")
 
 
 # ---- Purchase ------------------------------------------------------------
@@ -1074,39 +1124,65 @@ class DemoQueryService(QueryService):
                 for hd, disc in sorted(_DEMO_XWALK.items())]
         return _crosswalk_result(rows)
 
-    # -- ETO report families (canned) ------------------------------------------
-    def _q_labour_summary(self, project_ids, date_from=None, date_to=None, **kw):
-        rows = []
+    # -- ETO report families (canned; the 5 eto-reporting labour reports) -------
+    def _demo_labour_rows(self, project_ids):
+        out = []
         for pid in self._sel(project_ids):
-            name = _DEMO_EXEC[pid]["name"]
-            for dept, emps, entries, hours, cost in _DEMO_LABOUR[pid]:
-                rows.append({"ProjectID": pid, "Project": name, "Department": dept,
-                             "Employees": emps, "Entries": entries,
-                             "Hours": float(hours), "Cost": float(cost)})
-        return _labour_summary_result(rows)
+            e = _DEMO_EXEC[pid]
+            for d, emp, dept, hd, ot, hrs, rate in _DEMO_LABOUR_DETAIL[pid]:
+                factor = 1.5 if ot == "OT" else 1.0
+                out.append({"Department": dept, "EmpNo": emp, "Employee": f"Emp {emp}",
+                            "ProjectID": pid, "JobName": e["name"], "LaborCategory": hd,
+                            "RegularOT": ("Overtime" if ot == "OT" else "Regular"),
+                            "Machine": "Press Frame", "MachineCode": 1, "JobDetail": f"{dept} build",
+                            "Customer": e["client"], "Rate": float(rate), "Factor": factor,
+                            "WorkDate": d, "Hours": float(hrs), "Cost": round(hrs * rate * factor, 2)})
+        return out
+
+    @staticmethod
+    def _agg(rows, keys, cost_out):
+        agg = {}
+        for r in rows:
+            k = tuple(r[x] for x in keys)
+            a = agg.setdefault(k, {"emps": set(), "Entries": 0, "Hours": 0.0, "cost": 0.0})
+            a["emps"].add(r["EmpNo"]); a["Entries"] += 1
+            a["Hours"] += r["Hours"]; a["cost"] += r["Cost"]
+        out = []
+        for k, a in agg.items():
+            row = dict(zip(keys, k))
+            row["Employees"] = len(a["emps"]); row["Entries"] = a["Entries"]
+            row["Hours"] = round(a["Hours"], 2); row[cost_out] = round(a["cost"], 2)
+            out.append(row)
+        return out
+
+    def _q_labour_proj(self, project_ids, date_from=None, date_to=None, **kw):
+        keys = ["ProjectID","JobName","Department","LaborCategory","JobDetail","Customer",
+                "MachineCode","Machine","RegularOT"]
+        return _labour_proj_result(self._agg(self._demo_labour_rows(project_ids), keys, "LabourCost"))
+
+    def _q_labour_dept(self, project_ids, date_from=None, date_to=None, **kw):
+        keys = ["ProjectID","JobName","Department","LaborCategory","JobDetail","Customer",
+                "MachineCode","Machine","RegularOT"]
+        return _labour_dept_result(self._agg(self._demo_labour_rows(project_ids), keys, "LabourCost"))
+
+    def _q_labour_wages(self, project_ids, date_from=None, date_to=None, **kw):
+        keys = ["EmpNo","Employee","Department","ProjectID","JobName","LaborCategory","RegularOT",
+                "Machine","MachineCode","JobDetail","WorkDate","Rate"]
+        rows = self._agg(self._demo_labour_rows(project_ids), keys, "WagesPayable")
+        rows.sort(key=lambda r: (r["Department"], r["Employee"], r["WorkDate"]))
+        return _labour_result("labour_wages", f"{L('labour')} — Wages Payable", _COLS_WAGES,
+                              rows, "WagesPayable")
 
     def _q_labour_detail(self, project_ids, date_from=None, date_to=None, **kw):
-        rows = []
-        for pid in self._sel(project_ids):
-            for d, emp, dept, hd, ot, hrs, rate in _DEMO_LABOUR_DETAIL[pid]:
-                rows.append({"WorkDate": d, "ProjectID": pid, "Employee": emp,
-                             "Department": dept, "HourDescription": hd,
-                             "HourClass": ("Overtime" if ot == "OT" else "Regular"),
-                             "Hours": float(hrs), "Rate": float(rate),
-                             "Cost": round(hrs * rate * (1.5 if ot == "OT" else 1.0), 2)})
+        rows = self._demo_labour_rows(project_ids)
         rows.sort(key=lambda r: r["WorkDate"], reverse=True)
-        return _labour_detail_result(rows, capped=False)
+        return _labour_result("labour_detail", f"{L('labour')} Detail", _COLS_DETAIL, rows, "Cost")
 
-    def _q_labour_by_dept(self, project_ids, date_from=None, date_to=None, **kw):
-        rows = []
-        for pid in self._sel(project_ids):
-            name = _DEMO_EXEC[pid]["name"]
-            for dept, emps, entries, hours, cost in _DEMO_LABOUR[pid]:
-                rows.append({"Department": dept, "ProjectID": pid, "Project": name,
-                             "Employees": emps, "Entries": entries,
-                             "Hours": float(hours), "Cost": float(cost)})
-        rows.sort(key=lambda r: (r["Department"], r["ProjectID"]))
-        return _labour_by_dept_result(rows)
+    def _q_labour_spend(self, project_ids, date_from=None, date_to=None, **kw):
+        keys = ["ProjectID","JobName","Department","Employee","EmpNo","RegularOT"]
+        rows = self._agg(self._demo_labour_rows(project_ids), keys, "LabourCost")
+        return _labour_result("labour_spend", f"{L('labour')} — Project Spend", _COLS_SPEND,
+                              rows, "LabourCost")
 
     def _q_po_summary(self, project_ids, date_from=None, date_to=None, **kw):
         agg = {}
