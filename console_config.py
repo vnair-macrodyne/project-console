@@ -32,6 +32,7 @@ class TenantProfile:
     # ── identity / branding ────────────────────────────────────────────────
     product_name: str = "Project Console"     # white-labelable per tenant/reseller
     tenant_id: str = "macrodyne"
+    environment: str = "prod"                 # prod | staging (set from $CONSOLE_ENV)
     company_name: str = "Macrodyne Technologies Inc."
     header_color: str = "1F3864"
     confidential_footer: str = "CONFIDENTIAL — Internal Use Only"
@@ -147,6 +148,16 @@ class TenantProfile:
         prof.reporting_pwd = os.environ.get("CONSOLE_STORE_PWD", prof.reporting_pwd)
         if os.environ.get("CONSOLE_STORE_TRUSTED") == "1":
             prof.use_windows_auth = True
+        # Reporting-store target is env-selectable so the SAME build points at staging or
+        # prod without a code change. ETO stays prod read-only (its own eto_* config), so
+        # staging tests run against a staging Reporting copy + the live read-only ETO.
+        #   CONSOLE_ENV=staging  -> default staging DB name (Macrodyne_Reporting_Staging)
+        #   CONSOLE_STORE_SERVER / CONSOLE_STORE_DB -> explicit override (win over CONSOLE_ENV)
+        if os.environ.get("CONSOLE_ENV", "").lower() in ("staging", "stage", "test"):
+            prof.reporting_database = "Macrodyne_Reporting_Staging"
+        prof.reporting_server = os.environ.get("CONSOLE_STORE_SERVER", prof.reporting_server)
+        prof.reporting_database = os.environ.get("CONSOLE_STORE_DB", prof.reporting_database)
+        prof.environment = os.environ.get("CONSOLE_ENV", "prod").lower()
         return prof
 
 

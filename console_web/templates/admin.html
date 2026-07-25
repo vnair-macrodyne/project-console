@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Console — Users & Roles</title>
+<style>
+  :root{--brand:#1F3864;--brand-2:#2f4f8f;--ink:#1a1f2b;--muted:#6b7280;--line:#e3e7ee;--entry:#FFF7DB;
+        --good:#137333;--good-bg:#e6f4ea;--bad:#b3261e;--bad-bg:#fce8e6;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:#eef1f6}
+  header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:14px}
+  header .logo{width:34px;height:34px;border-radius:8px;background:#33518c;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  header h1{font-size:16px;margin:0}
+  header .who{margin-left:auto;font-size:13px;color:#c7d4ee}
+  header a.back{color:#fff;text-decoration:none;font-size:13px;border:1px solid #4a67a0;padding:6px 12px;border-radius:8px}
+  .wrap{padding:18px 22px;max-width:900px;margin:0 auto}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  .card h2{font-size:14px;margin:0 0 12px;color:var(--brand)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 10px;border-top:1px solid var(--line);font-size:13px}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.03em;border-top:0}
+  select,input{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:13px}
+  .role{font-weight:600}
+  .badge{font-size:11px;padding:2px 8px;border-radius:20px;background:#eef3ff;color:var(--brand)}
+  .badge.admin{background:#e7e0ff;color:#4a2fbf}.badge.pm{background:#e6f4ea;color:var(--good)}
+  button{border:0;border-radius:8px;padding:8px 13px;font-size:13px;cursor:pointer}
+  button.pri{background:var(--brand);color:#fff}button.pri:hover{background:var(--brand-2)}
+  button.del{background:#fbe9e7;color:var(--bad)}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+  .fld{display:flex;flex-direction:column;gap:4px}.fld label{font-size:11px;color:var(--muted);text-transform:uppercase}
+  .msg{font-size:13px;padding:8px 12px;border-radius:8px;display:none;margin-top:8px}
+  .msg.ok{background:var(--good-bg);color:var(--good);display:block}.msg.err{background:var(--bad-bg);color:var(--bad);display:block}
+  .deny{padding:40px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" id="logo">PC</div>
+  <h1>Users &amp; Roles</h1>
+  <span class="who" id="who"></span>
+  <a class="back" href="/">← Dashboard</a>
+</header>
+<div class="wrap">
+  <div id="denied" class="card deny" style="display:none">Admin access required.</div>
+  <div id="panel" style="display:none">
+    <div class="card">
+      <h2>Grant / change a role</h2>
+      <div class="row">
+        <div class="fld"><label>Windows login</label><input id="u" placeholder="e.g. jsmith"></div>
+        <div class="fld"><label>Display name</label><input id="dn" placeholder="optional"></div>
+        <div class="fld"><label>Role</label>
+          <select id="r"><option value="viewer">Viewer</option><option value="pm">PM</option><option value="admin">Admin</option></select>
+        </div>
+        <button class="pri" id="saveU">Save</button>
+      </div>
+      <div class="msg" id="msg"></div>
+      <p style="font-size:12px;color:var(--muted);margin-top:10px">Roles: <b>Viewer</b> reads reports &amp; dashboards · <b>PM</b> also brings projects in and edits budgets · <b>Admin</b> also manages users. Anyone on the domain not listed here is a Viewer by default.</p>
+    </div>
+    <div class="card">
+      <h2>Assigned users</h2>
+      <table><thead><tr><th>Login</th><th>Display</th><th>Role</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+    </div>
+  </div>
+</div>
+<script>
+const el=id=>document.getElementById(id);
+let me=null;
+async function boot(){
+  me=await (await fetch('/api/me'+location.search)).json();
+  el('logo').textContent='PC';
+  el('who').textContent = me.user ? `${me.user} · ${me.role}${me.demo?' · DEMO':''}` : 'not signed in';
+  if(me.role!=='admin'){ el('denied').style.display='block'; return; }
+  el('panel').style.display='block';
+  await refresh();
+}
+async function refresh(){
+  const r=await fetch('/api/admin/users'+location.search); if(!r.ok){ showMsg('err','Could not load users'); return; }
+  const d=await r.json(); const tb=el('rows'); tb.innerHTML='';
+  (d.users||[]).forEach(u=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${u.username}</td><td>${u.display||''}</td>
+      <td><span class="badge ${u.role}">${u.role}</span></td>
+      <td style="text-align:right"><button class="del" data-u="${u.username}">Remove</button></td>`;
+    tb.appendChild(tr);
+  });
+  tb.querySelectorAll('button.del').forEach(b=>b.onclick=()=>removeU(b.dataset.u));
+}
+el('saveU').onclick=async()=>{
+  const u=el('u').value.trim(); if(!u){ showMsg('err','Enter a login'); return; }
+  const body={username:u, role:el('r').value, display:el('dn').value.trim()};
+  const r=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json();
+  if(!r.ok){ showMsg('err', d.error||'Save failed'); return; }
+  showMsg('ok', `Saved ${u} as ${body.role}.`); el('u').value=''; el('dn').value=''; refresh();
+};
+async function removeU(u){
+  const r=await fetch('/api/admin/users/'+encodeURIComponent(u),{method:'DELETE'});
+  if(r.ok){ showMsg('ok', `Removed ${u} (now a default Viewer).`); refresh(); }
+  else showMsg('err','Remove failed');
+}
+function showMsg(c,t){ const m=el('msg'); m.className='msg '+c; m.textContent=t; }
+boot();
+</script>
+</body>
+</html>

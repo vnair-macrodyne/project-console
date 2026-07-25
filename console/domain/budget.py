@@ -39,6 +39,7 @@ class Budget:
     is_current: bool = True
     po_ship_date: date | None = None
     cust_agreed_ship_date: date | None = None
+    late_penalty: bool | None = None
     material_budget: float | None = None
     labour_budget_hours: float | None = None
     discipline_hours: dict = field(default_factory=dict)   # discipline -> budgeted hours
@@ -64,6 +65,7 @@ class BudgetDAO:
             is_current=bool(d.get("IsCurrent", 1)),
             po_ship_date=d.get("POShipDate"),
             cust_agreed_ship_date=d.get("CustAgreedShipDate"),
+            late_penalty=(None if d.get("LatePenalty") is None else bool(d.get("LatePenalty"))),
             material_budget=_f(d.get("MaterialBudget")),
             labour_budget_hours=_f(d.get("LabourBudgetHours")),
             discipline_hours={disc: _f(d.get(col))
@@ -118,11 +120,13 @@ class BudgetDAO:
             dh = budget.discipline_hours
             ex(cur,
                 "INSERT INTO Reporting.tblProjectBudget(ProjectID,EffectiveFrom,IsCurrent,Source,"
-                "POShipDate,CustAgreedShipDate,MaterialBudget,LabourBudgetHours,PMHours,"
+                "POShipDate,CustAgreedShipDate,LatePenalty,MaterialBudget,LabourBudgetHours,PMHours,"
                 "MechanicalHours,ElectricalHours,HydraulicHours,ManufacturingHours,OtherHours,CreatedBy) "
-                "OUTPUT INSERTED.BudgetVersionID VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "OUTPUT INSERTED.BudgetVersionID VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 budget.project_id, effective, source, budget.po_ship_date,
-                budget.cust_agreed_ship_date, budget.material_budget, budget.labour_budget_hours,
+                budget.cust_agreed_ship_date,
+                (None if budget.late_penalty is None else (1 if budget.late_penalty else 0)),
+                budget.material_budget, budget.labour_budget_hours,
                 dh.get("Project Management"), dh.get("Mechanical Engineering"),
                 dh.get("Electrical Engineering"), dh.get("Hydraulic Engineering"),
                 dh.get("Manufacturing"), dh.get("Other"), created_by)

@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Console — PM Budgets</title>
+<style>
+  :root{--brand:#1F3864;--brand-2:#2f4f8f;--ink:#1a1f2b;--muted:#6b7280;--line:#e3e7ee;
+        --panel:#f7f9fc;--entry:#FFF7DB;--good:#137333;--good-bg:#e6f4ea;--bad:#b3261e;--bad-bg:#fce8e6;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:#eef1f6}
+  header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:14px}
+  header .logo{width:34px;height:34px;border-radius:8px;background:#33518c;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  header h1{font-size:16px;margin:0;font-weight:700}
+  header .co{color:#c7d4ee;font-size:13px}
+  header a.back{margin-left:auto;color:#fff;text-decoration:none;font-size:13px;border:1px solid #4a67a0;padding:6px 12px;border-radius:8px}
+  header a.back:hover{background:#33518c}
+  .wrap{padding:18px 22px;max-width:1180px;margin:0 auto}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  .card h2{font-size:14px;margin:0 0 12px;color:var(--brand)}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end}
+  .fld{display:flex;flex-direction:column;gap:4px}
+  .fld label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .fld input,.fld select{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;min-width:150px}
+  .fld input[type=number]{text-align:right}
+  input.entry{background:var(--entry)}
+  .pill{font-size:11px;padding:2px 8px;border-radius:20px;background:#eef3ff;color:var(--brand);font-weight:600}
+  .disc{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .disc .dh{background:#2E75B6;color:#fff;padding:7px 12px;font-weight:600;font-size:13px;display:flex;justify-content:space-between}
+  .disc .dh .sub{font-variant-numeric:tabular-nums}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;padding:12px}
+  .hd{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12.5px}
+  .hd span{color:#37414f;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hd input{width:92px;text-align:right;border:1px solid var(--line);border-radius:7px;padding:5px 7px;background:var(--entry);font-size:12.5px}
+  .totrow{display:flex;gap:22px;flex-wrap:wrap;margin-top:6px;padding:12px 2px 2px;border-top:2px solid var(--line)}
+  .tot{display:flex;flex-direction:column}
+  .tot .v{font-size:22px;font-weight:800}
+  .tot .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .actions{display:flex;gap:12px;align-items:center;margin-top:6px}
+  button.save{background:var(--brand);color:#fff;border:0;border-radius:9px;padding:11px 20px;font-size:14px;font-weight:600;cursor:pointer}
+  button.save:hover{background:var(--brand-2)}
+  button.save:disabled{opacity:.5;cursor:default}
+  .msg{font-size:13px;padding:8px 12px;border-radius:8px;display:none}
+  .msg.ok{background:var(--good-bg);color:var(--good);display:block}
+  .msg.err{background:var(--bad-bg);color:var(--bad);display:block}
+  .hint{font-size:12px;color:var(--muted);margin:2px 0 0}
+  .demo{background:#ffce44;color:#3a2f00;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" id="logo">PC</div>
+  <h1 id="product">Project Console</h1>
+  <span class="co" id="company"></span>
+  <span class="demo" id="demoBadge" style="display:none">DEMO DATA</span>
+  <a class="back" href="/">← Dashboard</a>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Project Budget — Set-Up</h2>
+    <p class="hint">Bring a project in or edit its budget. Saving writes a new versioned budget
+      (stamped with your name); the previous version is kept for history.</p>
+    <div class="row" style="margin-top:10px">
+      <div class="fld">
+        <label>Project</label>
+        <select id="proj"></select>
+      </div>
+      <div class="fld">
+        <label>Entered by</label>
+        <input id="by" class="entry" placeholder="Your name / initials">
+      </div>
+      <span class="pill" id="status"></span>
+    </div>
+  </div>
+
+  <div id="form" style="display:none">
+    <div class="card">
+      <h2>General</h2>
+      <div class="row">
+        <div class="fld"><label>PO Ship Date</label><input type="date" id="po_ship" class="entry"></div>
+        <div class="fld"><label>Customer Agreed Ship Date</label><input type="date" id="cust_agreed_ship" class="entry"></div>
+        <div class="fld"><label>Late Penalty?</label>
+          <select id="late_penalty" class="entry"><option value="">—</option><option value="N">No</option><option value="Y">Yes</option></select>
+        </div>
+        <div class="fld"><label>Materials Budget — Total $</label><input type="number" step="0.01" id="material_total" class="entry"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Budget Hours by Discipline</h2>
+      <p class="hint">Enter budgeted hours per line item; per-discipline subtotals and the labour total update live (the sheet's Helpers roll-ups).</p>
+      <div id="disciplines"></div>
+      <div class="totrow">
+        <div class="tot"><div class="v" id="totLabour">0</div><div class="l">Total Labour Hours</div></div>
+        <div class="tot"><div class="v" id="totMaterial">$0</div><div class="l">Materials Budget</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="actions">
+        <button class="save" id="saveBtn">Save budget version</button>
+        <div class="msg" id="msg"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const el=id=>document.getElementById(id);
+const state={scaffold:[], hdToDisc:{}, current:null};
+
+async function boot(){
+  try{ state.me=await (await fetch('/api/me'+location.search)).json(); }catch(e){ state.me={}; }
+  const role=(state.me&&state.me.role)||'viewer';
+  if(state.me&&state.me.user){ el('company').insertAdjacentHTML('afterend',
+    `<span style="color:#c7d4ee;font-size:13px;margin-left:8px">${state.me.user} · ${role}</span>`);
+    el('by').value=state.me.user; }
+  state.readonly = ({viewer:1,pm:2,admin:3}[role]||1) < 2;
+  const s=await (await fetch('/api/pm/scaffold')).json();
+  if(s.branding){ el('product').textContent=s.branding.product||'Project Console';
+    el('company').textContent=s.branding.company||''; el('logo').textContent=(s.branding.product||'PC').slice(0,2).toUpperCase(); }
+  if(s.demo) el('demoBadge').style.display='inline-block';
+  state.scaffold=s.disciplines||[];
+  state.scaffold.forEach(d=>d.hour_descriptions.forEach(hd=>state.hdToDisc[hd]=d.discipline));
+  buildGrid();
+  await loadProjects();
+  if(state.readonly){
+    el('by').closest('.card').insertAdjacentHTML('beforeend',
+      '<p class="hint" style="color:#b3261e;margin-top:10px">You have view-only access — budgets can be viewed but not saved. Ask an admin for PM access.</p>');
+    el('saveBtn').disabled=true; el('by').disabled=true;
+  }
+}
+
+async function loadProjects(sel){
+  const p=await (await fetch('/api/pm/projects')).json();
+  const opt=el('proj'); opt.innerHTML='<option value="">— select a project —</option>';
+  const g1=document.createElement('optgroup'); g1.label='Budgeted (edit)';
+  (p.budgeted||[]).forEach(x=>g1.appendChild(new Option(`${x.id}  ${x.name||''}`.trim(), x.id)));
+  const g2=document.createElement('optgroup'); g2.label='Bring in (new)';
+  (p.available||[]).forEach(x=>g2.appendChild(new Option(`${x.id}  ${x.name||''}`.trim(), x.id)));
+  if(g1.children.length) opt.appendChild(g1);
+  if(g2.children.length) opt.appendChild(g2);
+  if(sel){ opt.value=String(sel); }
+}
+
+function buildGrid(){
+  const box=el('disciplines'); box.innerHTML='';
+  state.scaffold.forEach(d=>{
+    const wrap=document.createElement('div'); wrap.className='disc';
+    wrap.innerHTML=`<div class="dh"><span>${d.discipline}</span><span class="sub" id="sub-${cssid(d.discipline)}">0</span></div>`;
+    const grid=document.createElement('div'); grid.className='grid';
+    d.hour_descriptions.forEach(hd=>{
+      const row=document.createElement('div'); row.className='hd';
+      row.innerHTML=`<span title="${hd}">${hd}</span>`;
+      const inp=document.createElement('input'); inp.type='number'; inp.step='1'; inp.min='0';
+      inp.dataset.hd=hd; inp.oninput=recalc;
+      row.appendChild(inp); grid.appendChild(row);
+    });
+    wrap.appendChild(grid); box.appendChild(wrap);
+  });
+}
+function cssid(s){ return s.replace(/[^a-z0-9]/gi,'_'); }
+
+function recalc(){
+  const subs={};
+  document.querySelectorAll('#disciplines input').forEach(inp=>{
+    const hd=inp.dataset.hd, v=parseFloat(inp.value)||0, d=state.hdToDisc[hd]||'Other';
+    subs[d]=(subs[d]||0)+v;
+  });
+  let total=0;
+  state.scaffold.forEach(d=>{ const s=subs[d.discipline]||0; total+=s;
+    const e=el('sub-'+cssid(d.discipline)); if(e) e.textContent=fmt(s); });
+  el('totLabour').textContent=fmt(total);
+  const mat=parseFloat(el('material_total').value)||0;
+  el('totMaterial').textContent='$'+mat.toLocaleString(undefined,{maximumFractionDigits:0});
+}
+function fmt(n){ return (n||0).toLocaleString(undefined,{maximumFractionDigits:2}); }
+
+el('proj').onchange=async()=>{
+  const pid=el('proj').value; hideMsg();
+  if(!pid){ el('form').style.display='none'; el('status').textContent=''; return; }
+  const b=await (await fetch('/api/pm/budget/'+pid)).json();
+  state.current=b;
+  el('status').textContent=b.exists?'Editing existing budget':'New — bringing this project in';
+  el('po_ship').value=b.po_ship||''; el('cust_agreed_ship').value=b.cust_agreed_ship||'';
+  el('late_penalty').value=b.late_penalty===true?'Y':(b.late_penalty===false?'N':'');
+  el('material_total').value=(b.material_total!=null?b.material_total:'');
+  document.querySelectorAll('#disciplines input').forEach(inp=>{
+    const v=(b.lines||{})[inp.dataset.hd]; inp.value=(v!=null?v:'');
+  });
+  el('form').style.display='block'; recalc();
+};
+el('material_total').oninput=recalc;
+
+el('saveBtn').onclick=async()=>{
+  const pid=el('proj').value; if(!pid) return;
+  const by=el('by').value.trim();
+  if(!by){ showMsg('err','Enter your name in “Entered by” before saving.'); return; }
+  const lines={};
+  document.querySelectorAll('#disciplines input').forEach(inp=>{
+    const v=parseFloat(inp.value); if(!isNaN(v)&&v!==0) lines[inp.dataset.hd]=v;
+  });
+  const payload={ project_id:Number(pid), entered_by:by,
+    po_ship:el('po_ship').value||null, cust_agreed_ship:el('cust_agreed_ship').value||null,
+    late_penalty:el('late_penalty').value||null,
+    material_total:el('material_total').value!==''?parseFloat(el('material_total').value):null,
+    lines };
+  el('saveBtn').disabled=true; showMsg('', 'Saving…');
+  try{
+    const r=await fetch('/api/pm/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json();
+    if(!r.ok){ showMsg('err', d.error||'Save failed'); }
+    else{ showMsg('ok', `Saved — budget version ${d.version} for project ${d.project_id} (${fmt(d.labour_hours)} labour hrs).`);
+      await loadProjects(pid); }
+  }catch(e){ showMsg('err', String(e)); }
+  el('saveBtn').disabled=false;
+};
+
+function showMsg(cls,txt){ const m=el('msg'); m.className='msg '+(cls||''); m.textContent=txt; m.style.display='block'; }
+function hideMsg(){ const m=el('msg'); m.style.display='none'; }
+boot();
+</script>
+</body>
+</html>

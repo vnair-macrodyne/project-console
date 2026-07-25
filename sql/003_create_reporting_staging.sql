@@ -1,29 +1,34 @@
 -- ============================================================================
--- 001_create_macrodyne_reporting.sql
--- Project Console Reporting store — budgets + PM entries (system of record for the
--- manual half of the Project Console dashboards), per CARPEDIA_DB_SCHEMA_DESIGN.md.
+-- 003_create_reporting_staging.sql
+-- STAGING copy of the Project Console Reporting store, for testing the PM
+-- budgeting / planning module (and RBAC) without touching production.
 --
--- Separate IT-owned database on MACRO-ETO-SVR\SQLEXPRESS, isolated from the
--- vendor's Macrodyne_Production. Run as sysadmin. Idempotent-ish (guards on create).
--- Owner: Vijay Nair (IT) · 2026-07-25
+-- Same schema as 001 (incl. LatePenalty), in a separate database
+--   Macrodyne_Reporting_Staging
+-- on the SAME server. The console points at it via env (no code change):
+--   CONSOLE_ENV=staging                     (uses this DB name), or
+--   CONSOLE_STORE_DB=Macrodyne_Reporting_Staging
+-- ETO stays PROD and READ-ONLY — Python reads it over the separate eto_* connection;
+-- this staging DB has NO link to the vendor database.
+--
+-- Run as a MACRODYNE-controlled sysadmin. Idempotent-ish (guards on create).
+-- Owner: Vijay Nair (IT).  To make another env, change the DB name throughout.
 -- ============================================================================
 
 ------------------------------------------------------------------------------
 -- 0. Database + schema
 ------------------------------------------------------------------------------
-IF DB_ID('Macrodyne_Reporting') IS NULL
-    CREATE DATABASE Macrodyne_Reporting;
+IF DB_ID('Macrodyne_Reporting_Staging') IS NULL
+    CREATE DATABASE Macrodyne_Reporting_Staging;
 GO
-USE Macrodyne_Reporting;
+USE Macrodyne_Reporting_Staging;
 GO
 IF SCHEMA_ID('Reporting') IS NULL
     EXEC('CREATE SCHEMA Reporting');
 GO
 
 ------------------------------------------------------------------------------
--- 1. Discipline crosswalk (single source of truth: HourDescription -> discipline)
---    Seeded by carpedia_sync from the Budgets tab grouping. BOTH the budget
---    roll-up and the ETO actual-hours re-code read this, so they can't drift.
+-- 1. Discipline crosswalk
 ------------------------------------------------------------------------------
 IF OBJECT_ID('Reporting.tlkpDisciplineCrosswalk','U') IS NULL
 CREATE TABLE Reporting.tlkpDisciplineCrosswalk (
@@ -34,27 +39,24 @@ CREATE TABLE Reporting.tlkpDisciplineCrosswalk (
 GO
 
 ------------------------------------------------------------------------------
--- 1b. Console users — Windows/network identity → role (basic RBAC).
---     Username = domain login WITHOUT the DOMAIN\ prefix, lowercased. Unmapped
---     domain users default to 'viewer' in the app. Grant pm/admin explicitly.
+-- 1b. Console users (RBAC) — Windows login → role
 ------------------------------------------------------------------------------
 IF OBJECT_ID('Reporting.tblConsoleUser','U') IS NULL
 CREATE TABLE Reporting.tblConsoleUser (
-    Username     NVARCHAR(128) NOT NULL PRIMARY KEY,   -- e.g. 'vnair'
-    Role         NVARCHAR(20)  NOT NULL DEFAULT 'viewer',  -- viewer | pm | admin
+    Username     NVARCHAR(128) NOT NULL PRIMARY KEY,
+    Role         NVARCHAR(20)  NOT NULL DEFAULT 'viewer',
     DisplayName  NVARCHAR(128) NULL,
     UpdatedAt    DATETIME      NOT NULL DEFAULT GETDATE(),
     UpdatedBy    NVARCHAR(128) NULL
 );
 GO
--- Seed the first admin so someone can grant the rest (change the login).
 IF NOT EXISTS (SELECT 1 FROM Reporting.tblConsoleUser WHERE Role='admin')
     INSERT INTO Reporting.tblConsoleUser(Username, Role, DisplayName, UpdatedBy)
     VALUES ('vnair', 'admin', 'Vijay Nair', 'install');
 GO
 
 ------------------------------------------------------------------------------
--- 2. Budget header — versioned (SCD-2). One row per project per version.
+-- 2. Budget header (SCD-2) — incl. LatePenalty
 ------------------------------------------------------------------------------
 IF OBJECT_ID('Reporting.tblProjectBudget','U') IS NULL
 CREATE TABLE Reporting.tblProjectBudget (
@@ -66,7 +68,7 @@ CREATE TABLE Reporting.tblProjectBudget (
     Source              NVARCHAR(60)  NULL,
     POShipDate          DATE          NULL,
     CustAgreedShipDate  DATE          NULL,
-    LatePenalty         BIT           NULL,   -- Budgets sheet 'Late Penalty?' (Y/N)
+    LatePenalty         BIT           NULL,
     MaterialBudget      DECIMAL(14,2) NULL,
     LabourBudgetHours   DECIMAL(12,2) NULL,
     PMHours             DECIMAL(12,2) NULL,
@@ -79,18 +81,16 @@ CREATE TABLE Reporting.tblProjectBudget (
     CreatedBy           NVARCHAR(60)  NULL
 );
 GO
--- one current version per project
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='UX_ProjectBudget_Current')
 CREATE UNIQUE INDEX UX_ProjectBudget_Current
     ON Reporting.tblProjectBudget(ProjectID) WHERE IsCurrent = 1;
 GO
--- Existing installs (created before LatePenalty existed): add the column in place.
 IF COL_LENGTH('Reporting.tblProjectBudget','LatePenalty') IS NULL
     ALTER TABLE Reporting.tblProjectBudget ADD LatePenalty BIT NULL;
 GO
 
 ------------------------------------------------------------------------------
--- 3. Budget detail — fine-grain hours by HourDescription per version
+-- 3. Budget detail
 ------------------------------------------------------------------------------
 IF OBJECT_ID('Reporting.tblProjectBudgetDetail','U') IS NULL
 CREATE TABLE Reporting.tblProjectBudgetDetail (
@@ -103,7 +103,7 @@ CREATE TABLE Reporting.tblProjectBudgetDetail (
 GO
 
 ------------------------------------------------------------------------------
--- 4. PM entries — weekly time series (versioned by (ProjectID, YearWeekKey))
+-- 4. PM entries (weekly)
 ------------------------------------------------------------------------------
 IF OBJECT_ID('Reporting.tblProjectPMEntry','U') IS NULL
 CREATE TABLE Reporting.tblProjectPMEntry (
@@ -112,7 +112,7 @@ CREATE TABLE Reporting.tblProjectPMEntry (
     FiscalYear          INT           NULL,
     WeekNo              INT           NULL,
     YearWeekKey         INT           NOT NULL,
-    PlannedShipDate     DATE          NULL,   -- 2099 placeholder normalised to NULL on load
+    PlannedShipDate     DATE          NULL,
     PercentComplete     DECIMAL(6,4)  NULL,
     LabourRunout        DECIMAL(7,4)  NULL,
     MaterialRunout      DECIMAL(7,4)  NULL,
@@ -136,77 +136,75 @@ CREATE TABLE Reporting.tblProjectPMEntry (
 GO
 
 ------------------------------------------------------------------------------
--- 5. Views — the stable interface the dashboard reads
+-- 5. Views (identical interface to prod)
 ------------------------------------------------------------------------------
-IF OBJECT_ID('Reporting.vw_Console_BudgetCurrent','V') IS NOT NULL
-    DROP VIEW Reporting.vw_Console_BudgetCurrent;
+IF OBJECT_ID('Reporting.vw_Console_BudgetCurrent','V') IS NOT NULL DROP VIEW Reporting.vw_Console_BudgetCurrent;
 GO
 CREATE VIEW Reporting.vw_Console_BudgetCurrent AS
     SELECT * FROM Reporting.tblProjectBudget WHERE IsCurrent = 1;
 GO
-
-IF OBJECT_ID('Reporting.vw_Console_PMEntryLatest','V') IS NOT NULL
-    DROP VIEW Reporting.vw_Console_PMEntryLatest;
+IF OBJECT_ID('Reporting.vw_Console_PMEntryLatest','V') IS NOT NULL DROP VIEW Reporting.vw_Console_PMEntryLatest;
 GO
 CREATE VIEW Reporting.vw_Console_PMEntryLatest AS
-    SELECT p.*
-    FROM Reporting.tblProjectPMEntry p
-    JOIN (SELECT ProjectID, MAX(YearWeekKey) AS mx
-          FROM Reporting.tblProjectPMEntry
-          WHERE IncludeFlag = 1
-          GROUP BY ProjectID) m
+    SELECT p.* FROM Reporting.tblProjectPMEntry p
+    JOIN (SELECT ProjectID, MAX(YearWeekKey) AS mx FROM Reporting.tblProjectPMEntry
+          WHERE IncludeFlag = 1 GROUP BY ProjectID) m
       ON p.ProjectID = m.ProjectID AND p.YearWeekKey = m.mx;
 GO
-
--- NOTE: actual labour hours per project × discipline is computed in PYTHON
--- (console_engine reads ETO live over the read-only ETO connection and applies the
--- crosswalk loaded from Reporting.tlkpDisciplineCrosswalk). This DB has NO link to
--- the vendor database — Python is the only bridge. Nothing here reads Macrodyne_Production.
-
--- Manual overlay = current budget + latest PM entry, one row per project.
--- The dashboard reads this (manual side); ETO actuals are joined in the Python engine.
-IF OBJECT_ID('Reporting.vw_Console_ManualOverlay','V') IS NOT NULL
-    DROP VIEW Reporting.vw_Console_ManualOverlay;
+IF OBJECT_ID('Reporting.vw_Console_ManualOverlay','V') IS NOT NULL DROP VIEW Reporting.vw_Console_ManualOverlay;
 GO
 CREATE VIEW Reporting.vw_Console_ManualOverlay AS
-    SELECT b.ProjectID,
-           b.POShipDate, b.CustAgreedShipDate,
-           b.MaterialBudget, b.LabourBudgetHours,
-           b.PMHours, b.MechanicalHours, b.ElectricalHours,
-           b.HydraulicHours, b.ManufacturingHours, b.OtherHours,
+    SELECT b.ProjectID, b.POShipDate, b.CustAgreedShipDate, b.MaterialBudget, b.LabourBudgetHours,
+           b.PMHours, b.MechanicalHours, b.ElectricalHours, b.HydraulicHours, b.ManufacturingHours, b.OtherHours,
            p.PlannedShipDate, p.PercentComplete, p.LabourRunout, p.MaterialRunout,
            p.MaterialActual, p.TotalLineItems,
            p.LLTPOrdered, p.LLTPReleasedLate, p.LLTPOrderedLate, p.LLTPDeliveredLate,
-           p.PartsReleasedLate, p.PartsOrderedLate,
-           p.Delta1WkPercentDone, p.Delta1WkMaterial, p.ReRank
+           p.PartsReleasedLate, p.PartsOrderedLate, p.Delta1WkPercentDone, p.Delta1WkMaterial, p.ReRank
     FROM Reporting.vw_Console_BudgetCurrent b
     LEFT JOIN Reporting.vw_Console_PMEntryLatest p ON p.ProjectID = b.ProjectID;
 GO
-
-PRINT 'Macrodyne_Reporting: tables + views created.';
+PRINT 'Macrodyne_Reporting_Staging: tables + views created.';
 GO
 
--- ============================================================================
--- 6. Ownership & login  (run as a MACRODYNE-controlled sysadmin — NOT the vendor)
--- ============================================================================
--- OWNERSHIP — this database, its schemas, and everything in them are Macrodyne IP.
--- The ETO vendor account (totaletoadmin) must NOT own or control them. Set the
--- owner to a Macrodyne-controlled principal (a Macrodyne IT service login, or an
--- account only Macrodyne administers). Replace <MacrodyneReportingOwner> below.
--- ALTER AUTHORIZATION ON DATABASE::Macrodyne_Reporting TO [<MacrodyneReportingOwner>];
--- ALTER AUTHORIZATION ON SCHEMA::Reporting              TO [<MacrodyneReportingOwner>];
+------------------------------------------------------------------------------
+-- 6. OPTIONAL — seed staging from prod (same server). Copies reference + budgets so
+--    testers start from real data. Comment out if you want an empty staging DB.
+------------------------------------------------------------------------------
+-- IF DB_ID('Macrodyne_Reporting') IS NOT NULL
+-- BEGIN
+--     TRUNCATE TABLE Reporting.tblProjectBudgetDetail;
+--     DELETE FROM Reporting.tblProjectBudget;
+--     DELETE FROM Reporting.tblProjectPMEntry;
+--     DELETE FROM Reporting.tlkpDisciplineCrosswalk;
+--
+--     INSERT INTO Reporting.tlkpDisciplineCrosswalk (HourDescription, Discipline, UpdatedAt)
+--         SELECT HourDescription, Discipline, UpdatedAt FROM Macrodyne_Reporting.Reporting.tlkpDisciplineCrosswalk;
+--
+--     SET IDENTITY_INSERT Reporting.tblProjectBudget ON;
+--     INSERT INTO Reporting.tblProjectBudget
+--         (BudgetVersionID,ProjectID,EffectiveFrom,EffectiveTo,IsCurrent,Source,POShipDate,
+--          CustAgreedShipDate,LatePenalty,MaterialBudget,LabourBudgetHours,PMHours,MechanicalHours,
+--          ElectricalHours,HydraulicHours,ManufacturingHours,OtherHours,CreatedAt,CreatedBy)
+--         SELECT BudgetVersionID,ProjectID,EffectiveFrom,EffectiveTo,IsCurrent,Source,POShipDate,
+--          CustAgreedShipDate,LatePenalty,MaterialBudget,LabourBudgetHours,PMHours,MechanicalHours,
+--          ElectricalHours,HydraulicHours,ManufacturingHours,OtherHours,CreatedAt,CreatedBy
+--         FROM Macrodyne_Reporting.Reporting.tblProjectBudget;
+--     SET IDENTITY_INSERT Reporting.tblProjectBudget OFF;
+--
+--     INSERT INTO Reporting.tblProjectBudgetDetail (BudgetVersionID,HourDescription,BudgetHours)
+--         SELECT BudgetVersionID,HourDescription,BudgetHours
+--         FROM Macrodyne_Reporting.Reporting.tblProjectBudgetDetail;
+--
+--     PRINT 'Staging seeded from Macrodyne_Reporting.';
+-- END
 -- GO
---
--- The Console login needs NO access to the vendor DB — Python reads ETO over a
--- SEPARATE read-only connection (the existing ETO login). This login is Console-only.
---
--- CONNECTION LOGIN for console_sync — a MACRODYNE-controlled login with WRITE on
--- Macrodyne_Reporting (here) and nothing else. It needs NO access to the vendor DB.
--- USE Macrodyne_Reporting;
+
+------------------------------------------------------------------------------
+-- 7. Grant the console login on staging (Console-only; no vendor-DB access).
+--    Replace <MacrodyneReportSvc> with your console login.
+------------------------------------------------------------------------------
+-- USE Macrodyne_Reporting_Staging;
 -- CREATE USER [<MacrodyneReportSvc>] FOR LOGIN [<MacrodyneReportSvc>];
 -- ALTER ROLE db_datareader ADD MEMBER [<MacrodyneReportSvc>];
--- ALTER ROLE db_datawriter ADD MEMBER [<MacrodyneReportSvc>];   -- write here only
+-- ALTER ROLE db_datawriter ADD MEMBER [<MacrodyneReportSvc>];
 -- GO
--- Python reads ETO over a separate read-only ETO connection (the existing
--- TotalETOReportWriter login). Set MACRODYNE_REPORTING_USER/PWD to the Console login;
--- the ETO connection uses its own creds (ETO read-only).
