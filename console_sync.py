@@ -15,7 +15,7 @@ it each week (schedule: weekly, before the executive report).
                  --all-weeks backfills the full history on first run).
 
 Record-builders are pure (no DB) so `--dry-run` validates extraction anywhere.
-Connection: env MACRODYNE_REPORTING_SERVER / _DB / _USER / _PWD (or _TRUSTED=1).
+Connection: env CONSOLE_STORE_SERVER / _DB / _USER / _PWD (or _TRUSTED=1).
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ import os
 
 import pandas as pd
 
+import console_config  # noqa: F401 — importing loads .env (python-dotenv) into os.environ
 import console_pack as cp
 
 _DISC_COLS = {  # budget header column -> Budgets 'Helpers' discipline key
@@ -135,14 +136,14 @@ def build_crosswalk(pack_path):
 # ─────────────────────────────────────────────────────────────────────────────
 def get_reporting_connection():
     import pyodbc
-    server = os.environ.get("MACRODYNE_REPORTING_SERVER", r"MACRO-ETO-SVR\SQLEXPRESS")
-    db = os.environ.get("MACRODYNE_REPORTING_DB", "Macrodyne_Reporting")
-    if os.environ.get("MACRODYNE_REPORTING_TRUSTED") == "1":
+    server = os.environ.get("CONSOLE_STORE_SERVER", r"MACRO-ETO-SVR\SQLEXPRESS")
+    db = os.environ.get("CONSOLE_STORE_DB", "Macrodyne_Reporting")
+    if os.environ.get("CONSOLE_STORE_TRUSTED") == "1":
         cs = (f"Driver={{ODBC Driver 17 for SQL Server}};Server={server};"
               f"Database={db};Trusted_Connection=yes;")
     else:
-        u = os.environ["MACRODYNE_REPORTING_USER"]
-        p = os.environ["MACRODYNE_REPORTING_PWD"]
+        u = os.environ["CONSOLE_STORE_USER"]
+        p = os.environ["CONSOLE_STORE_PWD"]
         cs = (f"Driver={{ODBC Driver 17 for SQL Server}};Server={server};"
               f"Database={db};UID={u};PWD={p};")
     return pyodbc.connect(cs)

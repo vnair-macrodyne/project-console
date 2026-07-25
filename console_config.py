@@ -8,7 +8,7 @@ CARPEDIA_PRODUCT_ARCHITECTURE.md).
 
 Load order:
   1. defaults below (Macrodyne),
-  2. a JSON file at $CARPEDIA_TENANT (or passed to load()),
+  2. a JSON file at $CONSOLE_TENANT (or passed to load()),
   3. selected env overrides (connection secrets).
 Secrets (passwords) come from env only — never commit them to a profile file.
 """
@@ -17,6 +17,14 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field, asdict
+
+# Load a local .env (repo root / cwd) into the environment before the profile reads
+# it, so secrets live in a gitignored .env file. Harmless if python-dotenv or .env absent.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 @dataclass
@@ -60,8 +68,8 @@ class TenantProfile:
     dashboard_week: str = "current"           # 'current' (from PM Entries) or 'YYYY-WW'
 
     # ── connection secrets (env only) ──────────────────────────────────────
-    reporting_user: str | None = None         # $MACRODYNE_REPORTING_USER
-    reporting_pwd: str | None = None          # $MACRODYNE_REPORTING_PWD
+    reporting_user: str | None = None         # $CONSOLE_STORE_USER
+    reporting_pwd: str | None = None          # $CONSOLE_STORE_PWD
 
     # ------------------------------------------------------------------ helpers
     def is_service(self, project_id: int) -> bool:
@@ -96,18 +104,18 @@ class TenantProfile:
 
     @classmethod
     def load(cls, path: str | None = None) -> "TenantProfile":
-        """defaults → JSON profile ($CARPEDIA_TENANT or `path`) → env secret overrides."""
+        """defaults → JSON profile ($CONSOLE_TENANT or `path`) → env secret overrides."""
         data = {}
-        path = path or os.environ.get("CARPEDIA_TENANT")
+        path = path or os.environ.get("CONSOLE_TENANT")
         if path and os.path.exists(path):
             with open(path) as f:
                 data = json.load(f)
         known = set(cls.__dataclass_fields__)
         prof = cls(**{k: v for k, v in data.items() if k in known})
         # secrets always from env (never from the committed profile)
-        prof.reporting_user = os.environ.get("MACRODYNE_REPORTING_USER", prof.reporting_user)
-        prof.reporting_pwd = os.environ.get("MACRODYNE_REPORTING_PWD", prof.reporting_pwd)
-        if os.environ.get("MACRODYNE_REPORTING_TRUSTED") == "1":
+        prof.reporting_user = os.environ.get("CONSOLE_STORE_USER", prof.reporting_user)
+        prof.reporting_pwd = os.environ.get("CONSOLE_STORE_PWD", prof.reporting_pwd)
+        if os.environ.get("CONSOLE_STORE_TRUSTED") == "1":
             prof.use_windows_auth = True
         return prof
 
