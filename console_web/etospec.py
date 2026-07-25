@@ -597,7 +597,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None):
         poh.PurchaseOrderID             AS PO,
         poh.CName                       AS Vendor,
         pod.PurchaseQty                 AS Qty,
-        ISNULL(rls.SumOfQtyReceived, 0) AS Received,
+        pod.Received                    AS Received,
         pod.ExtendedPrice               AS ExtValue,
         CAST(pod.DateRequired AS date)  AS DateRequired,
         CAST(pod.DateRevised  AS date)  AS DateRevised,
@@ -608,12 +608,11 @@ def query_po_exceptions(include_leadtime=True, project_ids=None):
         {rel_sel}                       AS EngReleaseDate
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
-    LEFT JOIN vwReceiverLogSummed rls ON rls.PurchaseDetailID = pod.PurchaseDetailID
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
     {buyer_join}
     {lead_join}
     WHERE poh.PurchaseActive = 1
-      AND (pod.PurchaseQty - ISNULL(rls.SumOfQtyReceived, 0) > 0){proj}
+      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
     """
 
@@ -740,80 +739,65 @@ def exceptions_book_bytes(items, label):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LATE VENDORS — faithful port of dbo.urpPurchasingLateVendors
-# ETO's own late report: RECEIVED lines that arrived AFTER their need-by, by vendor.
-#   need-by  = ISNULL(DateRevised, DateRequired)          (detail dates)
-#   received = vwReceiverLogSummed.MaxOfDate               (actual last receipt date)
-#   DaysLate = DATEDIFF(d, need-by, received)  (> 0)
-#   line is fully received: PurchaseQty - SumOfQtyReceived <= 0
-# Scoped by the console's date pickers = the PO-created window (@datPOCreated*), and by
-# the selected projects. This is a vendor delivery-PERFORMANCE report (backward-looking).
+# LATE VENDORS — OVERDUE open PO lines, by vendor (needs no receiver log).
+# Applies ETO's lateness definition (from dbo.urpPurchasingLateVendors:
+# need-by = ISNULL(DateRevised, DateRequired)) to the STILL-OPEN population:
+#   open      = pod.Received < pod.PurchaseQty
+#   overdue   = need-by < today
+#   DaysLate  = today − need-by
+# Background: ETO's native urpPurchasingLateVendors measures the RECEIVED population
+# instead — DaysLate = receipt date − need-by, where the receipt date comes from
+# vwReceiverLogSummed.MaxOfDate. That receipt date is the ONLY thing the receiver log
+# provides here (pod has a received qty, no date), so the historical "arrived late"
+# case stays with ETO's own report; this console report covers what's overdue NOW.
 # ─────────────────────────────────────────────────────────────────────────────
 COLS_LATE = [
     ("ProjectID",   "Project",     8,  "C", False),
     ("PO",          "PO #",        7,  "L", False),
-    ("Item",        "Item",        14, "L", False),
-    ("Description", "Description", 24, "L", False),
-    ("Category",    "Category",    14, "L", False),
+    ("Item",        "Item",        10, "L", False),
+    ("Description", "Description", 26, "L", False),
     ("Qty",         "Qty",          6, "R", True),
-    ("QtyReceived", "Rec'd",        6, "R", True),
+    ("Received",    "Rec'd",        6, "R", True),
     ("Required",    "Required",    10, "C", False),
     ("Revised",     "Revised",     10, "C", False),
-    ("Received",    "Received",    10, "C", False),
-    ("DaysLate",    "Days Late",    7, "R", True),
+    ("DaysLate",    "Days Late",    8, "R", True),
     ("ExtValue",    "Ext. Value",  11, "R", True),
 ]
 
 
 def query_late_vendors(project_ids=None, date_from=None, date_to=None):
-    """Transcribed from urpPurchasingLateVendors. Base value = qty×price×PurchaseCurrRate
-    (the SP's ExtendedPriceExchange). Date window filters PO creation date (PurchaseDate)."""
+    """OVERDUE open PO lines, by vendor. A line still open (Received < PurchaseQty) whose
+    need-by (ISNULL(DateRevised, DateRequired)) is already past is late NOW — Days Late =
+    today − need-by. This applies urpPurchasingLateVendors' lateness definition to the
+    not-yet-received population, so no receipt date / receiver log is needed. (The historical
+    'received but arrived late' case needs the receiver log's receipt date — ETO's own report.)"""
     proj = ""
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
-        proj = f" AND POD.ProjectID IN ({ids})"
-    win = ""
-    if date_from:
-        win += f" AND POH.PurchaseDate >= '{date_from}'"
-    if date_to:
-        win += f" AND POH.PurchaseDate < DATEADD(day, 1, '{date_to}')"
-    need_by = "ISNULL(POD.DateRevised, POD.DateRequired)"
+        proj = f" AND pod.ProjectID IN ({ids})"
+    need_by = "ISNULL(pod.DateRevised, pod.DateRequired)"
     return f"""
     SELECT
-        SC.CName                                       AS Supplier,
-        POD.ProjectID                                  AS ProjectID,
-        POH.PurchaseOrderID                            AS PO,
-        CASE WHEN POD.ProcessScheduleDetailID IS NULL THEN
-                CASE WHEN POD.PurchaseSupplierItem IS NULL THEN EIM.ItemCompanyID
-                     ELSE POD.PurchaseSupplierItem END
-             ELSE EIM2.ItemCompanyID + ' - ' + EIM.ItemCompanyID END       AS Item,
-        CASE WHEN POD.ProcessScheduleDetailID IS NULL THEN
-                CASE WHEN POD.PurchaseSupplierDescription IS NULL THEN EIM.ItemDescription
-                     ELSE POD.PurchaseSupplierDescription END
-             ELSE EIM.ItemDescription + ' - ' + EIM2.ItemDescription END    AS Description,
-        IMC.CategoryDescription                        AS Category,
-        POD.PurchaseQty                                AS Qty,
-        CAST(RLS.SumOfQtyReceived AS decimal(20,6))    AS QtyReceived,
-        CAST(POD.DateRequired AS date)                 AS Required,
-        CAST(POD.DateRevised  AS date)                 AS Revised,
-        CAST(RLS.MaxOfDate    AS date)                 AS Received,
-        DATEDIFF(d, {need_by}, RLS.MaxOfDate)          AS DaysLate,
-        CAST(POD.PurchaseQty * POD.PurchasePrice * POH.PurchaseCurrRate AS decimal(20,6)) AS ExtValue,
-        P.PDescription                                 AS JobName,
-        P.PStatus                                      AS ProjStatus
-    FROM tblPurchaseOrderHeader POH
-        INNER JOIN tblCompany SC ON POH.PurchaseSupplierID = SC.CompanyID
-        INNER JOIN tblPurchaseOrderDetails POD ON POH.PurchaseOrderID = POD.PurchaseOrderID
-        INNER JOIN tblEngItemMaster EIM ON POD.ItemID = EIM.ItemID
-        INNER JOIN tlkpItemMaster_Categories IMC ON EIM.ItemCategory = IMC.ItemCategory
-        INNER JOIN tblProjects P ON POD.ProjectID = P.ProjectID
-        INNER JOIN tblCompany PC ON P.CompanyID = PC.CompanyID
-        LEFT JOIN vwReceiverLogSummed RLS ON POD.PurchaseDetailID = RLS.PurchaseDetailID
-        LEFT JOIN tblProcessScheduleHeader PSH ON POD.ProcessScheduleID = PSH.ProcessScheduleID
-        LEFT JOIN tblEngItemMaster EIM2 ON PSH.ItemID = EIM2.ItemID
-    WHERE (POD.PurchaseQty - ISNULL(RLS.SumOfQtyReceived, 0)) <= 0
-      AND (DATEDIFF(d, {need_by}, RLS.MaxOfDate) > 0){proj}{win}
-    ORDER BY SC.CName, DaysLate DESC
+        poh.CName                        AS Supplier,
+        pod.ProjectID                    AS ProjectID,
+        poh.PurchaseOrderID              AS PO,
+        pod.ItemID                       AS Item,
+        pod.ItemDescription              AS Description,
+        pod.PurchaseQty                  AS Qty,
+        pod.Received                     AS Received,
+        CAST(pod.DateRequired AS date)   AS Required,
+        CAST(pod.DateRevised  AS date)   AS Revised,
+        DATEDIFF(d, {need_by}, CAST(GETDATE() AS date)) AS DaysLate,
+        pod.ExtendedPrice                AS ExtValue,
+        p.DisplayName                    AS JobName,
+        p.PStatus                        AS ProjStatus
+    FROM vwPurchaseOrderHeader poh
+    JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
+    LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
+    WHERE poh.PurchaseActive = 1
+      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty)
+      AND {need_by} < CAST(GETDATE() AS date){proj}
+    ORDER BY poh.CName, DaysLate DESC
     """
 
 
@@ -834,21 +818,21 @@ def _ds(v):
 
 
 def late_build_rows(df):
-    """Group by vendor: band → late lines (worst first) → per-vendor subtotal → grand."""
+    """Group by vendor: band → overdue lines (worst first) → per-vendor subtotal → grand."""
     n = len(COLS_LATE)
     if df.empty:
-        return [(["No late-vendor lines in the selected window."] + [""] * (n - 1), "grand")]
+        return [(["No overdue open PO lines for the selection."] + [""] * (n - 1), "grand")]
     rows = []
     for sup in sorted(df["Supplier"].dropna().unique(), key=str):
         ssub = df[df["Supplier"] == sup].sort_values("DaysLate", ascending=False)
-        rows.append(([f"Vendor: {sup}   ·   {len(ssub)} late line(s)"] + [""] * (n - 1), "l3_sub"))
+        rows.append(([f"Vendor: {sup}   ·   {len(ssub)} overdue line(s)"] + [""] * (n - 1), "l3_sub"))
         for _, r in ssub.iterrows():
-            rows.append(([r.ProjectID, r.PO, r.Item, r.Description, r.Category, r.Qty,
-                          r.QtyReceived, _ds(r.Required), _ds(r.Revised),
-                          _ds(r.Received), int(r.DaysLate), round(float(r.ExtValue), 2)], "detail"))
-        rows.append(([f"{sup} — Late Value", "", "", "", "", "", "", "", "", "",
+            rows.append(([r.ProjectID, r.PO, r.Item, r.Description, r.Qty, r.Received,
+                          _ds(r.Required), _ds(r.Revised),
+                          int(r.DaysLate), round(float(r.ExtValue), 2)], "detail"))
+        rows.append(([f"{sup} — Overdue Value", "", "", "", "", "", "", "",
                       int(ssub["DaysLate"].max()), round(float(ssub["ExtValue"].sum()), 2)], "l1_sub"))
-    rows.append((["GRAND TOTAL — Late Value"] + [""] * 9
+    rows.append((["GRAND TOTAL — Overdue Value"] + [""] * 7
                  + [int(df["DaysLate"].max()), round(float(df["ExtValue"].sum()), 2)], "grand"))
     return rows
 
@@ -858,7 +842,7 @@ def late_vendors_book_bytes(df, label):
     wb = Workbook(); wb.remove(wb.active)
     ws = wb.create_sheet("Late Vendors")
     _populate_sheet(ws, "Purchasing — Late Vendors",
-                    "Received lines delivered after need-by (revised, else required) — by vendor",
+                    "Open PO lines past their need-by (revised, else required) — overdue, by vendor",
                     COLS_LATE, rows, label)
     ci = [i for i, c in enumerate(COLS_LATE, 1) if c[0] == "ExtValue"][0]
     for row in range(4, ws.max_row + 1):

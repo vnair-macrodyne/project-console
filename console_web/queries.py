@@ -132,8 +132,8 @@ def catalogue():
                  "project-item, by buyer. Forward-looking / at-risk.",
          "needs_projects": True},
         {"id": "po_late", "menu": "Purchasing", "label": "Late Vendors",
-         "desc": "ETO's native late report (urpPurchasingLateVendors): RECEIVED lines that "
-                 "arrived after need-by, by vendor. The date range = the PO-created window.",
+         "desc": "Open PO lines overdue against their need-by (revised, else required — ETO's "
+                 "lateness definition), by vendor. Days Late = today − need-by.",
          "needs_projects": True},
         # ── Non-Conformance ───────────────────────────────────────────────
         {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
@@ -369,9 +369,10 @@ class LiveQueryService(QueryService):
         return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}", enriched)
 
     def _q_po_late(self, project_ids, date_from=None, date_to=None, **kw):
+        import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else None
-        df = self._df(etospec.query_late_vendors(pids, _as_date(date_from), _as_date(date_to)))
-        return _spec_late_result(df, _late_label(date_from, date_to))
+        df = self._df(etospec.query_late_vendors(pids))
+        return _spec_late_result(df, f"As at {_dt.date.today():%b %d, %Y}")
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(
@@ -698,9 +699,9 @@ def _spec_po_exc_result(items, label, enriched=True):
     val = 0.0 if not n else float(items["ExtValue"].sum())
     cards = [Card("Exception items", "{:,}".format(n), "bad" if n else "good"),
              Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
-    note = ("Procurement Exceptions by Buyer — OPEN PO lines (open = PurchaseQty − receiver-log "
-            "received > 0) past their need-by (Del Late; need-by = revised, else required — ETO's "
-            "own definition). One sortable row per project-item. Ord Late is a DERIVED early-warning "
+    note = ("Procurement Exceptions by Buyer — OPEN PO lines (open = Received < PurchaseQty) past "
+            "their need-by (Del Late; need-by = revised, else required — ETO's own definition). "
+            "One sortable row per project-item. Ord Late is a DERIVED early-warning "
             "(PO cut too late for the item's lead time) — it has no equivalent in ETO's late report, "
             "so treat it as advisory, not an ETO figure."
             + ("" if enriched else " Lead-time source unavailable, so LLT / Critical / Ord Late are "
@@ -709,16 +710,9 @@ def _spec_po_exc_result(items, label, enriched=True):
                        {"kind": "exceptions", "items": items, "label": label})
 
 
-def _late_label(date_from, date_to):
-    df, dt = _as_date(date_from), _as_date(date_to)
-    if df or dt:
-        return f"POs created {df or '…'} → {dt or 'today'}"
-    return "POs created — all history"
-
-
 def _spec_late_result(df, label):
-    """df = query_late_vendors output. Web shows vendor-grouped late lines; export writes
-    the faithful single-sheet workbook."""
+    """df = query_late_vendors output (overdue open lines). Web shows vendor-grouped lines;
+    export writes the faithful single-sheet workbook."""
     grouped = etospec.late_build_rows(df)
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_LATE)]
     rows = etospec.web_rows(etospec.COLS_LATE, grouped)
@@ -727,14 +721,15 @@ def _spec_late_result(df, label):
     vendors = 0 if empty else int(df["Supplier"].nunique())
     val = 0.0 if empty else float(df["ExtValue"].sum())
     worst = 0 if empty else int(df["DaysLate"].max())
-    cards = [Card("Late lines", "{:,}".format(n), "bad" if n else "good"),
+    cards = [Card("Overdue lines", "{:,}".format(n), "bad" if n else "good"),
              Card("Vendors", "{:,}".format(vendors)),
              Card("Worst (days)", "{:,}".format(worst), "bad" if worst else "good"),
-             Card("Late value", _fmt_money2(val), "bad" if val else "good")]
-    note = ("Late Vendors — ETO's native late report (urpPurchasingLateVendors). RECEIVED lines "
-            "whose actual receipt date (receiver log) is later than need-by (revised, else "
-            "required), grouped by vendor. Days Late = receipt − need-by. The date range filters "
-            "the PO-created window; base value = qty × price × PurchaseCurrRate.")
+             Card("Overdue value", _fmt_money2(val), "bad" if val else "good")]
+    note = ("Late Vendors — OPEN PO lines (Received < PurchaseQty) whose need-by (revised, else "
+            "required — ETO's own lateness definition, per urpPurchasingLateVendors) is already "
+            "past, grouped by vendor. Days Late = today − need-by. Uses pod.Received only (no "
+            "receiver log). Historical 'received-but-late' lines are ETO's native report; they "
+            "need the receiver-log receipt date and are not shown here.")
     return QueryResult("po_late", "Purchasing — Late Vendors", qcols, rows, cards, note,
                        {"kind": "late", "df": df, "label": label})
 
@@ -1173,23 +1168,22 @@ _DEMO_EXC_RAW = [
      "OverFlag": 1, "EngReleaseDate": "2026-05-30"},
 ]
 
-# Late Vendors — query_late_vendors output shape (RECEIVED lines that came in late)
-_DEMO_LATE_COLS = ["Supplier", "ProjectID", "PO", "Item", "Description", "Category", "Qty",
-                   "QtyReceived", "Required", "Revised", "Received", "DaysLate", "ExtValue",
-                   "JobName", "ProjStatus"]
+# Late Vendors — query_late_vendors output shape (OVERDUE open lines, not yet received)
+_DEMO_LATE_COLS = ["Supplier", "ProjectID", "PO", "Item", "Description", "Qty", "Received",
+                   "Required", "Revised", "DaysLate", "ExtValue", "JobName", "ProjStatus"]
 _DEMO_LATE = [
-    {"Supplier": "Bosch Rexroth", "ProjectID": 230219, "PO": "48210", "Item": "A10VSO-100",
-     "Description": "Main hydraulic pump A10VSO", "Category": "Hydraulics", "Qty": 2,
-     "QtyReceived": 2, "Required": "2026-04-01", "Revised": None, "Received": "2026-05-06",
-     "DaysLate": 35, "ExtValue": 184500.0, "JobName": _D19[0], "ProjStatus": "Sold"},
-    {"Supplier": "SKF Canada", "ProjectID": 230219, "PO": "48255", "Item": "SKF-22320",
-     "Description": "Spherical roller bearings (lot)", "Category": "Bearings", "Qty": 40,
-     "QtyReceived": 40, "Required": "2026-05-15", "Revised": "2026-05-30", "Received": "2026-06-12",
-     "DaysLate": 13, "ExtValue": 28800.0, "JobName": _D19[0], "ProjStatus": "Sold"},
-    {"Supplier": "Gefran", "ProjectID": 230312, "PO": "47980", "Item": "GEF-TK",
-     "Description": "Pressure transducers", "Category": "Instrumentation", "Qty": 8,
-     "QtyReceived": 8, "Required": "2026-05-20", "Revised": None, "Received": "2026-06-01",
-     "DaysLate": 12, "ExtValue": 21900.0, "JobName": _D12[0], "ProjStatus": "Sold"},
+    {"Supplier": "SKF Canada", "ProjectID": 230219, "PO": "48255", "Item": "14398",
+     "Description": "Spherical roller bearings (lot)", "Qty": 40, "Received": 0,
+     "Required": "2026-06-30", "Revised": None, "DaysLate": 25, "ExtValue": 28800.0,
+     "JobName": _D19[0], "ProjStatus": "Sold"},
+    {"Supplier": "Bosch Rexroth", "ProjectID": 230219, "PO": "48260", "Item": "15112",
+     "Description": "Cylinder seals & glands", "Qty": 12, "Received": 0,
+     "Required": "2026-07-10", "Revised": None, "DaysLate": 15, "ExtValue": 15400.0,
+     "JobName": _D19[0], "ProjStatus": "Sold"},
+    {"Supplier": "Siemens", "ProjectID": 230312, "PO": "48120", "Item": "20055",
+     "Description": "S7-1500 PLC + IO", "Qty": 1, "Received": 0,
+     "Required": "2026-07-01", "Revised": None, "DaysLate": 24, "ExtValue": 47600.0,
+     "JobName": _D12[0], "ProjStatus": "Sold"},
 ]
 
 
