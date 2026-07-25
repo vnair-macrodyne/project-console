@@ -12,5 +12,12 @@
   "pay_period_days": 14,
   "capital_min": 190000, "capital_max": 269999, "service_min": 500000,
   "active_min_hours": 4.0,
-  "output_root": "\\\\MACRO-FILESVR\\Projects\\Reports"
+  "output_root": "\\\\MACRO-FILESVR\\Projects\\Reports",
+
+  "_lexicon_note": "UI display labels — Macrodyne's own workbook language so the tool reads like the Carpedia pack they already use. A new tenant overrides only the terms it wants to rename (e.g. \"discipline\":\"Trade\"); omitted terms keep their defaults.",
+  "lexicon": {
+    "discipline": "Asset Re-Code",
+    "crosswalk": "Asset Re-Code",
+    "hour_description": "Hour Description"
+  }
 }

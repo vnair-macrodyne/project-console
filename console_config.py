@@ -63,6 +63,26 @@ class TenantProfile:
         "Project Management", "Mechanical Engineering", "Hydraulic Engineering",
         "Electrical Engineering", "Manufacturing", "Other"])
 
+    # ── UI lexicon (display labels) ────────────────────────────────────────
+    # Internally the model always uses the canonical terms ("discipline",
+    # "crosswalk", …). These are the *display* labels the web UI, columns and
+    # exports show, so each tenant reads its OWN nomenclature and never has to
+    # learn ours. Defaults here are Macrodyne's existing workbook language — the
+    # roll-up and its mapping are the "Asset Re-Code" (Data Validation B3:C40),
+    # the source is the "Hour Description" — so the tool reads like the Carpedia
+    # pack they already use. A different tenant overrides any subset in its
+    # profile (e.g. "discipline":"Trade"); unspecified keys keep these defaults.
+    lexicon: dict = field(default_factory=lambda: {
+        "project": "Project",
+        "projects": "Projects",
+        "discipline": "Asset Re-Code",       # our "discipline" roll-up = their Asset Re-Code
+        "crosswalk": "Asset Re-Code",         # the HourDescription→bucket mapping table
+        "hour_description": "Hour Description",
+        "labour": "Labour",
+        "material": "Material",
+        "scorecard": "Scorecard",
+    })
+
     # ── output / dashboard ─────────────────────────────────────────────────
     output_root: str = r"\\MACRO-FILESVR\Projects\Reports"
     dashboard_week: str = "current"           # 'current' (from PM Entries) or 'YYYY-WW'
@@ -72,6 +92,10 @@ class TenantProfile:
     reporting_pwd: str | None = None          # $CONSOLE_STORE_PWD
 
     # ------------------------------------------------------------------ helpers
+    def term(self, key: str) -> str:
+        """Display label for a canonical term (falls back to the key itself)."""
+        return self.lexicon.get(key, key.replace("_", " ").title())
+
     def is_service(self, project_id: int) -> bool:
         return int(project_id) >= self.service_min
 
@@ -112,6 +136,12 @@ class TenantProfile:
                 data = json.load(f)
         known = set(cls.__dataclass_fields__)
         prof = cls(**{k: v for k, v in data.items() if k in known})
+        # a profile may override only *some* lexicon terms — merge onto defaults
+        # so unspecified terms keep their canonical labels.
+        if isinstance(data.get("lexicon"), dict):
+            merged = dict(cls().lexicon)
+            merged.update(data["lexicon"])
+            prof.lexicon = merged
         # secrets always from env (never from the committed profile)
         prof.reporting_user = os.environ.get("CONSOLE_STORE_USER", prof.reporting_user)
         prof.reporting_pwd = os.environ.get("CONSOLE_STORE_PWD", prof.reporting_pwd)
