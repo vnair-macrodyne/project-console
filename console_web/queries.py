@@ -187,16 +187,21 @@ class LiveQueryService(QueryService):
                     self._overlay[str(rec.get("ProjectID"))] = rec
         return self._overlay
 
-    def _project_names(self, project_ids):
-        """{project_id: name} from ETO (vwTimecards.PDescription) — best-effort."""
+    def _project_meta(self, project_ids):
+        """{project_id: (name, client)} from ETO (vwTimecards) — best-effort."""
         if not project_ids:
             return {}
         ids = ",".join(str(int(p)) for p in project_ids)
         try:
             cur = self._eto_conn().cursor()
-            cur.execute(f"SELECT DISTINCT ProjectID, PDescription FROM dbo.vwTimecards "
+            cur.execute(f"SELECT DISTINCT ProjectID, PDescription, Customer FROM dbo.vwTimecards "
                         f"WHERE ProjectID IN ({ids})")
-            return {int(r[0]): r[1] for r in cur.fetchall() if r[1]}
+            out = {}
+            for r in cur.fetchall():
+                pid = int(r[0])
+                if pid not in out:
+                    out[pid] = (r[1], _clean_client(r[2]))
+            return out
         except Exception:
             return {}
 
@@ -239,13 +244,14 @@ class LiveQueryService(QueryService):
     def _q_exec(self, project_ids, **kw):
         fin = self._financials(project_ids)
         ov = self._overlay_map()
-        names = self._project_names(project_ids)
+        meta = self._project_meta(project_ids)
         rows = []
         for pid in fin:
             f = fin[pid]
             rec = ov.get(str(pid), {})
+            name, client = meta.get(pid, (None, None))
             disc_pct = {d.discipline: d.consumed_pct for d in (f.disciplines if f else [])}
-            rows.append(_exec_row(pid, names.get(pid), f, rec, disc_pct))
+            rows.append(_exec_row(pid, name, client, f, rec, disc_pct))
         return _finalize_exec(rows)
 
     def _q_scorecard(self, project_ids, **kw):
@@ -307,7 +313,7 @@ class LiveQueryService(QueryService):
 def _scorecard_result(rows):
     proj, labour, material = L("project"), L("labour"), L("material")
     cols = [
-        QueryColumn("ProjectID", proj, "int", "left"),
+        QueryColumn("ProjectID", proj, "id", "left"),
         QueryColumn("LabourBudget", f"{labour} Budget (hrs)", "hours", "right"),
         QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right"),
         QueryColumn("LabourPct", f"{labour} %", "pct", "right"),
@@ -332,7 +338,7 @@ def _scorecard_result(rows):
 def _discipline_result(rows):
     proj, disc = L("project"), L("discipline")
     cols = [
-        QueryColumn("ProjectID", proj, "int", "left"),
+        QueryColumn("ProjectID", proj, "id", "left"),
         QueryColumn("Discipline", disc, "text", "left"),
         QueryColumn("BudgetHours", "Budget (hrs)", "hours", "right"),
         QueryColumn("ActualHours", "Actual (hrs)", "hours", "right"),
@@ -350,7 +356,7 @@ def _discipline_result(rows):
 def _budget_actual_result(rows):
     proj, labour, material = L("project"), L("labour"), L("material")
     cols = [
-        QueryColumn("ProjectID", proj, "int", "left"),
+        QueryColumn("ProjectID", proj, "id", "left"),
         QueryColumn("LabourBudget", f"{labour} Budget (hrs)", "hours", "right"),
         QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right"),
         QueryColumn("LabourVar", f"{labour} Variance (hrs)", "hours", "right"),
@@ -418,7 +424,7 @@ def _exec_columns():
     labour, material, disc = L("labour"), L("material"), L("discipline")
     cols = [
         QueryColumn("Rank", "Rank", "int", "right", ""),
-        QueryColumn("ProjectID", "Proj ID", "int", "left", ""),
+        QueryColumn("ProjectID", "Proj ID", "id", "left", ""),
         QueryColumn("Project", L("project"), "text", "left", ""),
         # Schedule
         QueryColumn("POShipDate", "P.O. Ship", "date", "left", "Schedule"),
@@ -462,7 +468,7 @@ def _exec_result(rows):
     return QueryResult("exec", "Executive Dashboard", cols, rows, cards, note)
 
 
-def _exec_row(pid, name, f, rec, disc_pct):
+def _exec_row(pid, name, client, f, rec, disc_pct):
     """Assemble one ranked row from financials (ETO) + overlay (manual)."""
     planned = rec.get("PlannedShipDate")
     agreed = rec.get("CustAgreedDate")
@@ -470,6 +476,7 @@ def _exec_row(pid, name, f, rec, disc_pct):
         "Rank": _int(rec.get("Rank")),
         "ProjectID": pid,
         "Project": name or str(pid),
+        "Client": client,
         "POShipDate": _iso(rec.get("POShipDate")),
         "CustAgreedDate": _iso(agreed),
         "PlannedShipDate": _iso(planned),
@@ -522,6 +529,15 @@ def _ids_sql(project_ids):
     return ",".join(str(int(p)) for p in project_ids)
 
 
+def _cap_note(rows, datekey):
+    """Explain the detail cap and show how far back the shown rows reach."""
+    dates = [r.get(datekey) for r in rows if r.get(datekey)]
+    earliest = min(dates) if dates else None
+    return (f"  Capped at the most recent {_DETAIL_CAP:,} rows"
+            + (f" (only back to {earliest})" if earliest else "")
+            + " — scope to fewer projects or set a date range to see older records.")
+
+
 def _date_clause(col, dfrom, dto):
     parts = []
     if dfrom:
@@ -535,7 +551,7 @@ def _date_clause(col, dfrom, dto):
 def _labour_summary_result(rows):
     proj, labour = L("project"), L("labour")
     cols = [
-        QueryColumn("ProjectID", "Proj ID", "int", "left"),
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
         QueryColumn("Project", proj, "text", "left"),
         QueryColumn("Department", "Department", "text", "left"),
         QueryColumn("Employees", "Employees", "int", "right"),
@@ -556,7 +572,7 @@ def _labour_detail_result(rows, capped=False):
     labour = L("labour")
     cols = [
         QueryColumn("WorkDate", "Date", "date", "left"),
-        QueryColumn("ProjectID", "Proj ID", "int", "left"),
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
         QueryColumn("Employee", "Employee", "text", "left"),
         QueryColumn("Department", "Department", "text", "left"),
         QueryColumn("HourDescription", L("hour_description"), "text", "left"),
@@ -568,8 +584,8 @@ def _labour_detail_result(rows, capped=False):
     cards = [Card("Timecards", str(len(rows))),
              Card("Total hours", _fmt_hours(sum(r.get("Hours") or 0 for r in rows))),
              Card("Total cost", _fmt_money(sum(r.get("Cost") or 0 for r in rows)))]
-    note = (f"{L('labour')} detail — applied-rate cost, live from ETO."
-            + (f"  Showing the most recent {_DETAIL_CAP:,} rows." if capped else ""))
+    note = (f"{L('labour')} detail — applied-rate cost, live from ETO, newest first."
+            + (_cap_note(rows, "WorkDate") if capped else ""))
     return QueryResult("labour_detail", f"{L('labour')} Detail", cols, rows, cards, note)
 
 
@@ -632,10 +648,10 @@ def _po_summary_result(rows):
 
 def _po_detail_result(rows, capped=False):
     cols = [
-        QueryColumn("PO", "PO", "int", "left"),
+        QueryColumn("PO", "PO", "id", "left"),
         QueryColumn("PODate", "PO Date", "date", "left"),
         QueryColumn("Vendor", "Vendor", "text", "left"),
-        QueryColumn("ProjectID", "Proj ID", "int", "left"),
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
         QueryColumn("Item", "Item", "text", "left"),
         QueryColumn("Qty", "Qty", "num", "right"),
         QueryColumn("UOM", "UOM", "text", "left"),
@@ -646,9 +662,9 @@ def _po_detail_result(rows, capped=False):
     ]
     cards = [Card("Lines", str(len(rows))),
              Card(f"Total ({_BASE_CCY})", _fmt_money(sum(r.get("BaseValue") or 0 for r in rows)))]
-    note = (f"PO line items, active POs only, live from ETO. Ext. Value native (see Curr); "
-            f"Ext. Value ({_BASE_CCY}) = native × PO rate."
-            + (f"  Showing the most recent {_DETAIL_CAP:,} rows." if capped else ""))
+    note = (f"PO line items, active POs only, live from ETO, newest first. Ext. Value native "
+            f"(see Curr); Ext. Value ({_BASE_CCY}) = native × PO rate."
+            + (_cap_note(rows, "PODate") if capped else ""))
     return QueryResult("po_detail", "Purchase Detail", cols, rows, cards, note)
 
 
@@ -773,14 +789,14 @@ def _nc_summary_result(rows):
 
 def _nc_detail_result(rows):
     cols = [
-        QueryColumn("NCR", "NCR", "int", "left"),
-        QueryColumn("ProjectID", "Proj ID", "int", "left"),
+        QueryColumn("NCR", "NCR", "id", "left"),
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
         QueryColumn("Status", "Status", "text", "left"),
         QueryColumn("Source", "Source", "text", "left"),
         QueryColumn("Origin", "Origin", "text", "left"),
         QueryColumn("Part", "Part", "text", "left"),
         QueryColumn("Supplier", "Supplier", "text", "left"),
-        QueryColumn("PO", "PO", "int", "left"),
+        QueryColumn("PO", "PO", "id", "left"),
         QueryColumn("Closed", "Closed", "date", "left"),
     ]
     openn = sum(1 for r in rows if r.get("Status") == "Open")
@@ -792,6 +808,18 @@ def _nc_detail_result(rows):
 
 def _fmt_hours(v):
     return "{:,.0f}".format(v or 0)
+
+
+def _clean_client(s):
+    """Trim ETO customer decorations, e.g. 'ACME Corp [Detroit] (Approved)' -> 'ACME Corp'."""
+    if not s:
+        return None
+    s = str(s)
+    for sep in (" [", " ("):
+        i = s.find(sep)
+        if i != -1:
+            s = s[:i]
+    return s.strip() or None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -836,15 +864,15 @@ _DEMO_XWALK = {
 
 # Executive-board extras for the demo (schedule/2-wk/procurement — the manual overlay)
 _DEMO_EXEC = {
-    230219: {"name": "3000T Hydraulic Press", "po": "2026-09-04", "planned": "2026-10-02",
-             "mat_runout": 1.08, "done_delta": 0.04, "lab2wk": 214, "mat2wk": 61000,
-             "proc": (612, 44, 3, 5, 2, 9, 4)},
-    230312: {"name": "1600T Trim Press Line", "po": "2026-10-23", "planned": "2026-11-06",
-             "mat_runout": 0.94, "done_delta": 0.06, "lab2wk": 176, "mat2wk": 38500,
-             "proc": (488, 31, 0, 1, 0, 4, 2)},
-    240087: {"name": "800T Forming Cell", "po": "2027-02-05", "planned": "2027-02-05",
-             "mat_runout": 0.90, "done_delta": 0.05, "lab2wk": 132, "mat2wk": 20100,
-             "proc": (395, 22, 0, 0, 0, 1, 0)},
+    230219: {"name": "3000T Hydraulic Press", "client": "Nucor Steel", "po": "2026-09-04",
+             "planned": "2026-10-02", "mat_runout": 1.08, "done_delta": 0.04, "lab2wk": 214,
+             "mat2wk": 61000, "proc": (612, 44, 3, 5, 2, 9, 4)},
+    230312: {"name": "1600T Trim Press Line", "client": "Magna International", "po": "2026-10-23",
+             "planned": "2026-11-06", "mat_runout": 0.94, "done_delta": 0.06, "lab2wk": 176,
+             "mat2wk": 38500, "proc": (488, 31, 0, 1, 0, 4, 2)},
+    240087: {"name": "800T Forming Cell", "client": "Alcoa", "po": "2027-02-05",
+             "planned": "2027-02-05", "mat_runout": 0.90, "done_delta": 0.05, "lab2wk": 132,
+             "mat2wk": 20100, "proc": (395, 22, 0, 0, 0, 1, 0)},
 }
 _PROC_KEYS = ["TotalLineItems", "LLTPOrdered", "LLTPRelLate", "LLTPOrdLate",
               "LLTPDelLate", "PartsRelLate", "PartsOrdLate"]
@@ -868,7 +896,7 @@ class DemoQueryService(QueryService):
                    "PctDoneDelta": e["done_delta"], "LabHrs2wk": e["lab2wk"],
                    "MatSpend2wk": e["mat2wk"]}
             rec.update(dict(zip(_PROC_KEYS, e["proc"])))
-            rows.append(_exec_row(pid, e["name"], f, rec, disc_pct))
+            rows.append(_exec_row(pid, e["name"], e["client"], f, rec, disc_pct))
         return _finalize_exec(rows)
 
     def _sel(self, project_ids):

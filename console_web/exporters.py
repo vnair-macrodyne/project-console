@@ -29,6 +29,8 @@ def _fmt(value, ctype):
             return "{:.1f}%".format(float(value) * 100)
         if ctype == "int":
             return "{:,d}".format(int(float(value)))
+        if ctype == "id":
+            return str(int(float(value)))
     except (TypeError, ValueError):
         return str(value)
     return str(value)
@@ -146,6 +148,9 @@ def to_xlsx(result) -> bytes:
             elif col.type == "num" and isinstance(raw, (int, float)):
                 cell.value = raw
                 cell.number_format = "#,##0.##"
+            elif col.type == "id" and isinstance(raw, (int, float)):
+                cell.value = int(raw)
+                cell.number_format = "0"
             elif col.type == "money" and isinstance(raw, (int, float)):
                 cell.value = raw
                 cell.number_format = '"$"#,##0'

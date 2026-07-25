@@ -93,7 +93,8 @@
   table.exec thead tr.group th{top:0;height:26px}
   table.exec thead th.grp{background:#2E75B6;border-right:2px solid #fff;font-size:11px;
     letter-spacing:.3px;text-transform:uppercase}
-  table.exec thead th.grpblank{background:#fff;border-right:1px solid #fff;cursor:default}
+  table.exec thead th.grpblank{background:var(--brand);border-right:1px solid #35528a;cursor:default}
+  table.exec thead th.stick{background:var(--brand);color:#fff}
   table.exec thead tr.metric th{top:26px}
   table.exec tbody td{padding:6px 10px;text-align:center;border-right:1px solid var(--line);font-size:12px}
   table.exec tbody td.l{text-align:left}
@@ -104,10 +105,14 @@
   .stick{position:sticky;background:#fff;z-index:2}
   table.exec tbody tr:nth-child(even) .stick{background:#F2F4F8}
   thead .stick{z-index:3}
-  .s0{left:0} .s1{left:46px} .s2{left:108px}
+  .s0{left:0} .s1{left:46px} .s2{left:108px} .s3{left:278px}
   table.exec .c-rank{min-width:46px;max-width:46px}
   table.exec .c-pid{min-width:62px;max-width:62px}
-  table.exec .c-proj{min-width:170px;max-width:170px;text-align:left}
+  table.exec .c-proj{min-width:210px;max-width:210px;text-align:left}
+  table.exec .c-client{min-width:170px;max-width:170px;text-align:left}
+  td.wrap{white-space:normal;word-break:break-word;max-width:320px;vertical-align:middle}
+  .csub{font-size:11px;color:var(--muted);font-weight:400;margin-top:2px;line-height:1.25}
+  table.exec tbody td.l .csub{white-space:normal;word-break:break-word}
   .pill{padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600;display:inline-block}
   .pill.good{background:var(--good-bg);color:var(--good)}
   .pill.warn{background:var(--warn-bg);color:var(--warn)}
@@ -291,6 +296,7 @@ function fmt(v,type){
   if(type==='hours') return Math.round(v).toLocaleString();
   if(type==='num') return Number(v).toLocaleString(undefined,{maximumFractionDigits:2});
   if(type==='int') return Math.round(v).toLocaleString();
+  if(type==='id') return String(v);
   return v;
 }
 function pctPill(v){
@@ -322,7 +328,14 @@ function renderResult(){
   }
 
   const grouped = r.columns.some(c=>c.block);
-  el('tscroll').innerHTML = grouped ? renderExec(r,rows) : renderPlain(r,rows);
+  if(rows.length===0){
+    const dated = el('dfrom').value || el('dto').value;
+    el('tscroll').innerHTML = '<div class="empty"><div class="big">No rows</div>'
+      + 'Nothing matched this selection'+(dated?' and date range':'')
+      + '. A project with no charged time / POs / NCRs yet will be empty here.</div>';
+  } else {
+    el('tscroll').innerHTML = grouped ? renderExec(r,rows) : renderPlain(r,rows);
+  }
   el('tscroll').querySelectorAll('th[data-k]').forEach(th=>{
     th.onclick=()=>{ const k=th.dataset.k;
       if(state.sort.key===k) state.sort.dir*=-1; else {state.sort.key=k;state.sort.dir=1;}
@@ -353,9 +366,9 @@ function renderPlain(r,rows){
   rows.forEach(row=>{
     h+='<tr>';
     r.columns.forEach(c=>{
-      const rc = c.align==='right'?' class="r"':'';
+      const cls=[c.align==='right'?'r':'', c.type==='text'?'wrap':''].filter(Boolean).join(' ');
       const cell = c.type==='pct' ? pctPill(row[c.key]) : fmt(row[c.key], c.type);
-      h+=`<td${rc}>${cell}</td>`;
+      h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`;
     });
     h+='</tr>';
   });
@@ -374,13 +387,14 @@ function renderExec(r,rows){
     while(i+span<cols.length && cols[i+span].block===blk) span++;
     if(blk){ h+=`<th class="grp" colspan="${span}">${blk}</th>`; }
     else { for(let k=0;k<span;k++){ const sc=stickClass(i+k);
-             h+=`<th class="grpblank ${sc}"></th>`; } }
+             const wc=cols[i+k].key==='Client'?' c-client':'';
+             h+=`<th class="grpblank ${sc}${wc}"></th>`; } }
     i+=span;
   }
   h+='</tr><tr class="metric">';
   cols.forEach((c,idx)=>{
     const arrow = state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
-    const sc=stickClass(idx);
+    const sc=[stickClass(idx), c.key==='Client'?'c-client':''].filter(Boolean).join(' ');
     h+=`<th class="${sc}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`;
   });
   h+='</tr></thead><tbody>';
@@ -391,10 +405,12 @@ function renderExec(r,rows){
       const v=row[c.key];
       const sc=stickClass(idx);
       const drill = canDrill && (idx===1 || idx===2);
-      const cls=[sc, c.align==='left'||c.type==='text'?'l':'', tlClass(v,c.type), sc?'':'zebra',
-                 drill?'drillable':''].filter(Boolean).join(' ');
+      const cls=[sc, c.align==='left'||c.type==='text'?'l':'', c.type==='text'?'wrap':'',
+                 tlClass(v,c.type), sc?'':'zebra', drill?'drillable':''].filter(Boolean).join(' ');
       const attr = drill?` data-pid="${row.ProjectID}"`:'';
-      h+=`<td class="${cls}"${attr}>${fmt(v,c.type)}</td>`;
+      let content = fmt(v,c.type);
+      if(c.key==='Project' && row.Client) content += `<div class="csub">${row.Client}</div>`;
+      h+=`<td class="${cls}"${attr}>${content}</td>`;
     });
     h+='</tr>';
   });
