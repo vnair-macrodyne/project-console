@@ -597,7 +597,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None):
         poh.PurchaseOrderID             AS PO,
         poh.CName                       AS Vendor,
         pod.PurchaseQty                 AS Qty,
-        pod.Received                    AS Received,
+        ISNULL(rls.SumOfQtyReceived, 0) AS Received,
         pod.ExtendedPrice               AS ExtValue,
         CAST(pod.DateRequired AS date)  AS DateRequired,
         CAST(pod.DateRevised  AS date)  AS DateRevised,
@@ -608,11 +608,12 @@ def query_po_exceptions(include_leadtime=True, project_ids=None):
         {rel_sel}                       AS EngReleaseDate
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
+    LEFT JOIN vwReceiverLogSummed rls ON rls.PurchaseDetailID = pod.PurchaseDetailID
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
     {buyer_join}
     {lead_join}
     WHERE poh.PurchaseActive = 1
-      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}
+      AND (pod.PurchaseQty - ISNULL(rls.SumOfQtyReceived, 0) > 0){proj}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
     """
 
@@ -735,6 +736,133 @@ def exceptions_book_bytes(items, label):
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LATE VENDORS — faithful port of dbo.urpPurchasingLateVendors
+# ETO's own late report: RECEIVED lines that arrived AFTER their need-by, by vendor.
+#   need-by  = ISNULL(DateRevised, DateRequired)          (detail dates)
+#   received = vwReceiverLogSummed.MaxOfDate               (actual last receipt date)
+#   DaysLate = DATEDIFF(d, need-by, received)  (> 0)
+#   line is fully received: PurchaseQty - SumOfQtyReceived <= 0
+# Scoped by the console's date pickers = the PO-created window (@datPOCreated*), and by
+# the selected projects. This is a vendor delivery-PERFORMANCE report (backward-looking).
+# ─────────────────────────────────────────────────────────────────────────────
+COLS_LATE = [
+    ("ProjectID",   "Project",     8,  "C", False),
+    ("PO",          "PO #",        7,  "L", False),
+    ("Item",        "Item",        14, "L", False),
+    ("Description", "Description", 24, "L", False),
+    ("Category",    "Category",    14, "L", False),
+    ("Qty",         "Qty",          6, "R", True),
+    ("QtyReceived", "Rec'd",        6, "R", True),
+    ("Required",    "Required",    10, "C", False),
+    ("Revised",     "Revised",     10, "C", False),
+    ("Received",    "Received",    10, "C", False),
+    ("DaysLate",    "Days Late",    7, "R", True),
+    ("ExtValue",    "Ext. Value",  11, "R", True),
+]
+
+
+def query_late_vendors(project_ids=None, date_from=None, date_to=None):
+    """Transcribed from urpPurchasingLateVendors. Base value = qty×price×PurchaseCurrRate
+    (the SP's ExtendedPriceExchange). Date window filters PO creation date (PurchaseDate)."""
+    proj = ""
+    if project_ids:
+        ids = ",".join(str(int(p)) for p in project_ids)
+        proj = f" AND POD.ProjectID IN ({ids})"
+    win = ""
+    if date_from:
+        win += f" AND POH.PurchaseDate >= '{date_from}'"
+    if date_to:
+        win += f" AND POH.PurchaseDate < DATEADD(day, 1, '{date_to}')"
+    need_by = "ISNULL(POD.DateRevised, POD.DateRequired)"
+    return f"""
+    SELECT
+        SC.CName                                       AS Supplier,
+        POD.ProjectID                                  AS ProjectID,
+        POH.PurchaseOrderID                            AS PO,
+        CASE WHEN POD.ProcessScheduleDetailID IS NULL THEN
+                CASE WHEN POD.PurchaseSupplierItem IS NULL THEN EIM.ItemCompanyID
+                     ELSE POD.PurchaseSupplierItem END
+             ELSE EIM2.ItemCompanyID + ' - ' + EIM.ItemCompanyID END       AS Item,
+        CASE WHEN POD.ProcessScheduleDetailID IS NULL THEN
+                CASE WHEN POD.PurchaseSupplierDescription IS NULL THEN EIM.ItemDescription
+                     ELSE POD.PurchaseSupplierDescription END
+             ELSE EIM.ItemDescription + ' - ' + EIM2.ItemDescription END    AS Description,
+        IMC.CategoryDescription                        AS Category,
+        POD.PurchaseQty                                AS Qty,
+        CAST(RLS.SumOfQtyReceived AS decimal(20,6))    AS QtyReceived,
+        CAST(POD.DateRequired AS date)                 AS Required,
+        CAST(POD.DateRevised  AS date)                 AS Revised,
+        CAST(RLS.MaxOfDate    AS date)                 AS Received,
+        DATEDIFF(d, {need_by}, RLS.MaxOfDate)          AS DaysLate,
+        CAST(POD.PurchaseQty * POD.PurchasePrice * POH.PurchaseCurrRate AS decimal(20,6)) AS ExtValue,
+        P.PDescription                                 AS JobName,
+        P.PStatus                                      AS ProjStatus
+    FROM tblPurchaseOrderHeader POH
+        INNER JOIN tblCompany SC ON POH.PurchaseSupplierID = SC.CompanyID
+        INNER JOIN tblPurchaseOrderDetails POD ON POH.PurchaseOrderID = POD.PurchaseOrderID
+        INNER JOIN tblEngItemMaster EIM ON POD.ItemID = EIM.ItemID
+        INNER JOIN tlkpItemMaster_Categories IMC ON EIM.ItemCategory = IMC.ItemCategory
+        INNER JOIN tblProjects P ON POD.ProjectID = P.ProjectID
+        INNER JOIN tblCompany PC ON P.CompanyID = PC.CompanyID
+        LEFT JOIN vwReceiverLogSummed RLS ON POD.PurchaseDetailID = RLS.PurchaseDetailID
+        LEFT JOIN tblProcessScheduleHeader PSH ON POD.ProcessScheduleID = PSH.ProcessScheduleID
+        LEFT JOIN tblEngItemMaster EIM2 ON PSH.ItemID = EIM2.ItemID
+    WHERE (POD.PurchaseQty - ISNULL(RLS.SumOfQtyReceived, 0)) <= 0
+      AND (DATEDIFF(d, {need_by}, RLS.MaxOfDate) > 0){proj}{win}
+    ORDER BY SC.CName, DaysLate DESC
+    """
+
+
+def _ds(v):
+    """NaN/None/NaT-safe date string (blank when missing)."""
+    if v is None:
+        return ""
+    try:
+        if v != v:            # NaN
+            return ""
+    except Exception:
+        pass
+    try:
+        return v.strftime("%Y-%m-%d")
+    except Exception:
+        s = str(v)
+        return "" if s.strip().lower() in ("nan", "nat", "none") else s
+
+
+def late_build_rows(df):
+    """Group by vendor: band → late lines (worst first) → per-vendor subtotal → grand."""
+    n = len(COLS_LATE)
+    if df.empty:
+        return [(["No late-vendor lines in the selected window."] + [""] * (n - 1), "grand")]
+    rows = []
+    for sup in sorted(df["Supplier"].dropna().unique(), key=str):
+        ssub = df[df["Supplier"] == sup].sort_values("DaysLate", ascending=False)
+        rows.append(([f"Vendor: {sup}   ·   {len(ssub)} late line(s)"] + [""] * (n - 1), "l3_sub"))
+        for _, r in ssub.iterrows():
+            rows.append(([r.ProjectID, r.PO, r.Item, r.Description, r.Category, r.Qty,
+                          r.QtyReceived, _ds(r.Required), _ds(r.Revised),
+                          _ds(r.Received), int(r.DaysLate), round(float(r.ExtValue), 2)], "detail"))
+        rows.append(([f"{sup} — Late Value", "", "", "", "", "", "", "", "", "",
+                      int(ssub["DaysLate"].max()), round(float(ssub["ExtValue"].sum()), 2)], "l1_sub"))
+    rows.append((["GRAND TOTAL — Late Value"] + [""] * 9
+                 + [int(df["DaysLate"].max()), round(float(df["ExtValue"].sum()), 2)], "grand"))
+    return rows
+
+
+def late_vendors_book_bytes(df, label):
+    rows = late_build_rows(df)
+    wb = Workbook(); wb.remove(wb.active)
+    ws = wb.create_sheet("Late Vendors")
+    _populate_sheet(ws, "Purchasing — Late Vendors",
+                    "Received lines delivered after need-by (revised, else required) — by vendor",
+                    COLS_LATE, rows, label)
+    ci = [i for i, c in enumerate(COLS_LATE, 1) if c[0] == "ExtValue"][0]
+    for row in range(4, ws.max_row + 1):
+        ws.cell(row=row, column=ci).number_format = "$#,##0.00"
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
