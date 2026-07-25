@@ -29,9 +29,10 @@ def L(key: str) -> str:
 class QueryColumn:
     key: str
     label: str
-    type: str = "text"        # text | int | hours | money | pct | date | days
+    type: str = "text"        # text | int | hours | money | pct | date | days | id | num
     align: str = "left"       # left | right
     block: str = ""           # group-band label (Executive Dashboard); "" = ungrouped
+    wrap: bool = False         # long-text column: wrap within a max-width (others stay 1-line)
 
 
 @dataclass
@@ -65,58 +66,65 @@ class QueryResult:
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
-              "labour_summary", "labour_detail", "po_summary", "po_detail",
+              "labour_summary", "labour_detail", "labour_by_dept",
+              "po_summary", "po_detail", "po_exception",
               "nc_summary", "nc_detail"}
 
-# families that read ETO live and honour the optional date range
-ETO_REPORT_IDS = {"labour_summary", "labour_detail", "po_summary", "po_detail",
-                  "nc_summary", "nc_detail"}
+# reports that read ETO live and honour the optional date range
+ETO_REPORT_IDS = {"labour_summary", "labour_detail", "labour_by_dept",
+                  "po_summary", "po_detail", "po_exception", "nc_summary", "nc_detail"}
 
 
 def catalogue():
-    """Built per call so labels reflect the current tenant lexicon.
-    Each entry carries a `family` so the UI can group the suite."""
+    """Built per call so labels reflect the current tenant lexicon. Each entry carries
+    a `menu` (top-nav group) and `label` (item); the UI renders menus across the top."""
     proj, disc = L("project"), L("discipline")
     labour, material = L("labour"), L("material")
-    pc = "Project Console"
     return [
-        {"id": "exec", "family": pc, "label": "Executive Dashboard",
+        # ── Dashboards ────────────────────────────────────────────────────
+        {"id": "exec", "menu": "Dashboards", "label": "Executive",
          "desc": "The full ranked board — schedule, budget, 2-week delta, labour by "
                  f"{disc.lower()} and procurement — one row per {proj.lower()}.",
          "needs_projects": True},
-        {"id": "scorecard", "family": pc, "label": f"{proj} {L('scorecard')}",
+        {"id": "scorecard", "menu": "Dashboards", "label": proj,
          "desc": f"One row per {proj.lower()}: {labour.lower()} & {material.lower()} "
                  f"budget vs actual, schedule, progress, rank.",
          "needs_projects": True},
-        {"id": "discipline", "family": pc, "label": f"{disc} Financials",
+        {"id": "discipline", "menu": "Dashboards", "label": f"{disc} Financials",
          "desc": f"Per-{disc.lower()} budgeted vs actual hours, consumed % and remaining hours.",
          "needs_projects": True},
-        {"id": "budget_actual", "family": pc, "label": "Budget vs Actual",
+        {"id": "budget_actual", "menu": "Dashboards", "label": "Budget vs Actual",
          "desc": f"{labour}-hours and {material.lower()}-$ budget, actual, variance and "
                  f"consumed % per {proj.lower()}.",
          "needs_projects": True},
-        {"id": "crosswalk", "family": pc, "label": L("crosswalk"),
+        {"id": "crosswalk", "menu": "Dashboards", "label": f"{L('crosswalk')} (map)",
          "desc": f"The {L('hour_description')} → {disc.lower()} mapping (reference).",
          "needs_projects": False},
-        # ── Labour (ETO, live) ────────────────────────────────────────────
-        {"id": "labour_summary", "family": labour, "label": f"{labour} Summary",
+        # ── Labour ────────────────────────────────────────────────────────
+        {"id": "labour_summary", "menu": labour, "label": "Summary",
          "desc": f"Actual hours & cost (applied rate) by {proj.lower()} and department.",
          "needs_projects": True},
-        {"id": "labour_detail", "family": labour, "label": f"{labour} Detail",
+        {"id": "labour_detail", "menu": labour, "label": "Details — All",
          "desc": "Timecard-level audit trail — date, employee, department, hours, rate, cost.",
          "needs_projects": True},
-        # ── Purchase (ETO, live) ──────────────────────────────────────────
-        {"id": "po_summary", "family": "Purchase", "label": "Purchase Summary",
+        {"id": "labour_by_dept", "menu": labour, "label": "Details — Department-wise",
+         "desc": f"Hours & cost rolled up department → {proj.lower()} (applied rate).",
+         "needs_projects": True},
+        # ── Purchasing ────────────────────────────────────────────────────
+        {"id": "po_summary", "menu": "Purchasing", "label": "Summary",
          "desc": f"PO commitment by vendor for the selected {proj.lower()}s (extended value).",
          "needs_projects": True},
-        {"id": "po_detail", "family": "Purchase", "label": "Purchase Detail",
+        {"id": "po_detail", "menu": "Purchasing", "label": "Details",
          "desc": "PO line items — order, date, vendor, item, extended value, received.",
          "needs_projects": True},
-        # ── Non-Conformance (ETO, live) ───────────────────────────────────
-        {"id": "nc_summary", "family": "Non-Conformance", "label": "Non-Conformance Summary",
+        {"id": "po_exception", "menu": "Purchasing", "label": "Exception",
+         "desc": "Open PO lines delivered-late or ordered-late for lead time, by buyer.",
+         "needs_projects": True},
+        # ── Non-Conformance ───────────────────────────────────────────────
+        {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
          "desc": "NCR counts by source, split open vs closed.",
          "needs_projects": True},
-        {"id": "nc_detail", "family": "Non-Conformance", "label": "Non-Conformance Detail",
+        {"id": "nc_detail", "menu": "Non-Conformance", "label": "Details",
          "desc": "NCR list — status, source, origin, part, supplier, PO, closed date.",
          "needs_projects": True},
     ]
@@ -291,11 +299,17 @@ class LiveQueryService(QueryService):
     def _q_labour_detail(self, project_ids, date_from=None, date_to=None, **kw):
         return _live_labour_detail(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
+    def _q_labour_by_dept(self, project_ids, date_from=None, date_to=None, **kw):
+        return _live_labour_by_dept(self._eto_conn().cursor(), project_ids, date_from, date_to)
+
     def _q_po_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _live_po_summary(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
     def _q_po_detail(self, project_ids, date_from=None, date_to=None, **kw):
         return _live_po_detail(self._eto_conn().cursor(), project_ids, date_from, date_to)
+
+    def _q_po_exception(self, project_ids, date_from=None, date_to=None, **kw):
+        return _live_po_exception(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(
@@ -373,7 +387,7 @@ def _budget_actual_result(rows):
 def _crosswalk_result(rows):
     disc = L("discipline")
     cols = [
-        QueryColumn("HourDescription", L("hour_description"), "text", "left"),
+        QueryColumn("HourDescription", L("hour_description"), "text", "left", wrap=True),
         QueryColumn("Discipline", disc, "text", "left"),
     ]
     cards = [Card("Mappings", str(len(rows)))]
@@ -425,7 +439,7 @@ def _exec_columns():
     cols = [
         QueryColumn("Rank", "Rank", "int", "right", ""),
         QueryColumn("ProjectID", "Proj ID", "id", "left", ""),
-        QueryColumn("Project", L("project"), "text", "left", ""),
+        QueryColumn("Project", L("project"), "text", "left", "", wrap=True),
         # Schedule
         QueryColumn("POShipDate", "P.O. Ship", "date", "left", "Schedule"),
         QueryColumn("CustAgreedDate", "Cust. Agreed", "date", "left", "Schedule"),
@@ -552,7 +566,7 @@ def _labour_summary_result(rows):
     proj, labour = L("project"), L("labour")
     cols = [
         QueryColumn("ProjectID", "Proj ID", "id", "left"),
-        QueryColumn("Project", proj, "text", "left"),
+        QueryColumn("Project", proj, "text", "left", wrap=True),
         QueryColumn("Department", "Department", "text", "left"),
         QueryColumn("Employees", "Employees", "int", "right"),
         QueryColumn("Entries", "Entries", "int", "right"),
@@ -575,7 +589,7 @@ def _labour_detail_result(rows, capped=False):
         QueryColumn("ProjectID", "Proj ID", "id", "left"),
         QueryColumn("Employee", "Employee", "text", "left"),
         QueryColumn("Department", "Department", "text", "left"),
-        QueryColumn("HourDescription", L("hour_description"), "text", "left"),
+        QueryColumn("HourDescription", L("hour_description"), "text", "left", wrap=True),
         QueryColumn("HourClass", "Class", "text", "left"),
         QueryColumn("Hours", "Hours", "hours", "right"),
         QueryColumn("Rate", "Rate", "money", "right"),
@@ -626,6 +640,42 @@ def _live_labour_detail(cur, pids, dfrom, dto):
     return _labour_detail_result(rows, capped)
 
 
+def _labour_by_dept_result(rows):
+    proj, labour = L("project"), L("labour")
+    cols = [
+        QueryColumn("Department", "Department", "text", "left"),
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
+        QueryColumn("Project", proj, "text", "left", wrap=True),
+        QueryColumn("Employees", "Employees", "int", "right"),
+        QueryColumn("Entries", "Entries", "int", "right"),
+        QueryColumn("Hours", "Hours", "hours", "right"),
+        QueryColumn("Cost", "Cost", "money", "right"),
+    ]
+    depts = {r.get("Department") for r in rows}
+    cards = [Card("Departments", str(len(depts))),
+             Card("Total hours", _fmt_hours(sum(r.get("Hours") or 0 for r in rows))),
+             Card("Total cost", _fmt_money(sum(r.get("Cost") or 0 for r in rows)))]
+    return QueryResult("labour_by_dept", f"{labour} — Department-wise", cols, rows, cards,
+                       "Hours & applied-rate cost rolled up department → project, live from ETO.")
+
+
+def _live_labour_by_dept(cur, pids, dfrom, dto):
+    cur.execute(f"""
+        SELECT t.DeptName AS Department, t.ProjectID, MAX(t.PDescription) AS Project,
+               COUNT(DISTINCT t.EmployeeID) AS Employees, COUNT(*) AS Entries,
+               SUM(t.HourTime) AS Hours,
+               SUM(t.HourTime * t.HourRate * t.HourFactor) AS Cost
+        FROM dbo.vwTimecards t
+        WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
+        GROUP BY t.DeptName, t.ProjectID
+        ORDER BY t.DeptName, t.ProjectID
+    """)
+    rows = [{"Department": r[0], "ProjectID": int(r[1]), "Project": r[2],
+             "Employees": _int(r[3]), "Entries": _int(r[4]),
+             "Hours": _num(r[5]), "Cost": _num(r[6])} for r in cur.fetchall()]
+    return _labour_by_dept_result(rows)
+
+
 # ---- Purchase ------------------------------------------------------------
 def _po_summary_result(rows):
     cols = [
@@ -652,7 +702,7 @@ def _po_detail_result(rows, capped=False):
         QueryColumn("PODate", "PO Date", "date", "left"),
         QueryColumn("Vendor", "Vendor", "text", "left"),
         QueryColumn("ProjectID", "Proj ID", "id", "left"),
-        QueryColumn("Item", "Item", "text", "left"),
+        QueryColumn("Item", "Item", "text", "left", wrap=True),
         QueryColumn("Qty", "Qty", "num", "right"),
         QueryColumn("UOM", "UOM", "text", "left"),
         QueryColumn("Received", "Received", "num", "right"),
@@ -713,6 +763,98 @@ def _live_po_detail(cur, pids, dfrom, dto):
                      "ProjectID": _int(r[3]), "Item": r[4], "Qty": _num(r[5]), "UOM": r[6],
                      "Received": _num(r[7]), "Value": val, "Curr": r[9], "BaseValue": base})
     return _po_detail_result(rows, capped)
+
+
+# ---- Purchasing Exception (mirrors eto_exceptions.py) --------------------
+_LLT_DAYS = 45   # lead time >= this = long-lead item (matches ETO suite)
+
+
+def _po_exception_result(rows, enriched):
+    cols = [
+        QueryColumn("Buyer", "Buyer", "text", "left"),
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
+        QueryColumn("PO", "PO", "id", "left"),
+        QueryColumn("Vendor", "Vendor", "text", "left"),
+        QueryColumn("Item", "Item", "id", "left"),
+        QueryColumn("Descr", "Description", "text", "left", wrap=True),
+        QueryColumn("Qty", "Qty", "num", "right"),
+        QueryColumn("Received", "Rec'd", "num", "right"),
+        QueryColumn("ExtValue", "Ext. Value", "money", "right"),
+        QueryColumn("NeedBy", "Need-By", "date", "left"),
+        QueryColumn("Ordered", "Ordered", "date", "left"),
+        QueryColumn("Lead", "Lead (d)", "int", "right"),
+        QueryColumn("LLT", "LLT", "text", "left"),
+        QueryColumn("OrdLate", "Ord Late", "text", "left"),
+        QueryColumn("DelLate", "Del Late", "text", "left"),
+        QueryColumn("DaysLate", "Days Late", "int", "right"),
+    ]
+    dl = sum(1 for r in rows if r.get("DelLate"))
+    cards = [Card("Exception lines", str(len(rows))),
+             Card("At-risk value", _fmt_money(sum(r.get("ExtValue") or 0 for r in rows)),
+                  "bad" if rows else "good"),
+             Card("Delivered late", str(dl), "bad" if dl else "good")]
+    note = ("Open PO lines (received < ordered) that are delivered-late (need-by past) "
+            + ("or ordered-late for lead time, by buyer. " if enriched
+               else "— lead-time source unavailable, so Ordered-Late / LLT are blank. ")
+            + "Live from ETO.")
+    return QueryResult("po_exception", "Purchasing — Exception", cols, rows, cards, note)
+
+
+def _classify_exceptions(recs, cols, enriched):
+    import datetime as _dt
+    today = _dt.date.today()
+    out = []
+    for r in recs:
+        d = dict(zip(cols, r))
+        need = d.get("DateRevised") or d.get("DateRequired")
+        ordered = d.get("Ordered")
+        lead = _int(d.get("LeadDays"))
+        del_late = bool(need and need < today)
+        days_late = (today - need).days if del_late else 0
+        ord_late = bool(ordered and lead is not None and need
+                        and (ordered + _dt.timedelta(days=lead)) > need)
+        if not (del_late or ord_late):
+            continue
+        out.append({
+            "Buyer": d.get("Buyer"), "ProjectID": _int(d.get("ProjectID")),
+            "PO": _int(d.get("PO")), "Vendor": d.get("Vendor"), "Item": _int(d.get("Item")),
+            "Descr": d.get("Descr"), "Qty": _num(d.get("Qty")), "Received": _num(d.get("Received")),
+            "ExtValue": _num(d.get("ExtValue")), "NeedBy": _iso(need), "Ordered": _iso(ordered),
+            "Lead": lead, "LLT": "LLT" if (lead is not None and lead >= _LLT_DAYS) else "",
+            "OrdLate": "LATE" if ord_late else "", "DelLate": "LATE" if del_late else "",
+            "DaysLate": days_late,
+        })
+    out.sort(key=lambda x: (-(x["DaysLate"] or 0), str(x.get("Buyer") or "")))
+    return out
+
+
+def _live_po_exception(cur, pids, dfrom, dto):
+    ids, dc = _ids_sql(pids), _date_clause('poh.PurchaseDate', dfrom, dto)
+    base_cols = f"""
+           poh.PurchaseOrderID AS PO, pod.ProjectID AS ProjectID, pod.ItemID AS Item,
+           pod.ItemDescription AS Descr, poh.CName AS Vendor,
+           pod.PurchaseQty AS Qty, pod.Received AS Received, pod.ExtendedPrice AS ExtValue,
+           CAST(pod.DateRequired AS date) AS DateRequired,
+           CAST(pod.DateRevised AS date) AS DateRevised,
+           CAST(poh.PurchaseDate AS date) AS Ordered,
+           COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, CAST(poh.BuyerID AS varchar(20))) AS Buyer"""
+    frm = f"""FROM dbo.vwPurchaseOrderDetails pod
+        JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
+        LEFT JOIN dbo.tblEmployee bu ON bu.EmployeeID = poh.BuyerID"""
+    where = (f"WHERE poh.PurchaseActive = 1 AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty) "
+             f"AND pod.ProjectID IN ({ids}){dc}")
+    full = f"SELECT {base_cols}, eim.EstimatedLeadTime AS LeadDays {frm} " \
+           f"LEFT JOIN dbo.tblEngItemMaster eim ON eim.ItemID = pod.ItemID {where}"
+    nolead = f"SELECT {base_cols}, CAST(NULL AS int) AS LeadDays {frm} {where}"
+    enriched = True
+    try:
+        cur.execute(full)
+    except Exception:
+        enriched = False
+        cur.execute(nolead)
+    cols = [d[0] for d in cur.description]
+    rows = _classify_exceptions(cur.fetchall(), cols, enriched)
+    return _po_exception_result(rows, enriched)
 
 
 # ---- Non-Conformance -----------------------------------------------------
@@ -955,6 +1097,17 @@ class DemoQueryService(QueryService):
         rows.sort(key=lambda r: r["WorkDate"], reverse=True)
         return _labour_detail_result(rows, capped=False)
 
+    def _q_labour_by_dept(self, project_ids, date_from=None, date_to=None, **kw):
+        rows = []
+        for pid in self._sel(project_ids):
+            name = _DEMO_EXEC[pid]["name"]
+            for dept, emps, entries, hours, cost in _DEMO_LABOUR[pid]:
+                rows.append({"Department": dept, "ProjectID": pid, "Project": name,
+                             "Employees": emps, "Entries": entries,
+                             "Hours": float(hours), "Cost": float(cost)})
+        rows.sort(key=lambda r: (r["Department"], r["ProjectID"]))
+        return _labour_by_dept_result(rows)
+
     def _q_po_summary(self, project_ids, date_from=None, date_to=None, **kw):
         agg = {}
         for pid in self._sel(project_ids):
@@ -977,6 +1130,11 @@ class DemoQueryService(QueryService):
                              "BaseValue": round(value * _DEMO_FX.get(curr, 1.0), 2)})
         rows.sort(key=lambda r: r["PODate"], reverse=True)
         return _po_detail_result(rows, capped=False)
+
+    def _q_po_exception(self, project_ids, date_from=None, date_to=None, **kw):
+        rows = [dict(r) for r in _DEMO_EXC if r["ProjectID"] in self._sel(project_ids)]
+        rows.sort(key=lambda r: (-(r["DaysLate"] or 0), r["Buyer"]))
+        return _po_exception_result(rows, enriched=True)
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids))
@@ -1037,6 +1195,21 @@ _DEMO_NC = {   # pid -> [(ncr, status, source, origin, part, supplier, po, close
     230312: [(7731, "Open", "In-Process", "Welding", "W-2210", None, None, None)],
     240087: [(7750, "Open", "Receiving Inspection", "Supplier", "S-9001", "Nachi", 48301, None)],
 }
+# Canned procurement exceptions (open PO lines, delivered/ordered-late)
+_DEMO_EXC = [
+    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "PO": 48255, "Vendor": "SKF Canada",
+     "Item": 14398, "Descr": "Spherical roller bearings (lot)", "Qty": 40.0, "Received": 0.0,
+     "ExtValue": 28800.0, "NeedBy": "2026-06-30", "Ordered": "2026-07-02", "Lead": 62,
+     "LLT": "LLT", "OrdLate": "LATE", "DelLate": "LATE", "DaysLate": 25},
+    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "PO": 48260, "Vendor": "Bosch Rexroth",
+     "Item": 15112, "Descr": "Cylinder seals & glands", "Qty": 12.0, "Received": 0.0,
+     "ExtValue": 15400.0, "NeedBy": "2026-07-10", "Ordered": "2026-07-08", "Lead": 30,
+     "LLT": "", "OrdLate": "", "DelLate": "LATE", "DaysLate": 15},
+    {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "PO": 48120, "Vendor": "Siemens",
+     "Item": 20055, "Descr": "S7-1500 PLC + IO", "Qty": 1.0, "Received": 0.0,
+     "ExtValue": 47600.0, "NeedBy": "2026-07-01", "Ordered": "2026-06-22", "Lead": 50,
+     "LLT": "LLT", "OrdLate": "LATE", "DelLate": "LATE", "DaysLate": 24},
+]
 
 
 class _DemoFin:
@@ -1132,4 +1305,7 @@ def make_service(demo=False) -> QueryService:
 
 def branding():
     return {"product": TENANT.product_name, "company": TENANT.company_name,
-            "color": TENANT.header_color, "lexicon": dict(TENANT.lexicon)}
+            "color": TENANT.header_color, "lexicon": dict(TENANT.lexicon),
+            "fiscal_year_start_month": getattr(TENANT, "fiscal_year_start_month", 1),
+            "pay_period_anchor": getattr(TENANT, "pay_period_anchor", None),
+            "pay_period_days": getattr(TENANT, "pay_period_days", 14)}

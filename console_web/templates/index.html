@@ -14,30 +14,55 @@
   *{box-sizing:border-box}
   body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     color:var(--ink);background:var(--bg);font-size:14px}
-  header{background:var(--brand);color:#fff;padding:14px 22px;display:flex;align-items:center;gap:14px;
-    box-shadow:0 1px 4px rgba(0,0,0,.15)}
-  header .logo{width:30px;height:30px;border-radius:7px;background:rgba(255,255,255,.18);
-    display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
-  header h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.2px}
+  header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:14px}
+  header .logo{width:28px;height:28px;border-radius:7px;background:rgba(255,255,255,.18);
+    display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
   header .co{opacity:.8;font-size:12.5px;margin-left:2px}
   header .badge{margin-left:auto;background:#ffd25e;color:#5c4300;font-weight:700;font-size:11px;
     padding:3px 9px;border-radius:20px;letter-spacing:.4px;display:none}
+  /* top nav menus */
+  .nav{background:#fff;border-bottom:1px solid var(--line);padding:0 16px;display:flex;gap:2px;
+    position:sticky;top:0;z-index:20;box-shadow:0 1px 3px rgba(20,30,60,.05)}
+  .navgrp{position:relative}
+  .navtop{background:none;border:0;padding:12px 15px;font-size:14px;font-weight:600;color:var(--ink);
+    cursor:pointer;border-bottom:3px solid transparent}
+  .navtop:hover{color:var(--brand-2)}
+  .navgrp.active .navtop{border-bottom-color:var(--brand);color:var(--brand)}
+  .navmenu{position:absolute;top:100%;left:0;background:#fff;border:1px solid var(--line);
+    border-radius:0 0 10px 10px;box-shadow:0 10px 26px rgba(20,30,60,.16);min-width:250px;padding:6px;
+    display:none;z-index:30}
+  .navgrp.open .navmenu{display:block}
+  .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:9px 11px;border-radius:7px;
+    cursor:pointer;font-size:13.5px;color:var(--ink)}
+  .mi:hover{background:#f2f6ff;color:var(--brand-2)}
+  .mi.sel{background:#eef3ff;color:var(--brand);font-weight:600}
+  .mi .mid{font-size:11.5px;color:var(--muted);margin-top:1px;font-weight:400}
   .wrap{display:flex;gap:18px;padding:18px 22px;align-items:flex-start}
-  .side{flex:0 0 306px;position:sticky;top:18px}
+  .side{flex:0 0 280px;position:sticky;top:66px}
   .main{flex:1 1 auto;min-width:0}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;
     box-shadow:0 1px 2px rgba(20,30,60,.04)}
-  .side .card{padding:16px 16px 18px}
-  .label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
-    margin:0 0 8px}
-  .qlist{display:flex;flex-direction:column;gap:8px;margin-bottom:18px}
-  .fam{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--brand-2);
-    margin:12px 0 5px;padding-left:2px}
-  .fam:first-child{margin-top:0}
-  .daterow{display:flex;align-items:center;gap:7px}
-  .daterow input{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:12.5px;
-    font-family:inherit;color:var(--ink)}
+  .side .card{padding:15px 15px 17px;margin-bottom:14px}
+  .label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:0 0 8px}
+  #projwrap .head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  #projwrap .head a{font-size:12px;color:var(--brand-2);cursor:pointer;text-decoration:none}
+  .projbox{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:9px;padding:4px}
+  .prow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer}
+  .prow:hover{background:#f4f7ff}
+  .prow input{accent-color:var(--brand);width:15px;height:15px;flex:0 0 auto}
+  .prow .pid{font-weight:600}
+  .prow .ship{margin-left:auto;font-size:12px;color:var(--muted)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{border:1px solid var(--line);background:#fff;border-radius:20px;padding:5px 11px;font-size:12px;
+    cursor:pointer;color:var(--ink)}
+  .chip:hover{border-color:var(--brand-2)}
+  .chip.sel{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .daterow{display:flex;align-items:center;gap:7px;margin-top:9px}
+  .daterow input{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:7px 8px;
+    font-size:12.5px;font-family:inherit;color:var(--ink)}
   .daterow span{color:var(--muted)}
+  .dsub{font-size:11.5px;color:var(--muted);margin-top:8px}
   .drill{position:absolute;background:#fff;border:1px solid var(--line);border-radius:10px;
     box-shadow:0 8px 24px rgba(20,30,60,.16);padding:6px;z-index:50;min-width:190px}
   .drill .dh{font-size:11px;color:var(--muted);padding:5px 9px 6px;font-weight:600}
@@ -46,24 +71,7 @@
   .drill button:hover{background:#f2f6ff;color:var(--brand-2)}
   table.exec tbody td.drillable{cursor:pointer;color:var(--brand-2);text-decoration:underline;
     text-decoration-color:#c7d4ee;text-underline-offset:2px}
-  .qopt{border:1px solid var(--line);border-radius:9px;padding:9px 11px;cursor:pointer;transition:.12s}
-  .qopt:hover{border-color:var(--brand-2)}
-  .qopt.sel{border-color:var(--brand);background:#f2f6ff;box-shadow:inset 0 0 0 1px var(--brand)}
-  .qopt .t{font-weight:600}
-  .qopt .d{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.35}
-  #projwrap .head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-  #projwrap .head a{font-size:12px;color:var(--brand-2);cursor:pointer;text-decoration:none}
-  .projbox{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:9px;padding:4px}
-  .prow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer}
-  .prow:hover{background:#f4f7ff}
-  .prow input{accent-color:var(--brand);width:15px;height:15px}
-  .prow .pid{font-weight:600}
-  .prow .ship{margin-left:auto;font-size:12px;color:var(--muted)}
-  .runbtn{width:100%;margin-top:16px;background:var(--brand);color:#fff;border:0;border-radius:9px;
-    padding:11px;font-size:14px;font-weight:600;cursor:pointer;transition:.12s}
-  .runbtn:hover{background:var(--brand-2)}
-  .runbtn:disabled{opacity:.5;cursor:default}
-  .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:6px}
   .toolbar h2{margin:0;font-size:18px;font-weight:650}
   .toolbar .sp{flex:1}
   .exp{border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px 13px;font-size:13px;
@@ -78,16 +86,16 @@
   .stat.good .v{color:var(--good)} .stat.warn .v{color:var(--warn)} .stat.bad .v{color:var(--bad)}
   .tablecard{overflow:hidden}
   .tscroll{overflow:auto;max-height:calc(100vh - 250px)}
-  table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+  table{border-collapse:collapse;min-width:100%;font-variant-numeric:tabular-nums}
   thead th{position:sticky;top:0;background:var(--brand);color:#fff;font-weight:600;font-size:12.5px;
     text-align:left;padding:10px 13px;white-space:nowrap;cursor:pointer;z-index:1}
   thead th.r{text-align:right}
   thead th .arrow{opacity:.55;font-size:10px;margin-left:4px}
-  tbody td{padding:9px 13px;border-top:1px solid var(--line);white-space:nowrap}
+  tbody td{padding:9px 13px;border-top:1px solid var(--line);white-space:nowrap;vertical-align:middle}
   tbody td.r{text-align:right}
   tbody tr:nth-child(even){background:#f8fafd}
   tbody tr:hover{background:#eef3ff}
-  /* Executive Dashboard — mirrors the workbook: group band, traffic lights, frozen cols */
+  /* Executive Dashboard — group band, traffic lights, frozen cols */
   table.exec{font-family:Helvetica,Arial,sans-serif;font-size:12px}
   table.exec thead th{font-size:11px;padding:7px 10px;text-align:center;border-right:1px solid #35528a}
   table.exec thead tr.group th{top:0;height:26px}
@@ -105,14 +113,15 @@
   .stick{position:sticky;background:#fff;z-index:2}
   table.exec tbody tr:nth-child(even) .stick{background:#F2F4F8}
   thead .stick{z-index:3}
-  .s0{left:0} .s1{left:46px} .s2{left:108px} .s3{left:278px}
+  .s0{left:0} .s1{left:46px} .s2{left:108px}
   table.exec .c-rank{min-width:46px;max-width:46px}
   table.exec .c-pid{min-width:62px;max-width:62px}
   table.exec .c-proj{min-width:210px;max-width:210px;text-align:left}
-  table.exec .c-client{min-width:170px;max-width:170px;text-align:left}
-  td.wrap{white-space:normal;word-break:break-word;max-width:320px;vertical-align:middle}
-  .csub{font-size:11px;color:var(--muted);font-weight:400;margin-top:2px;line-height:1.25}
-  table.exec tbody td.l .csub{white-space:normal;word-break:break-word}
+  /* word-boundary wrapping (never break inside words unless unavoidable) */
+  td.wrap{white-space:normal;overflow-wrap:break-word;word-break:normal;max-width:280px;min-width:150px;
+    vertical-align:middle}
+  .csub{font-size:11px;color:var(--muted);font-weight:400;margin-top:2px;line-height:1.25;
+    overflow-wrap:break-word;word-break:normal}
   .pill{padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600;display:inline-block}
   .pill.good{background:var(--good-bg);color:var(--good)}
   .pill.warn{background:var(--warn-bg);color:var(--warn)}
@@ -121,11 +130,10 @@
   .empty .big{font-size:15px;color:var(--ink);font-weight:600;margin-bottom:4px}
   .err{background:var(--bad-bg);color:var(--bad);border:1px solid #f2c9c9;border-radius:9px;padding:12px 14px;
     margin-bottom:14px;font-size:13px;display:none}
-  #rnote{font-size:12px;color:var(--muted);margin:-4px 0 14px}
+  #rnote{font-size:12px;color:var(--muted);margin:2px 0 14px}
   .foot{color:var(--muted);font-size:11.5px;margin-top:10px;text-align:right}
-  .spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.4);
-    border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
-  @keyframes sp{to{transform:rotate(360deg)}}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(0,0,0,.15);
+    border-top-color:var(--brand);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
 </style>
 </head>
 <body>
@@ -136,12 +144,11 @@
   <span class="badge" id="demoBadge">DEMO DATA</span>
 </header>
 
+<nav class="nav" id="nav"></nav>
+
 <div class="wrap">
   <div class="side">
     <div class="card">
-      <p class="label">Report</p>
-      <div class="qlist" id="qlist"></div>
-
       <div id="projwrap">
         <div class="head">
           <p class="label" style="margin:0" id="projLabel">Projects</p>
@@ -149,24 +156,23 @@
         </div>
         <div class="projbox" id="projbox"></div>
       </div>
-
-      <div id="datewrap">
-        <p class="label" style="margin:14px 0 6px">Date range <span style="text-transform:none;font-weight:400">(optional)</span></p>
-        <div class="daterow">
-          <input type="date" id="dfrom" aria-label="from">
-          <span>→</span>
-          <input type="date" id="dto" aria-label="to">
-        </div>
+    </div>
+    <div class="card">
+      <p class="label">Date range</p>
+      <div class="chips" id="chips"></div>
+      <div class="daterow" id="daterow" style="display:none">
+        <input type="date" id="dfrom" aria-label="from">
+        <span>→</span>
+        <input type="date" id="dto" aria-label="to">
       </div>
-
-      <button class="runbtn" id="runbtn">Run report</button>
+      <div class="dsub" id="dsub"></div>
     </div>
   </div>
 
   <div class="main">
     <div class="err" id="err"></div>
     <div class="toolbar">
-      <h2 id="rtitle">Results</h2>
+      <h2 id="rtitle">Project Console</h2>
       <div class="sp"></div>
       <button class="exp" id="expx" disabled>
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13l3 3m0-3l-3 3" stroke-linecap="round"/></svg>
@@ -177,16 +183,11 @@
         PDF
       </button>
     </div>
-
     <div id="rnote"></div>
     <div class="cards" id="cards"></div>
-
     <div class="card tablecard">
       <div class="tscroll" id="tscroll">
-        <div class="empty" id="empty">
-          <div class="big">No results yet</div>
-          Pick a query and projects on the left, then Run.
-        </div>
+        <div class="empty"><div class="big">Loading…</div></div>
       </div>
     </div>
     <div class="foot" id="foot"></div>
@@ -195,60 +196,75 @@
 
 <script>
 const state = { queries:[], projects:[], selQuery:null, selProjects:new Set(),
-               result:null, sort:{key:null,dir:1} };
+               result:null, sort:{key:null,dir:1}, cfg:{}, datePreset:'start' };
+let refreshTimer=null;
 
 function el(id){ return document.getElementById(id); }
 function j(url,opts){ return fetch(url,opts).then(r=>r.json().then(d=>({ok:r.ok,d}))); }
+function iso(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 
 async function boot(){
   const b = await (await fetch('/api/branding')).json();
+  state.cfg = b;
   el('product').textContent = b.product;
   el('company').textContent = b.company;
   el('logo').textContent = (b.product||'PC').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
-  if(b.color){ const c = '#'+(''+b.color).replace('#','');
-    document.documentElement.style.setProperty('--brand', c); }
+  if(b.color){ document.documentElement.style.setProperty('--brand', '#'+(''+b.color).replace('#','')); }
   if(b.demo) el('demoBadge').style.display = 'inline-block';
   state.lexicon = b.lexicon || {};
   if(state.lexicon.projects) el('projLabel').textContent = state.lexicon.projects;
 
   state.queries = await (await fetch('/api/queries')).json();
-  renderQueries();
-  selectQuery(state.queries[0].id);
+  renderNav();
+  renderChips();
 
   state.projects = await (await fetch('/api/projects')).json();
+  state.selProjects = new Set(state.projects.map(p=>p.id));   // default: all projects
   renderProjects();
+
+  state.selQuery = state.queries[0].id;                        // default: Executive
+  runQuery();
 }
 
-function renderQueries(){
-  el('qlist').innerHTML = '';
-  let lastFam = null;
-  state.queries.forEach(q=>{
-    if(q.family && q.family!==lastFam){
-      const f=document.createElement('div'); f.className='fam'; f.textContent=q.family;
-      el('qlist').appendChild(f); lastFam=q.family;
-    }
-    const d = document.createElement('div');
-    d.className = 'qopt' + (q.id===state.selQuery?' sel':'');
-    d.innerHTML = `<div class="t">${q.label}</div><div class="d">${q.desc}</div>`;
-    d.onclick = ()=>selectQuery(q.id);
-    el('qlist').appendChild(d);
+// ── Top nav ────────────────────────────────────────────────────────────────
+function menus(){
+  const order=[], byMenu={};
+  state.queries.forEach(q=>{ if(!byMenu[q.menu]){ byMenu[q.menu]=[]; order.push(q.menu); } byMenu[q.menu].push(q); });
+  return order.map(m=>[m, byMenu[m]]);
+}
+function renderNav(){
+  const nav=el('nav'); nav.innerHTML='';
+  menus().forEach(([m,items])=>{
+    const g=document.createElement('div'); g.className='navgrp';
+    const active = items.some(q=>q.id===state.selQuery);
+    if(active) g.classList.add('active');
+    const btn=document.createElement('button'); btn.className='navtop'; btn.textContent=m+' ▾';
+    btn.onclick=(e)=>{ e.stopPropagation(); const open=g.classList.contains('open'); closeMenus(); if(!open) g.classList.add('open'); };
+    g.appendChild(btn);
+    const menu=document.createElement('div'); menu.className='navmenu';
+    items.forEach(q=>{
+      const mi=document.createElement('button'); mi.className='mi'+(q.id===state.selQuery?' sel':'');
+      mi.innerHTML=`<div>${q.label}</div><div class="mid">${q.desc}</div>`;
+      mi.onclick=()=>{ closeMenus(); selectReport(q.id); };
+      menu.appendChild(mi);
+    });
+    g.appendChild(menu); nav.appendChild(g);
   });
 }
+function closeMenus(){ document.querySelectorAll('.navgrp.open').forEach(g=>g.classList.remove('open')); }
+document.addEventListener('click', closeMenus);
 function currentQuery(){ return state.queries.find(q=>q.id===state.selQuery); }
-function isEtoFamily(q){ return q && q.family && q.family!=='Project Console'; }
-function selectQuery(id){
-  state.selQuery = id; renderQueries();
-  const q = currentQuery();
-  el('projwrap').style.display = q.needs_projects ? 'block' : 'none';
-  el('datewrap').style.display = isEtoFamily(q) ? 'block' : 'none';
-}
-// ETO families a board project can drill into (first report per family; lexicon-aware)
+function isEtoReport(q){ return q && q.menu!=='Dashboards'; }
+function selectReport(id){ state.selQuery=id; renderNav(); syncDateVisibility(); runQuery(); }
+
+// ETO menus a board project can drill into (first report per menu; lexicon-aware)
 function drillFamilies(){
   const seen={}, out=[];
-  state.queries.forEach(q=>{ if(isEtoFamily(q) && !seen[q.family]){ seen[q.family]=1; out.push([q.id,q.family]); }});
+  state.queries.forEach(q=>{ if(isEtoReport(q) && !seen[q.menu]){ seen[q.menu]=1; out.push([q.id,q.menu]); }});
   return out;
 }
 
+// ── Projects ─────────────────────────────────────────────────────────────────
 function renderProjects(){
   const box = el('projbox'); box.innerHTML = '';
   if(!state.projects.length){ box.innerHTML = '<div style="padding:10px;color:var(--muted)">No projects.</div>'; return; }
@@ -258,6 +274,7 @@ function renderProjects(){
       <span class="pid">${p.label}</span><span class="ship">${p.ship||''}</span>`;
     row.querySelector('input').onchange = e=>{
       e.target.checked ? state.selProjects.add(p.id) : state.selProjects.delete(p.id);
+      scheduleRefresh();
     };
     box.appendChild(row);
   });
@@ -266,29 +283,75 @@ el('toggleAll').onclick = ()=>{
   const all = state.selProjects.size === state.projects.length;
   state.selProjects = all ? new Set() : new Set(state.projects.map(p=>p.id));
   el('toggleAll').textContent = all ? 'select all' : 'clear all';
-  renderProjects();
+  renderProjects(); scheduleRefresh();
 };
 
-function payload(){
-  return { query_id: state.selQuery,
-           project_ids: Array.from(state.selProjects),
-           date_from: el('dfrom').value || null,
-           date_to: el('dto').value || null };
+// ── Date presets ─────────────────────────────────────────────────────────────
+const PRESETS = [['start','From Project Start'],['pay','Pay Period'],['ytd','YTD'],['custom','Custom']];
+function renderChips(){
+  const c=el('chips'); c.innerHTML='';
+  PRESETS.forEach(([k,lbl])=>{
+    const b=document.createElement('div'); b.className='chip'+(state.datePreset===k?' sel':'');
+    b.textContent=lbl; b.onclick=()=>setPreset(k); c.appendChild(b);
+  });
 }
+function setPreset(k){ state.datePreset=k; renderChips();
+  el('daterow').style.display = k==='custom' ? 'flex' : 'none';
+  syncDateVisibility(); scheduleRefresh(); }
+function syncDateVisibility(){
+  const eto = isEtoReport(currentQuery());
+  el('chips').parentElement.style.display = eto ? 'block' : 'none';
+}
+// resolve preset -> {from,to} (ISO strings or null). Uses tenant fiscal/pay-period config.
+function resolveDates(){
+  const p=state.datePreset;
+  if(p==='custom') return { from: el('dfrom').value||null, to: el('dto').value||null };
+  if(p==='start')  return { from:null, to:null };
+  const today=new Date();
+  if(p==='ytd'){
+    const fm=(state.cfg.fiscal_year_start_month||1);
+    let y=today.getFullYear(); if((today.getMonth()+1)<fm) y-=1;
+    return { from: iso(new Date(y, fm-1, 1)), to: iso(today) };
+  }
+  if(p==='pay'){
+    const days=state.cfg.pay_period_days||14;
+    const anchor=state.cfg.pay_period_anchor ? new Date(state.cfg.pay_period_anchor+'T00:00:00') : new Date(today.getFullYear(),0,1);
+    const per=days*86400000; let start=new Date(anchor);
+    if(today>=anchor){ const n=Math.floor((today-anchor)/per); start=new Date(anchor.getTime()+n*per); }
+    const end=new Date(start.getTime()+(days-1)*86400000);
+    return { from: iso(start), to: iso(end) };
+  }
+  return { from:null, to:null };
+}
+function dateLabel(){
+  const d=resolveDates();
+  if(state.datePreset==='start') return 'All history (project start → now)';
+  if(!d.from && !d.to) return '';
+  return (d.from||'…')+'  →  '+(d.to||'today');
+}
+
+function payload(){
+  const d=resolveDates();
+  return { query_id: state.selQuery, project_ids: Array.from(state.selProjects),
+           date_from: d.from, date_to: d.to };
+}
+function scheduleRefresh(){ clearTimeout(refreshTimer); refreshTimer=setTimeout(()=>{ if(state.selQuery) runQuery(); }, 450); }
 
 async function runQuery(){
-  const q = currentQuery();
-  if(q.needs_projects && state.selProjects.size===0){ showErr('Select at least one project.'); return; }
+  const q=currentQuery(); if(!q) return;
+  syncDateVisibility(); el('dsub').textContent = isEtoReport(q) ? dateLabel() : '';
+  if(q.needs_projects && state.selProjects.size===0){
+    el('tscroll').innerHTML='<div class="empty"><div class="big">Select projects</div>Pick one or more projects on the left.</div>';
+    el('rtitle').textContent=q.label; el('cards').innerHTML=''; el('rnote').textContent=''; return;
+  }
   hideErr();
-  const btn = el('runbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span> Running…';
-  const {ok,d} = await j('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
-                                       body:JSON.stringify(payload())});
-  btn.disabled=false; btn.textContent='Run report';
-  if(!ok){ showErr(d.error||'Query failed'); return; }
-  state.result = d; state.sort={key:null,dir:1}; renderResult();
+  el('tscroll').innerHTML='<div class="empty"><div class="big"><span class="spin"></span> Running…</div></div>';
+  const {ok,d} = await j('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});
+  if(!ok){ showErr(d.error||'Query failed'); el('tscroll').innerHTML='<div class="empty">Query failed.</div>'; return; }
+  state.result=d; state.sort={key:null,dir:1}; renderResult();
 }
-el('runbtn').onclick = runQuery;
 
+// ── Rendering ────────────────────────────────────────────────────────────────
 function fmt(v,type){
   if(v===null||v===undefined||v==='') return '';
   if(type==='pct') return (v*100).toFixed(1)+'%';
@@ -304,157 +367,111 @@ function pctPill(v){
   const cls = v>1.0?'bad':(v>=0.9?'warn':'good');
   return `<span class="pill ${cls}">${(v*100).toFixed(1)}%</span>`;
 }
-
-function renderResult(){
-  const r = state.result;
-  el('rtitle').textContent = r.title;
-  el('rnote').textContent = r.note || '';
-  el('expx').disabled = false; el('expp').disabled = false;
-
-  const cw = el('cards'); cw.innerHTML='';
-  (r.cards||[]).forEach(c=>{
-    const d=document.createElement('div'); d.className='stat '+(c.tone||'neutral');
-    d.innerHTML=`<div class="v">${c.value}</div><div class="l">${c.label}</div>`;
-    cw.appendChild(d);
-  });
-
-  let rows = r.rows.slice();
-  if(state.sort.key){
-    const k=state.sort.key, dir=state.sort.dir;
-    rows.sort((a,b)=>{ let x=a[k],y=b[k];
-      if(x===null||x===undefined) return 1; if(y===null||y===undefined) return -1;
-      if(typeof x==='number'&&typeof y==='number') return (x-y)*dir;
-      return (''+x).localeCompare(''+y)*dir; });
-  }
-
-  const grouped = r.columns.some(c=>c.block);
-  if(rows.length===0){
-    const dated = el('dfrom').value || el('dto').value;
-    el('tscroll').innerHTML = '<div class="empty"><div class="big">No rows</div>'
-      + 'Nothing matched this selection'+(dated?' and date range':'')
-      + '. A project with no charged time / POs / NCRs yet will be empty here.</div>';
-  } else {
-    el('tscroll').innerHTML = grouped ? renderExec(r,rows) : renderPlain(r,rows);
-  }
-  el('tscroll').querySelectorAll('th[data-k]').forEach(th=>{
-    th.onclick=()=>{ const k=th.dataset.k;
-      if(state.sort.key===k) state.sort.dir*=-1; else {state.sort.key=k;state.sort.dir=1;}
-      renderResult(); };
-  });
-  el('tscroll').querySelectorAll('td.drillable').forEach(td=>{
-    td.onclick=(e)=>{ e.stopPropagation(); openDrill(td.dataset.pid, e); };
-  });
-  el('foot').textContent = `${r.rows.length} row${r.rows.length===1?'':'s'} · ${r.title}`;
-}
-
-// traffic-light class for a cell (matches the workbook: amber ≥90%, red >100%; slip>0 red)
 function tlClass(v,type){
   if(v===null||v===undefined) return '';
   if(type==='pct') return v>1.0?'tl-bad':(v>=0.9?'tl-warn':'');
   if(type==='days') return v>0?'tl-bad':'';
   return '';
 }
+function renderResult(){
+  const r=state.result;
+  el('rtitle').textContent=r.title; el('rnote').textContent=r.note||'';
+  el('expx').disabled=false; el('expp').disabled=false;
+  const cw=el('cards'); cw.innerHTML='';
+  (r.cards||[]).forEach(c=>{ const d=document.createElement('div'); d.className='stat '+(c.tone||'neutral');
+    d.innerHTML=`<div class="v">${c.value}</div><div class="l">${c.label}</div>`; cw.appendChild(d); });
 
-// Simple views (scorecard, financials, crosswalk) — pill %s, single header.
+  let rows=r.rows.slice();
+  if(state.sort.key){ const k=state.sort.key,dir=state.sort.dir;
+    rows.sort((a,b)=>{ let x=a[k],y=b[k];
+      if(x===null||x===undefined) return 1; if(y===null||y===undefined) return -1;
+      if(typeof x==='number'&&typeof y==='number') return (x-y)*dir;
+      return (''+x).localeCompare(''+y)*dir; }); }
+
+  const grouped=r.columns.some(c=>c.block);
+  if(rows.length===0){
+    const dated = state.datePreset!=='start';
+    el('tscroll').innerHTML='<div class="empty"><div class="big">No rows</div>Nothing matched this selection'
+      +(dated?' and date range':'')+'. A project with no charged time / POs / NCRs in range will be empty here.</div>';
+  } else {
+    el('tscroll').innerHTML = grouped ? renderExec(r,rows) : renderPlain(r,rows);
+  }
+  el('tscroll').querySelectorAll('th[data-k]').forEach(th=>{
+    th.onclick=()=>{ const k=th.dataset.k; if(state.sort.key===k) state.sort.dir*=-1; else {state.sort.key=k;state.sort.dir=1;} renderResult(); };
+  });
+  el('tscroll').querySelectorAll('td.drillable').forEach(td=>{
+    td.onclick=(e)=>{ e.stopPropagation(); openDrill(td.dataset.pid, e); };
+  });
+  el('foot').textContent = `${r.rows.length} row${r.rows.length===1?'':'s'} · ${r.title}`;
+}
 function renderPlain(r,rows){
   let h='<table><thead><tr>';
-  r.columns.forEach(c=>{
-    const rc = c.align==='right'?' r':''; const arrow = state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
-    h+=`<th class="${rc.trim()}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`;
-  });
+  r.columns.forEach(c=>{ const rc=c.align==='right'?' r':''; const arrow=state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
+    h+=`<th class="${rc.trim()}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`; });
   h+='</tr></thead><tbody>';
-  rows.forEach(row=>{
-    h+='<tr>';
-    r.columns.forEach(c=>{
-      const cls=[c.align==='right'?'r':'', c.type==='text'?'wrap':''].filter(Boolean).join(' ');
-      const cell = c.type==='pct' ? pctPill(row[c.key]) : fmt(row[c.key], c.type);
-      h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`;
-    });
-    h+='</tr>';
-  });
+  rows.forEach(row=>{ h+='<tr>';
+    r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':''].filter(Boolean).join(' ');
+      const cell=c.type==='pct'?pctPill(row[c.key]):fmt(row[c.key],c.type);
+      h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`; });
+    h+='</tr>'; });
   return h+'</tbody></table>';
 }
-
-// Executive Dashboard — two-tier grouped header, traffic-light fills, frozen first 3 cols.
 function renderExec(r,rows){
-  const cols = r.columns;
-  const stickClass = i => i===0?'stick s0 c-rank':(i===1?'stick s1 c-pid':(i===2?'stick s2 c-proj':''));
-  // group band
-  let h='<table class="exec"><thead><tr class="group">';
-  let i=0;
-  while(i<cols.length){
-    const blk=cols[i].block; let span=1;
+  const cols=r.columns;
+  const stickClass=i=>i===0?'stick s0 c-rank':(i===1?'stick s1 c-pid':(i===2?'stick s2 c-proj':''));
+  let h='<table class="exec"><thead><tr class="group">'; let i=0;
+  while(i<cols.length){ const blk=cols[i].block; let span=1;
     while(i+span<cols.length && cols[i+span].block===blk) span++;
     if(blk){ h+=`<th class="grp" colspan="${span}">${blk}</th>`; }
-    else { for(let k=0;k<span;k++){ const sc=stickClass(i+k);
-             const wc=cols[i+k].key==='Client'?' c-client':'';
-             h+=`<th class="grpblank ${sc}${wc}"></th>`; } }
-    i+=span;
-  }
+    else { for(let k=0;k<span;k++){ h+=`<th class="grpblank ${stickClass(i+k)}"></th>`; } }
+    i+=span; }
   h+='</tr><tr class="metric">';
-  cols.forEach((c,idx)=>{
-    const arrow = state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
-    const sc=[stickClass(idx), c.key==='Client'?'c-client':''].filter(Boolean).join(' ');
-    h+=`<th class="${sc}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`;
-  });
+  cols.forEach((c,idx)=>{ const arrow=state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
+    h+=`<th class="${stickClass(idx)}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`; });
   h+='</tr></thead><tbody>';
-  const canDrill = drillFamilies().length > 0;
-  rows.forEach(row=>{
-    h+='<tr>';
-    cols.forEach((c,idx)=>{
-      const v=row[c.key];
-      const sc=stickClass(idx);
-      const drill = canDrill && (idx===1 || idx===2);
-      const cls=[sc, c.align==='left'||c.type==='text'?'l':'', c.type==='text'?'wrap':'',
+  const canDrill=drillFamilies().length>0;
+  rows.forEach(row=>{ h+='<tr>';
+    cols.forEach((c,idx)=>{ const v=row[c.key]; const sc=stickClass(idx);
+      const drill=canDrill&&(idx===1||idx===2);
+      const cls=[sc, c.align==='left'||c.type==='text'?'l':'', c.wrap?'wrap':'',
                  tlClass(v,c.type), sc?'':'zebra', drill?'drillable':''].filter(Boolean).join(' ');
-      const attr = drill?` data-pid="${row.ProjectID}"`:'';
-      let content = fmt(v,c.type);
-      if(c.key==='Project' && row.Client) content += `<div class="csub">${row.Client}</div>`;
-      h+=`<td class="${cls}"${attr}>${content}</td>`;
-    });
-    h+='</tr>';
-  });
+      const attr=drill?` data-pid="${row.ProjectID}"`:'';
+      let content=fmt(v,c.type);
+      if(c.key==='Project'&&row.Client) content+=`<div class="csub">${row.Client}</div>`;
+      h+=`<td class="${cls}"${attr}>${content}</td>`; });
+    h+='</tr>'; });
   return h+'</tbody></table>';
 }
 
+// ── Board drill-down ─────────────────────────────────────────────────────────
 function openDrill(pid, ev){
   closeDrill();
   const menu=document.createElement('div'); menu.className='drill'; menu.id='drillMenu';
   menu.innerHTML=`<div class="dh">Drill into ${pid}</div>`;
-  drillFamilies().forEach(([qid,fam])=>{
-    const btn=document.createElement('button'); btn.textContent=fam;
-    btn.onclick=()=>{ closeDrill(); drillTo(pid, qid); };
-    menu.appendChild(btn);
-  });
+  drillFamilies().forEach(([qid,fam])=>{ const btn=document.createElement('button'); btn.textContent=fam;
+    btn.onclick=()=>{ closeDrill(); drillTo(pid,qid); }; menu.appendChild(btn); });
   document.body.appendChild(menu);
-  const r=menu.getBoundingClientRect();
-  let x=ev.clientX, y=ev.clientY+8;
+  const r=menu.getBoundingClientRect(); let x=ev.clientX, y=ev.clientY+8;
   if(x+r.width>window.innerWidth-8) x=window.innerWidth-r.width-8;
   if(y+r.height>window.innerHeight-8) y=ev.clientY-r.height-8;
   menu.style.left=Math.max(8,x)+'px'; menu.style.top=y+'px';
   setTimeout(()=>document.addEventListener('click', closeDrill, {once:true}),0);
 }
 function closeDrill(){ const m=el('drillMenu'); if(m) m.remove(); }
-function drillTo(pid, qid){
-  state.selProjects = new Set([Number(pid)]);
-  renderProjects();
-  selectQuery(qid);
-  runQuery();
-}
+function drillTo(pid, qid){ state.selProjects=new Set([Number(pid)]); renderProjects(); selectReport(qid); }
 
+// ── Export ───────────────────────────────────────────────────────────────────
 async function doExport(fmt){
   if(!state.result) return;
-  const btn = fmt==='xlsx'?el('expx'):el('expp'); const txt=btn.innerHTML;
-  btn.disabled=true; btn.innerHTML='<span class="spin" style="border-color:rgba(0,0,0,.2);border-top-color:var(--brand)"></span> …';
+  const btn=fmt==='xlsx'?el('expx'):el('expp'); const txt=btn.innerHTML;
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span> …';
   try{
-    const res = await fetch('/api/export/'+fmt,{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});
+    const res=await fetch('/api/export/'+fmt,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});
     if(!res.ok){ const e=await res.json().catch(()=>({})); showErr(e.error||'Export failed'); return; }
-    const blob = await res.blob();
-    const cd = res.headers.get('Content-Disposition')||'';
-    const m = /filename="?([^"]+)"?/.exec(cd);
+    const blob=await res.blob(); const cd=res.headers.get('Content-Disposition')||'';
+    const m=/filename="?([^"]+)"?/.exec(cd);
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-    a.download = m?m[1]:('export.'+fmt); document.body.appendChild(a); a.click(); a.remove();
+    a.download=m?m[1]:('export.'+fmt); document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href),4000);
   } finally { btn.disabled=false; btn.innerHTML=txt; }
 }
