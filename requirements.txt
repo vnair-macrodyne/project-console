@@ -1,0 +1,6 @@
+pandas
+pyodbc
+openpyxl
+python-dotenv
+flask
+reportlab

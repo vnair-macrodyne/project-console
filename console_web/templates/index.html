@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Console</title>
+<style>
+  :root{
+    --brand:#1F3864; --brand-2:#2f4f8f; --ink:#1a1f2b; --muted:#6b7280;
+    --line:#e5e8ef; --bg:#f5f7fb; --panel:#ffffff;
+    --good:#137a4a; --good-bg:#e6f5ec; --warn:#946200; --warn-bg:#fbf1dc;
+    --bad:#b02121; --bad-bg:#fbe7e7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);background:var(--bg);font-size:14px}
+  header{background:var(--brand);color:#fff;padding:14px 22px;display:flex;align-items:center;gap:14px;
+    box-shadow:0 1px 4px rgba(0,0,0,.15)}
+  header .logo{width:30px;height:30px;border-radius:7px;background:rgba(255,255,255,.18);
+    display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
+  header h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .co{opacity:.8;font-size:12.5px;margin-left:2px}
+  header .badge{margin-left:auto;background:#ffd25e;color:#5c4300;font-weight:700;font-size:11px;
+    padding:3px 9px;border-radius:20px;letter-spacing:.4px;display:none}
+  .wrap{display:flex;gap:18px;padding:18px 22px;align-items:flex-start}
+  .side{flex:0 0 306px;position:sticky;top:18px}
+  .main{flex:1 1 auto;min-width:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;
+    box-shadow:0 1px 2px rgba(20,30,60,.04)}
+  .side .card{padding:16px 16px 18px}
+  .label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
+    margin:0 0 8px}
+  .qlist{display:flex;flex-direction:column;gap:8px;margin-bottom:18px}
+  .fam{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--brand-2);
+    margin:12px 0 5px;padding-left:2px}
+  .fam:first-child{margin-top:0}
+  .daterow{display:flex;align-items:center;gap:7px}
+  .daterow input{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:12.5px;
+    font-family:inherit;color:var(--ink)}
+  .daterow span{color:var(--muted)}
+  .drill{position:absolute;background:#fff;border:1px solid var(--line);border-radius:10px;
+    box-shadow:0 8px 24px rgba(20,30,60,.16);padding:6px;z-index:50;min-width:190px}
+  .drill .dh{font-size:11px;color:var(--muted);padding:5px 9px 6px;font-weight:600}
+  .drill button{display:block;width:100%;text-align:left;border:0;background:none;padding:8px 9px;
+    border-radius:7px;font-size:13px;cursor:pointer;color:var(--ink)}
+  .drill button:hover{background:#f2f6ff;color:var(--brand-2)}
+  table.exec tbody td.drillable{cursor:pointer;color:var(--brand-2);text-decoration:underline;
+    text-decoration-color:#c7d4ee;text-underline-offset:2px}
+  .qopt{border:1px solid var(--line);border-radius:9px;padding:9px 11px;cursor:pointer;transition:.12s}
+  .qopt:hover{border-color:var(--brand-2)}
+  .qopt.sel{border-color:var(--brand);background:#f2f6ff;box-shadow:inset 0 0 0 1px var(--brand)}
+  .qopt .t{font-weight:600}
+  .qopt .d{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.35}
+  #projwrap .head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  #projwrap .head a{font-size:12px;color:var(--brand-2);cursor:pointer;text-decoration:none}
+  .projbox{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:9px;padding:4px}
+  .prow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer}
+  .prow:hover{background:#f4f7ff}
+  .prow input{accent-color:var(--brand);width:15px;height:15px}
+  .prow .pid{font-weight:600}
+  .prow .ship{margin-left:auto;font-size:12px;color:var(--muted)}
+  .runbtn{width:100%;margin-top:16px;background:var(--brand);color:#fff;border:0;border-radius:9px;
+    padding:11px;font-size:14px;font-weight:600;cursor:pointer;transition:.12s}
+  .runbtn:hover{background:var(--brand-2)}
+  .runbtn:disabled{opacity:.5;cursor:default}
+  .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .toolbar h2{margin:0;font-size:18px;font-weight:650}
+  .toolbar .sp{flex:1}
+  .exp{border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px 13px;font-size:13px;
+    font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:7px;transition:.12s;color:var(--ink)}
+  .exp:hover{border-color:var(--brand-2);color:var(--brand-2)}
+  .exp:disabled{opacity:.45;cursor:default}
+  .exp .ic{width:15px;height:15px}
+  .cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .stat{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+  .stat .v{font-size:22px;font-weight:700;letter-spacing:-.3px}
+  .stat .l{font-size:12px;color:var(--muted);margin-top:2px}
+  .stat.good .v{color:var(--good)} .stat.warn .v{color:var(--warn)} .stat.bad .v{color:var(--bad)}
+  .tablecard{overflow:hidden}
+  .tscroll{overflow:auto;max-height:calc(100vh - 250px)}
+  table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+  thead th{position:sticky;top:0;background:var(--brand);color:#fff;font-weight:600;font-size:12.5px;
+    text-align:left;padding:10px 13px;white-space:nowrap;cursor:pointer;z-index:1}
+  thead th.r{text-align:right}
+  thead th .arrow{opacity:.55;font-size:10px;margin-left:4px}
+  tbody td{padding:9px 13px;border-top:1px solid var(--line);white-space:nowrap}
+  tbody td.r{text-align:right}
+  tbody tr:nth-child(even){background:#f8fafd}
+  tbody tr:hover{background:#eef3ff}
+  /* Executive Dashboard — mirrors the workbook: group band, traffic lights, frozen cols */
+  table.exec{font-family:Helvetica,Arial,sans-serif;font-size:12px}
+  table.exec thead th{font-size:11px;padding:7px 10px;text-align:center;border-right:1px solid #35528a}
+  table.exec thead tr.group th{top:0;height:26px}
+  table.exec thead th.grp{background:#2E75B6;border-right:2px solid #fff;font-size:11px;
+    letter-spacing:.3px;text-transform:uppercase}
+  table.exec thead th.grpblank{background:#fff;border-right:1px solid #fff;cursor:default}
+  table.exec thead tr.metric th{top:26px}
+  table.exec tbody td{padding:6px 10px;text-align:center;border-right:1px solid var(--line);font-size:12px}
+  table.exec tbody td.l{text-align:left}
+  table.exec tbody tr:nth-child(even){background:var(--panel)}
+  table.exec tbody tr:nth-child(even) td.zebra{background:#F2F4F8}
+  td.tl-warn,table.exec tbody tr:nth-child(even) td.tl-warn{background:#FFEB9C}
+  td.tl-bad,table.exec tbody tr:nth-child(even) td.tl-bad{background:#FFC7CE}
+  .stick{position:sticky;background:#fff;z-index:2}
+  table.exec tbody tr:nth-child(even) .stick{background:#F2F4F8}
+  thead .stick{z-index:3}
+  .s0{left:0} .s1{left:46px} .s2{left:108px}
+  table.exec .c-rank{min-width:46px;max-width:46px}
+  table.exec .c-pid{min-width:62px;max-width:62px}
+  table.exec .c-proj{min-width:170px;max-width:170px;text-align:left}
+  .pill{padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600;display:inline-block}
+  .pill.good{background:var(--good-bg);color:var(--good)}
+  .pill.warn{background:var(--warn-bg);color:var(--warn)}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)}
+  .empty{padding:60px 20px;text-align:center;color:var(--muted)}
+  .empty .big{font-size:15px;color:var(--ink);font-weight:600;margin-bottom:4px}
+  .err{background:var(--bad-bg);color:var(--bad);border:1px solid #f2c9c9;border-radius:9px;padding:12px 14px;
+    margin-bottom:14px;font-size:13px;display:none}
+  #rnote{font-size:12px;color:var(--muted);margin:-4px 0 14px}
+  .foot{color:var(--muted);font-size:11.5px;margin-top:10px;text-align:right}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.4);
+    border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" id="logo">PC</div>
+  <h1 id="product">Project Console</h1>
+  <span class="co" id="company"></span>
+  <span class="badge" id="demoBadge">DEMO DATA</span>
+</header>
+
+<div class="wrap">
+  <div class="side">
+    <div class="card">
+      <p class="label">Report</p>
+      <div class="qlist" id="qlist"></div>
+
+      <div id="projwrap">
+        <div class="head">
+          <p class="label" style="margin:0" id="projLabel">Projects</p>
+          <a id="toggleAll">select all</a>
+        </div>
+        <div class="projbox" id="projbox"></div>
+      </div>
+
+      <div id="datewrap">
+        <p class="label" style="margin:14px 0 6px">Date range <span style="text-transform:none;font-weight:400">(optional)</span></p>
+        <div class="daterow">
+          <input type="date" id="dfrom" aria-label="from">
+          <span>→</span>
+          <input type="date" id="dto" aria-label="to">
+        </div>
+      </div>
+
+      <button class="runbtn" id="runbtn">Run report</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="err" id="err"></div>
+    <div class="toolbar">
+      <h2 id="rtitle">Results</h2>
+      <div class="sp"></div>
+      <button class="exp" id="expx" disabled>
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13l3 3m0-3l-3 3" stroke-linecap="round"/></svg>
+        Excel
+      </button>
+      <button class="exp" id="expp" disabled>
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 17v-4h1.5a1.5 1.5 0 0 1 0 3H9" stroke-linecap="round"/></svg>
+        PDF
+      </button>
+    </div>
+
+    <div id="rnote"></div>
+    <div class="cards" id="cards"></div>
+
+    <div class="card tablecard">
+      <div class="tscroll" id="tscroll">
+        <div class="empty" id="empty">
+          <div class="big">No results yet</div>
+          Pick a query and projects on the left, then Run.
+        </div>
+      </div>
+    </div>
+    <div class="foot" id="foot"></div>
+  </div>
+</div>
+
+<script>
+const state = { queries:[], projects:[], selQuery:null, selProjects:new Set(),
+               result:null, sort:{key:null,dir:1} };
+
+function el(id){ return document.getElementById(id); }
+function j(url,opts){ return fetch(url,opts).then(r=>r.json().then(d=>({ok:r.ok,d}))); }
+
+async function boot(){
+  const b = await (await fetch('/api/branding')).json();
+  el('product').textContent = b.product;
+  el('company').textContent = b.company;
+  el('logo').textContent = (b.product||'PC').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+  if(b.color){ const c = '#'+(''+b.color).replace('#','');
+    document.documentElement.style.setProperty('--brand', c); }
+  if(b.demo) el('demoBadge').style.display = 'inline-block';
+  state.lexicon = b.lexicon || {};
+  if(state.lexicon.projects) el('projLabel').textContent = state.lexicon.projects;
+
+  state.queries = await (await fetch('/api/queries')).json();
+  renderQueries();
+  selectQuery(state.queries[0].id);
+
+  state.projects = await (await fetch('/api/projects')).json();
+  renderProjects();
+}
+
+function renderQueries(){
+  el('qlist').innerHTML = '';
+  let lastFam = null;
+  state.queries.forEach(q=>{
+    if(q.family && q.family!==lastFam){
+      const f=document.createElement('div'); f.className='fam'; f.textContent=q.family;
+      el('qlist').appendChild(f); lastFam=q.family;
+    }
+    const d = document.createElement('div');
+    d.className = 'qopt' + (q.id===state.selQuery?' sel':'');
+    d.innerHTML = `<div class="t">${q.label}</div><div class="d">${q.desc}</div>`;
+    d.onclick = ()=>selectQuery(q.id);
+    el('qlist').appendChild(d);
+  });
+}
+function currentQuery(){ return state.queries.find(q=>q.id===state.selQuery); }
+function isEtoFamily(q){ return q && q.family && q.family!=='Project Console'; }
+function selectQuery(id){
+  state.selQuery = id; renderQueries();
+  const q = currentQuery();
+  el('projwrap').style.display = q.needs_projects ? 'block' : 'none';
+  el('datewrap').style.display = isEtoFamily(q) ? 'block' : 'none';
+}
+// ETO families a board project can drill into (first report per family; lexicon-aware)
+function drillFamilies(){
+  const seen={}, out=[];
+  state.queries.forEach(q=>{ if(isEtoFamily(q) && !seen[q.family]){ seen[q.family]=1; out.push([q.id,q.family]); }});
+  return out;
+}
+
+function renderProjects(){
+  const box = el('projbox'); box.innerHTML = '';
+  if(!state.projects.length){ box.innerHTML = '<div style="padding:10px;color:var(--muted)">No projects.</div>'; return; }
+  state.projects.forEach(p=>{
+    const row = document.createElement('label'); row.className='prow';
+    row.innerHTML = `<input type="checkbox" ${state.selProjects.has(p.id)?'checked':''}>
+      <span class="pid">${p.label}</span><span class="ship">${p.ship||''}</span>`;
+    row.querySelector('input').onchange = e=>{
+      e.target.checked ? state.selProjects.add(p.id) : state.selProjects.delete(p.id);
+    };
+    box.appendChild(row);
+  });
+}
+el('toggleAll').onclick = ()=>{
+  const all = state.selProjects.size === state.projects.length;
+  state.selProjects = all ? new Set() : new Set(state.projects.map(p=>p.id));
+  el('toggleAll').textContent = all ? 'select all' : 'clear all';
+  renderProjects();
+};
+
+function payload(){
+  return { query_id: state.selQuery,
+           project_ids: Array.from(state.selProjects),
+           date_from: el('dfrom').value || null,
+           date_to: el('dto').value || null };
+}
+
+async function runQuery(){
+  const q = currentQuery();
+  if(q.needs_projects && state.selProjects.size===0){ showErr('Select at least one project.'); return; }
+  hideErr();
+  const btn = el('runbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span> Running…';
+  const {ok,d} = await j('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
+                                       body:JSON.stringify(payload())});
+  btn.disabled=false; btn.textContent='Run report';
+  if(!ok){ showErr(d.error||'Query failed'); return; }
+  state.result = d; state.sort={key:null,dir:1}; renderResult();
+}
+el('runbtn').onclick = runQuery;
+
+function fmt(v,type){
+  if(v===null||v===undefined||v==='') return '';
+  if(type==='pct') return (v*100).toFixed(1)+'%';
+  if(type==='money') return '$'+Math.round(v).toLocaleString();
+  if(type==='hours') return Math.round(v).toLocaleString();
+  if(type==='num') return Number(v).toLocaleString(undefined,{maximumFractionDigits:2});
+  if(type==='int') return Math.round(v).toLocaleString();
+  return v;
+}
+function pctPill(v){
+  if(v===null||v===undefined) return '';
+  const cls = v>1.0?'bad':(v>=0.9?'warn':'good');
+  return `<span class="pill ${cls}">${(v*100).toFixed(1)}%</span>`;
+}
+
+function renderResult(){
+  const r = state.result;
+  el('rtitle').textContent = r.title;
+  el('rnote').textContent = r.note || '';
+  el('expx').disabled = false; el('expp').disabled = false;
+
+  const cw = el('cards'); cw.innerHTML='';
+  (r.cards||[]).forEach(c=>{
+    const d=document.createElement('div'); d.className='stat '+(c.tone||'neutral');
+    d.innerHTML=`<div class="v">${c.value}</div><div class="l">${c.label}</div>`;
+    cw.appendChild(d);
+  });
+
+  let rows = r.rows.slice();
+  if(state.sort.key){
+    const k=state.sort.key, dir=state.sort.dir;
+    rows.sort((a,b)=>{ let x=a[k],y=b[k];
+      if(x===null||x===undefined) return 1; if(y===null||y===undefined) return -1;
+      if(typeof x==='number'&&typeof y==='number') return (x-y)*dir;
+      return (''+x).localeCompare(''+y)*dir; });
+  }
+
+  const grouped = r.columns.some(c=>c.block);
+  el('tscroll').innerHTML = grouped ? renderExec(r,rows) : renderPlain(r,rows);
+  el('tscroll').querySelectorAll('th[data-k]').forEach(th=>{
+    th.onclick=()=>{ const k=th.dataset.k;
+      if(state.sort.key===k) state.sort.dir*=-1; else {state.sort.key=k;state.sort.dir=1;}
+      renderResult(); };
+  });
+  el('tscroll').querySelectorAll('td.drillable').forEach(td=>{
+    td.onclick=(e)=>{ e.stopPropagation(); openDrill(td.dataset.pid, e); };
+  });
+  el('foot').textContent = `${r.rows.length} row${r.rows.length===1?'':'s'} · ${r.title}`;
+}
+
+// traffic-light class for a cell (matches the workbook: amber ≥90%, red >100%; slip>0 red)
+function tlClass(v,type){
+  if(v===null||v===undefined) return '';
+  if(type==='pct') return v>1.0?'tl-bad':(v>=0.9?'tl-warn':'');
+  if(type==='days') return v>0?'tl-bad':'';
+  return '';
+}
+
+// Simple views (scorecard, financials, crosswalk) — pill %s, single header.
+function renderPlain(r,rows){
+  let h='<table><thead><tr>';
+  r.columns.forEach(c=>{
+    const rc = c.align==='right'?' r':''; const arrow = state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
+    h+=`<th class="${rc.trim()}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`;
+  });
+  h+='</tr></thead><tbody>';
+  rows.forEach(row=>{
+    h+='<tr>';
+    r.columns.forEach(c=>{
+      const rc = c.align==='right'?' class="r"':'';
+      const cell = c.type==='pct' ? pctPill(row[c.key]) : fmt(row[c.key], c.type);
+      h+=`<td${rc}>${cell}</td>`;
+    });
+    h+='</tr>';
+  });
+  return h+'</tbody></table>';
+}
+
+// Executive Dashboard — two-tier grouped header, traffic-light fills, frozen first 3 cols.
+function renderExec(r,rows){
+  const cols = r.columns;
+  const stickClass = i => i===0?'stick s0 c-rank':(i===1?'stick s1 c-pid':(i===2?'stick s2 c-proj':''));
+  // group band
+  let h='<table class="exec"><thead><tr class="group">';
+  let i=0;
+  while(i<cols.length){
+    const blk=cols[i].block; let span=1;
+    while(i+span<cols.length && cols[i+span].block===blk) span++;
+    if(blk){ h+=`<th class="grp" colspan="${span}">${blk}</th>`; }
+    else { for(let k=0;k<span;k++){ const sc=stickClass(i+k);
+             h+=`<th class="grpblank ${sc}"></th>`; } }
+    i+=span;
+  }
+  h+='</tr><tr class="metric">';
+  cols.forEach((c,idx)=>{
+    const arrow = state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
+    const sc=stickClass(idx);
+    h+=`<th class="${sc}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`;
+  });
+  h+='</tr></thead><tbody>';
+  const canDrill = drillFamilies().length > 0;
+  rows.forEach(row=>{
+    h+='<tr>';
+    cols.forEach((c,idx)=>{
+      const v=row[c.key];
+      const sc=stickClass(idx);
+      const drill = canDrill && (idx===1 || idx===2);
+      const cls=[sc, c.align==='left'||c.type==='text'?'l':'', tlClass(v,c.type), sc?'':'zebra',
+                 drill?'drillable':''].filter(Boolean).join(' ');
+      const attr = drill?` data-pid="${row.ProjectID}"`:'';
+      h+=`<td class="${cls}"${attr}>${fmt(v,c.type)}</td>`;
+    });
+    h+='</tr>';
+  });
+  return h+'</tbody></table>';
+}
+
+function openDrill(pid, ev){
+  closeDrill();
+  const menu=document.createElement('div'); menu.className='drill'; menu.id='drillMenu';
+  menu.innerHTML=`<div class="dh">Drill into ${pid}</div>`;
+  drillFamilies().forEach(([qid,fam])=>{
+    const btn=document.createElement('button'); btn.textContent=fam;
+    btn.onclick=()=>{ closeDrill(); drillTo(pid, qid); };
+    menu.appendChild(btn);
+  });
+  document.body.appendChild(menu);
+  const r=menu.getBoundingClientRect();
+  let x=ev.clientX, y=ev.clientY+8;
+  if(x+r.width>window.innerWidth-8) x=window.innerWidth-r.width-8;
+  if(y+r.height>window.innerHeight-8) y=ev.clientY-r.height-8;
+  menu.style.left=Math.max(8,x)+'px'; menu.style.top=y+'px';
+  setTimeout(()=>document.addEventListener('click', closeDrill, {once:true}),0);
+}
+function closeDrill(){ const m=el('drillMenu'); if(m) m.remove(); }
+function drillTo(pid, qid){
+  state.selProjects = new Set([Number(pid)]);
+  renderProjects();
+  selectQuery(qid);
+  runQuery();
+}
+
+async function doExport(fmt){
+  if(!state.result) return;
+  const btn = fmt==='xlsx'?el('expx'):el('expp'); const txt=btn.innerHTML;
+  btn.disabled=true; btn.innerHTML='<span class="spin" style="border-color:rgba(0,0,0,.2);border-top-color:var(--brand)"></span> …';
+  try{
+    const res = await fetch('/api/export/'+fmt,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});
+    if(!res.ok){ const e=await res.json().catch(()=>({})); showErr(e.error||'Export failed'); return; }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition')||'';
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download = m?m[1]:('export.'+fmt); document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+  } finally { btn.disabled=false; btn.innerHTML=txt; }
+}
+el('expx').onclick=()=>doExport('xlsx');
+el('expp').onclick=()=>doExport('pdf');
+
+function showErr(m){ const e=el('err'); e.textContent=m; e.style.display='block'; }
+function hideErr(){ el('err').style.display='none'; }
+
+boot().catch(e=>showErr('Startup failed: '+e.message));
+</script>
+</body>
+</html>
