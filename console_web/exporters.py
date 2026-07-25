@@ -9,6 +9,7 @@ import io
 from datetime import datetime
 
 from console_web.queries import branding
+from console_web import etospec
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -25,6 +26,8 @@ def _fmt(value, ctype):
             return "{:,.0f}".format(f) if f == int(f) else "{:,.2f}".format(f)
         if ctype == "money":
             return "${:,.0f}".format(float(value))
+        if ctype == "money2":
+            return "${:,.2f}".format(float(value))
         if ctype == "pct":
             return "{:.1f}%".format(float(value) * 100)
         if ctype == "int":
@@ -84,7 +87,24 @@ def _blocks(columns):
 # ─────────────────────────────────────────────────────────────────────────────
 # Excel
 # ─────────────────────────────────────────────────────────────────────────────
+def _spec_xlsx(exp) -> bytes:
+    """Faithful workbook for a deployed eto-reporting report (labour / PO), built by
+    the vendored writer so the download matches the on-prem report exactly."""
+    kind = exp["kind"]
+    if kind == "labour":
+        return etospec.labour_book_bytes(exp["report_id"], exp["period_rows"],
+                                         exp["life_rows"], exp["p_label"], exp["l_label"])
+    if kind == "po_status":
+        return etospec.po_status_book_bytes(exp["df"], exp["label"])
+    if kind == "exceptions":
+        return etospec.exceptions_book_bytes(exp["items"], exp["label"])
+    raise ValueError(f"unknown spec export kind '{kind}'")
+
+
 def to_xlsx(result) -> bytes:
+    exp = getattr(result, "export", None)
+    if exp:
+        return _spec_xlsx(exp)
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter

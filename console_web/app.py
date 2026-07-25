@@ -39,9 +39,10 @@ def _run_from_payload(payload):
     project_ids = payload.get("project_ids") or []
     date_from = payload.get("date_from") or None
     date_to = payload.get("date_to") or None
+    view = payload.get("view") or "period"
     svc = _service()
     try:
-        return svc.run(query_id, project_ids, date_from=date_from, date_to=date_to)
+        return svc.run(query_id, project_ids, date_from=date_from, date_to=date_to, view=view)
     finally:
         close = getattr(svc, "close", None)
         if close:

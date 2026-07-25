@@ -94,6 +94,20 @@
   tbody td{padding:9px 13px;border-top:1px solid var(--line);white-space:nowrap;vertical-align:middle}
   tbody td.r{text-align:right}
   tbody tr:nth-child(even){background:#f8fafd}
+  /* eto-reporting subtotal bands (match the deployed workbook tiers) */
+  tbody tr.k-l1_sub td{background:#D6E4F0;font-weight:600;border-top:1px solid #b9d0ea}
+  tbody tr.k-l2_sub td{background:#BDD7EE;font-weight:600;border-top:1px solid #a7c6e6}
+  tbody tr.k-l3_sub td{background:#9DC3E6;font-weight:700;border-top:1px solid #86b2dd}
+  tbody tr.k-grand  td{background:#2E75B6;color:#fff;font-weight:700}
+  tbody tr.band td{font-weight:700;letter-spacing:.01em}
+  /* pagination */
+  .pager{display:flex;align-items:center;gap:8px;margin:10px 0 0;flex-wrap:wrap}
+  .pager .pg{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 11px;
+    font-size:12px;cursor:pointer;color:var(--ink)}
+  .pager .pg:hover:not(:disabled){border-color:var(--brand-2);color:var(--brand-2)}
+  .pager .pg:disabled{opacity:.4;cursor:default}
+  .pager .pginfo{font-size:12px;color:var(--muted);margin:0 4px}
+  .pager select{border:1px solid var(--line);border-radius:8px;padding:4px 6px;font-size:12px}
   tbody tr:hover{background:#eef3ff}
   /* Executive Dashboard — group band, traffic lights, frozen cols */
   table.exec{font-family:Helvetica,Arial,sans-serif;font-size:12px}
@@ -167,6 +181,10 @@
       </div>
       <div class="dsub" id="dsub"></div>
     </div>
+    <div class="card" id="viewcard" style="display:none">
+      <p class="label">Cumulative view</p>
+      <div class="chips" id="viewchips"></div>
+    </div>
   </div>
 
   <div class="main">
@@ -190,13 +208,15 @@
         <div class="empty"><div class="big">Loading…</div></div>
       </div>
     </div>
+    <div class="pager" id="pager" style="display:none"></div>
     <div class="foot" id="foot"></div>
   </div>
 </div>
 
 <script>
 const state = { queries:[], projects:[], selQuery:null, selProjects:new Set(),
-               result:null, sort:{key:null,dir:1}, cfg:{}, datePreset:'start' };
+               result:null, sort:{key:null,dir:1}, cfg:{}, datePreset:'start', view:'period',
+               page:1, pageSize:250 };
 let refreshTimer=null;
 
 function el(id){ return document.getElementById(id); }
@@ -299,9 +319,21 @@ function setPreset(k){ state.datePreset=k; renderChips();
   el('daterow').style.display = k==='custom' ? 'flex' : 'none';
   syncDateVisibility(); scheduleRefresh(); }
 function syncDateVisibility(){
-  const eto = isEtoReport(currentQuery());
+  const q=currentQuery();
+  const eto = isEtoReport(q);
   el('chips').parentElement.style.display = eto ? 'block' : 'none';
+  el('viewcard').style.display = (q && q.views) ? 'block' : 'none';
+  if(q && q.views) renderViewChips();
 }
+const VIEWS = [['period','This Pay Period'],['life','Project Lifetime']];
+function renderViewChips(){
+  const c=el('viewchips'); c.innerHTML='';
+  VIEWS.forEach(([k,lbl])=>{
+    const b=document.createElement('div'); b.className='chip'+(state.view===k?' sel':'');
+    b.textContent=lbl; b.onclick=()=>setView(k); c.appendChild(b);
+  });
+}
+function setView(k){ state.view=k; renderViewChips(); if(state.selQuery) runQuery(); }
 // resolve preset -> {from,to} (ISO strings or null). Uses tenant fiscal/pay-period config.
 function resolveDates(){
   const p=state.datePreset;
@@ -332,8 +364,10 @@ function dateLabel(){
 
 function payload(){
   const d=resolveDates();
+  const q=currentQuery();
   return { query_id: state.selQuery, project_ids: Array.from(state.selProjects),
-           date_from: d.from, date_to: d.to };
+           date_from: d.from, date_to: d.to,
+           view: (q && q.views) ? state.view : 'period' };
 }
 function scheduleRefresh(){ clearTimeout(refreshTimer); refreshTimer=setTimeout(()=>{ if(state.selQuery) runQuery(); }, 450); }
 
@@ -348,7 +382,7 @@ async function runQuery(){
   el('tscroll').innerHTML='<div class="empty"><div class="big"><span class="spin"></span> Running…</div></div>';
   const {ok,d} = await j('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});
   if(!ok){ showErr(d.error||'Query failed'); el('tscroll').innerHTML='<div class="empty">Query failed.</div>'; return; }
-  state.result=d; state.sort={key:null,dir:1}; renderResult();
+  state.result=d; state.sort={key:null,dir:1}; state.page=1; renderResult();
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -356,6 +390,7 @@ function fmt(v,type){
   if(v===null||v===undefined||v==='') return '';
   if(type==='pct') return (v*100).toFixed(1)+'%';
   if(type==='money') return '$'+Math.round(v).toLocaleString();
+  if(type==='money2') return '$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
   if(type==='hours') return Math.round(v).toLocaleString();
   if(type==='num') return Number(v).toLocaleString(undefined,{maximumFractionDigits:2});
   if(type==='int') return Math.round(v).toLocaleString();
@@ -382,34 +417,88 @@ function renderResult(){
     d.innerHTML=`<div class="v">${c.value}</div><div class="l">${c.label}</div>`; cw.appendChild(d); });
 
   let rows=r.rows.slice();
-  if(state.sort.key){ const k=state.sort.key,dir=state.sort.dir;
-    rows.sort((a,b)=>{ let x=a[k],y=b[k];
+  // reports with a subtotal hierarchy are shown in natural order (sorting would break it);
+  // flat reports (incl. Procurement Exceptions) stay sortable, with any total row pinned last.
+  const hierarchical = rows.some(r0=>['l1_sub','l2_sub','l3_sub','band'].includes(r0._kind));
+  if(state.sort.key && !hierarchical){ const k=state.sort.key,dir=state.sort.dir;
+    const specials=rows.filter(r0=>r0._kind && r0._kind!=='detail');
+    const dets=rows.filter(r0=>!r0._kind || r0._kind==='detail');
+    dets.sort((a,b)=>{ let x=a[k],y=b[k];
       if(x===null||x===undefined) return 1; if(y===null||y===undefined) return -1;
       if(typeof x==='number'&&typeof y==='number') return (x-y)*dir;
-      return (''+x).localeCompare(''+y)*dir; }); }
+      return (''+x).localeCompare(''+y)*dir; });
+    rows = dets.concat(specials);
+  }
+  state._hier = hierarchical;
 
   const grouped=r.columns.some(c=>c.block);
+  // paginate the full set for display; exports always render every row server-side.
+  const total=rows.length, pageSize=state.pageSize;
+  const pages=Math.max(1, Math.ceil(total/pageSize));
+  if(state.page>pages) state.page=pages;
+  if(state.page<1) state.page=1;
+  const start=(state.page-1)*pageSize;
+  const pageRows = total>pageSize ? rows.slice(start, start+pageSize) : rows;
   if(rows.length===0){
     const dated = state.datePreset!=='start';
     el('tscroll').innerHTML='<div class="empty"><div class="big">No rows</div>Nothing matched this selection'
       +(dated?' and date range':'')+'. A project with no charged time / POs / NCRs in range will be empty here.</div>';
+    renderPager(0,1,0,0);
   } else {
-    el('tscroll').innerHTML = grouped ? renderExec(r,rows) : renderPlain(r,rows);
+    el('tscroll').innerHTML = grouped ? renderExec(r,pageRows) : renderPlain(r,pageRows);
+    el('tscroll').scrollTop=0;
+    renderPager(total, pages, total?start+1:0, Math.min(start+pageSize,total));
   }
-  el('tscroll').querySelectorAll('th[data-k]').forEach(th=>{
-    th.onclick=()=>{ const k=th.dataset.k; if(state.sort.key===k) state.sort.dir*=-1; else {state.sort.key=k;state.sort.dir=1;} renderResult(); };
-  });
+  if(!state._hier){
+    el('tscroll').querySelectorAll('th[data-k]').forEach(th=>{
+      th.onclick=()=>{ const k=th.dataset.k; if(state.sort.key===k) state.sort.dir*=-1; else {state.sort.key=k;state.sort.dir=1;} state.page=1; renderResult(); };
+    });
+  }
   el('tscroll').querySelectorAll('td.drillable').forEach(td=>{
     td.onclick=(e)=>{ e.stopPropagation(); openDrill(td.dataset.pid, e); };
   });
-  el('foot').textContent = `${r.rows.length} row${r.rows.length===1?'':'s'} · ${r.title}`;
+  el('foot').textContent = `${r.rows.length.toLocaleString()} row${r.rows.length===1?'':'s'} · ${r.title}`;
+}
+const PAGE_SIZES=[100,250,500,1000];
+function renderPager(total, pages, shownFrom, shownTo){
+  const p=el('pager');
+  if(total<=state.pageSize){ p.style.display='none'; p.innerHTML=''; return; }
+  p.style.display='flex';
+  const opts=PAGE_SIZES.map(n=>`<option value="${n}"${n===state.pageSize?' selected':''}>${n}/page</option>`).join('');
+  p.innerHTML =
+    `<button class="pg" ${state.page<=1?'disabled':''} data-go="first">« First</button>`+
+    `<button class="pg" ${state.page<=1?'disabled':''} data-go="prev">‹ Prev</button>`+
+    `<span class="pginfo">Rows ${shownFrom.toLocaleString()}–${shownTo.toLocaleString()} of ${total.toLocaleString()} · page ${state.page} of ${pages}</span>`+
+    `<button class="pg" ${state.page>=pages?'disabled':''} data-go="next">Next ›</button>`+
+    `<button class="pg" ${state.page>=pages?'disabled':''} data-go="last">Last »</button>`+
+    `<select id="psize" aria-label="rows per page">${opts}</select>`;
+  p.querySelectorAll('button.pg').forEach(b=>b.onclick=()=>{
+    const g=b.dataset.go;
+    if(g==='first') state.page=1; else if(g==='prev') state.page--; else if(g==='next') state.page++; else if(g==='last') state.page=pages;
+    renderResult();
+  });
+  const sel=el('psize'); if(sel) sel.onchange=()=>{ state.pageSize=Number(sel.value); state.page=1; renderResult(); };
+}
+const _NUMT=['money','money2','num','int','hours','pct','days'];
+function _isBand(r,row){
+  // a pure band row: some label present, but no numeric column populated
+  return r.columns.every(c=> _NUMT.indexOf(c.type)<0 || row[c.key]==null||row[c.key]==='' );
 }
 function renderPlain(r,rows){
   let h='<table><thead><tr>';
-  r.columns.forEach(c=>{ const rc=c.align==='right'?' r':''; const arrow=state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'';
+  r.columns.forEach(c=>{ const rc=c.align==='right'?' r':''; const arrow=(!state._hier&&state.sort.key===c.key)?(state.sort.dir>0?'▲':'▼'):'';
     h+=`<th class="${rc.trim()}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`; });
   h+='</tr></thead><tbody>';
-  rows.forEach(row=>{ h+='<tr>';
+  rows.forEach(row=>{
+    const kind=row._kind||'';
+    const kc = (kind && kind!=='detail') ? ' k-'+kind : '';
+    if(kind && kind!=='detail' && _isBand(r,row)){
+      let label='';
+      for(const c of r.columns){ if(row[c.key]!=null&&row[c.key]!==''){ label=fmt(row[c.key],c.type); break; } }
+      h+=`<tr class="band${kc}"><td colspan="${r.columns.length}">${label}</td></tr>`;
+      return;
+    }
+    h+=`<tr${kc?` class="${kc.trim()}"`:''}>`;
     r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':''].filter(Boolean).join(' ');
       const cell=c.type==='pct'?pctPill(row[c.key]):fmt(row[c.key],c.type);
       h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`; });

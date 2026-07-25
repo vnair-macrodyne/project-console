@@ -15,6 +15,7 @@ Two backends implement the same `QueryService` interface:
 from dataclasses import dataclass, field, asdict
 
 from console.config import TENANT
+from console_web import etospec
 
 
 def L(key: str) -> str:
@@ -50,6 +51,7 @@ class QueryResult:
     rows: list = field(default_factory=list)       # list[dict]
     cards: list = field(default_factory=list)      # list[Card]
     note: str = ""
+    export: dict = None       # server-side only: payload for the faithful xlsx writer (never serialized)
 
     def to_dict(self):
         return {
@@ -66,13 +68,16 @@ class QueryResult:
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
-              "labour_proj", "labour_dept", "labour_wages", "labour_detail", "labour_spend",
-              "po_summary", "po_detail", "po_exception",
+              "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
+              "po_status", "po_exceptions",
               "nc_summary", "nc_detail"}
 
-# reports that read ETO live and honour the optional date range
-ETO_REPORT_IDS = {"labour_proj", "labour_dept", "labour_wages", "labour_detail", "labour_spend",
-                  "po_summary", "po_detail", "po_exception", "nc_summary", "nc_detail"}
+# reports that read ETO live and honour the optional date range / view
+ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
+                  "po_status", "po_exceptions", "nc_summary", "nc_detail"}
+
+# labour reports carry the two-view toggle (This Pay Period / Project Lifetime)
+LABOUR_VIEW_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e"}
 
 
 def catalogue():
@@ -100,31 +105,31 @@ def catalogue():
         {"id": "crosswalk", "menu": "Dashboards", "label": f"{L('crosswalk')} (map)",
          "desc": f"The {L('hour_description')} → {disc.lower()} mapping (reference).",
          "needs_projects": False},
-        # ── Labour (replicates the eto-reporting labour suite) ─────────────
-        {"id": "labour_proj", "menu": labour, "label": "Project Costing",
-         "desc": f"{proj} → department → labour category → job detail: hours & applied-rate cost.",
+        # ── Labour (the deployed eto-reporting daily suite — A–E) ──────────
+        {"id": "lab_a", "menu": labour, "label": "Departmental Project Detail",
+         "desc": f"Department → {proj.lower()} → employee: entries, hours, OT and labour cost, "
+                 "with per-project and department subtotals.",
+         "needs_projects": True, "views": True},
+        {"id": "lab_b", "menu": labour, "label": "Employee Summary",
+         "desc": "Department → employee: entries, hours, OT and labour cost, one row per employee.",
+         "needs_projects": True, "views": True},
+        {"id": "lab_c", "menu": labour, "label": "Job-Category Summary",
+         "desc": "Department → labour category (Hour Description) with % of department hours.",
+         "needs_projects": True, "views": True},
+        {"id": "lab_d", "menu": labour, "label": "Employee Job Detail",
+         "desc": "Department → employee → job-detail lines (the timecard note per task).",
+         "needs_projects": True, "views": True},
+        {"id": "lab_e", "menu": labour, "label": "Project Labour Spend",
+         "desc": f"{proj} → department → employee — entries, hours, OT and labour cost.",
+         "needs_projects": True, "views": True},
+        # ── Purchasing (the deployed PO reports) ───────────────────────────
+        {"id": "po_status", "menu": "Purchasing", "label": "PO Status",
+         "desc": f"Open PO lines On Order / Overdue, grouped {proj.lower()} → machine, with an "
+                 "overdue-aging summary. Export includes the Contents & Summary sheet.",
          "needs_projects": True},
-        {"id": "labour_dept", "menu": labour, "label": "Departmental Costing",
-         "desc": f"Department → {proj.lower()} → labour category: hours & applied-rate cost.",
-         "needs_projects": True},
-        {"id": "labour_wages", "menu": labour, "label": "Wages Payable",
-         "desc": f"Employee → {proj.lower()} → job detail by date, with rate and payable.",
-         "needs_projects": True},
-        {"id": "labour_detail", "menu": labour, "label": "Labour Detail",
-         "desc": "Full timecard audit trail — every line, applied-rate cost.",
-         "needs_projects": True},
-        {"id": "labour_spend", "menu": labour, "label": "Project Labour Spend",
-         "desc": f"{proj}s by department & employee — hours & applied-rate cost.",
-         "needs_projects": True},
-        # ── Purchasing ────────────────────────────────────────────────────
-        {"id": "po_summary", "menu": "Purchasing", "label": "Summary",
-         "desc": f"PO commitment by vendor for the selected {proj.lower()}s (extended value).",
-         "needs_projects": True},
-        {"id": "po_detail", "menu": "Purchasing", "label": "Details",
-         "desc": "PO line items — order, date, vendor, item, extended value, received.",
-         "needs_projects": True},
-        {"id": "po_exception", "menu": "Purchasing", "label": "Exception",
-         "desc": "Open PO lines delivered-late or ordered-late for lead time, by buyer.",
+        {"id": "po_exceptions", "menu": "Purchasing", "label": "Procurement Exceptions",
+         "desc": "Open PO lines delivered-late or ordered-late for lead time — one sortable row "
+                 "per project-item, by buyer.",
          "needs_projects": True},
         # ── Non-Conformance ───────────────────────────────────────────────
         {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
@@ -298,30 +303,66 @@ class LiveQueryService(QueryService):
                 for hd, disc in sorted(self._crosswalk().items())]
         return _crosswalk_result(rows)
 
-    # -- ETO report families (read from ETO, scoped to projects + date window) --
-    def _q_labour_proj(self, project_ids, date_from=None, date_to=None, **kw):
-        return _labour_proj_result(_live_labour_costing(self._eto_conn().cursor(), project_ids, date_from, date_to))
+    # -- Labour + Purchasing (the deployed eto-reporting engine, read from ETO) --
+    def _df(self, sql):
+        import pandas as pd
+        cur = self._eto_conn().cursor()
+        cur.execute(sql)
+        cols = [d[0] for d in cur.description]
+        return pd.DataFrame([tuple(r) for r in cur.fetchall()], columns=cols)
 
-    def _q_labour_dept(self, project_ids, date_from=None, date_to=None, **kw):
-        return _labour_dept_result(_live_labour_costing(self._eto_conn().cursor(), project_ids, date_from, date_to))
+    def _labour(self, project_ids, report_id, date_from, date_to, view):
+        period_df, life_df, p_label, l_label = self._labour_frames(project_ids, date_from, date_to)
+        return _spec_labour_result(report_id, period_df, life_df, view, p_label, l_label)
 
-    def _q_labour_wages(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_labour_wages(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _labour_frames(self, project_ids, date_from, date_to):
+        import datetime as _dt
+        dto = _as_date(date_to) or _dt.date.today()
+        dfrom = _as_date(date_from) or etospec.period_to_date(dto)[0]
+        pids = [int(p) for p in project_ids] if project_ids else None
+        period_df = self._df(etospec.query_daily_labour(dfrom, dto, pids))
+        active = set(period_df["ProjectID"].dropna().unique()) if not period_df.empty else set()
+        life_df = (self._df(etospec.query_daily_labour(None, dto, list(active)))
+                   if active else period_df.iloc[0:0])
+        p_label = f"Pay-period-to-date: {dfrom:%b %d} – {dto:%b %d, %Y}"
+        l_label = f"Project lifetime-to-date (through {dto:%b %d, %Y})"
+        return period_df, life_df, p_label, l_label
 
-    def _q_labour_detail(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_labour_detail(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _q_lab_a(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour(project_ids, "lab_a", date_from, date_to, view)
 
-    def _q_labour_spend(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_labour_spend(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _q_lab_b(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour(project_ids, "lab_b", date_from, date_to, view)
 
-    def _q_po_summary(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_po_summary(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _q_lab_c(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour(project_ids, "lab_c", date_from, date_to, view)
 
-    def _q_po_detail(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_po_detail(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _q_lab_d(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour(project_ids, "lab_d", date_from, date_to, view)
 
-    def _q_po_exception(self, project_ids, date_from=None, date_to=None, **kw):
-        return _live_po_exception(self._eto_conn().cursor(), project_ids, date_from, date_to)
+    def _q_lab_e(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour(project_ids, "lab_e", date_from, date_to, view)
+
+    def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
+        import datetime as _dt
+        pids = [int(p) for p in project_ids] if project_ids else None
+        raw = self._df(etospec.query_po_status_open(pids))
+        as_of = _dt.date.today()
+        pdf = etospec.po_prep(raw, today=as_of)
+        return _spec_po_status_result(pdf, f"As at {as_of:%b %d, %Y}")
+
+    def _q_po_exceptions(self, project_ids, date_from=None, date_to=None, **kw):
+        import datetime as _dt
+        pids = [int(p) for p in project_ids] if project_ids else None
+        enriched = True
+        try:
+            raw = self._df(etospec.query_po_exceptions(True, pids))
+        except Exception:
+            enriched = False
+            raw = self._df(etospec.query_po_exceptions(False, pids))
+        as_of = _dt.date.today()
+        items = etospec.exc_aggregate(etospec.exc_classify(raw, today=as_of))
+        return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}", enriched)
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(
@@ -546,22 +587,12 @@ def _finalize_exec(rows):
 # projects, honouring an optional [date_from, date_to] window. Kept in separate
 # queries per the fan-out rule (never join timecards to PO/NCR).
 # ─────────────────────────────────────────────────────────────────────────────
-_DETAIL_CAP = 5000   # detail rows are capped; UI notes when truncated
-_BASE_CCY = "CAD"    # reporting base currency; PO native × PurchaseCurrRate normalises to this
-                     # (verified: rate=1.0 on CA rows, ~1.31 on US rows → multiply → CAD)
+# Reports render the FULL result set — no row cap. Large reports are paginated in
+# the browser for practicality; the Excel and PDF exports always contain every row.
 
 
 def _ids_sql(project_ids):
     return ",".join(str(int(p)) for p in project_ids)
-
-
-def _cap_note(rows, datekey):
-    """Explain the detail cap and show how far back the shown rows reach."""
-    dates = [r.get(datekey) for r in rows if r.get(datekey)]
-    earliest = min(dates) if dates else None
-    return (f"  Capped at the most recent {_DETAIL_CAP:,} rows"
-            + (f" (only back to {earliest})" if earliest else "")
-            + " — scope to fewer projects or set a date range to see older records.")
 
 
 def _date_clause(col, dfrom, dto):
@@ -573,338 +604,97 @@ def _date_clause(col, dfrom, dto):
     return (" AND " + " AND ".join(parts)) if parts else ""
 
 
-# ---- Labour (eto-reporting report set — vwTimecards / applied-rate) ----------
-_APPLIED = "t.HourTime * t.HourRate * t.HourFactor"
-_EMP_NAME = "ISNULL(e.EmpLastName + ', ' + e.EmpFirstName, t.EmpNumber)"
-_EMP_JOIN = "LEFT JOIN dbo.tblEmployee e ON e.EmployeeID = t.EmployeeID"
+# ---- Labour + Purchasing result builders (the deployed eto-reporting engine) --
+# The five daily labour reports (A–E) and the two PO reports are produced by the
+# vendored `etospec` module — the SAME code the on-prem eto-reporting suite runs —
+# so the on-screen tables and the Excel exports match the deployed reports exactly.
+# Rows carry a reserved "_kind" (detail / l1_sub / l2_sub / l3_sub / grand /
+# section) that the browser and the exporter use to style subtotal bands.
 
-# Column contracts mirror eto_config.py COLS_* — (key, label, type, align, wrap)
-_COLS_PROJ = [("ProjectID","Project ID","id","left",False),("JobName","Job Name","text","left",True),
-    ("Department","Department","text","left",False),("LaborCategory","Labour Cat.","text","left",False),
-    ("JobDetail","Job Detail","text","left",False),("Customer","Customer","text","left",False),
-    ("MachineCode","Mach.Code","id","left",False),("Machine","Machine","text","left",False),
-    ("RegularOT","Reg/OT","text","left",False),("Employees","Employees","int","right",False),
-    ("Entries","Entries","int","right",False),("Hours","Hours","hours","right",False),
-    ("LabourCost","Labour Cost","money","right",False)]
-_COLS_DEPT = [("Department","Department","text","left",False),("ProjectID","Project ID","id","left",False),
-    ("JobName","Job Name","text","left",True),("Customer","Customer","text","left",False),
-    ("LaborCategory","Labour Cat.","text","left",False),("MachineCode","Mach.Code","id","left",False),
-    ("Machine","Machine","text","left",False),("JobDetail","Job Detail","text","left",False),
-    ("RegularOT","Reg/OT","text","left",False),("Employees","Employees","int","right",False),
-    ("Entries","Entries","int","right",False),("Hours","Hours","hours","right",False),
-    ("LabourCost","Labour Cost","money","right",False)]
-_COLS_WAGES = [("EmpNo","Emp No","id","left",False),("Employee","Employee","text","left",False),
-    ("Department","Department","text","left",False),("ProjectID","Project ID","id","left",False),
-    ("JobName","Job Name","text","left",True),("LaborCategory","Labour Cat.","text","left",False),
-    ("RegularOT","Reg/OT","text","left",False),("Machine","Machine","text","left",False),
-    ("MachineCode","Mach.Code","id","left",False),("JobDetail","Job Detail","text","left",False),
-    ("WorkDate","Date","date","left",False),("Entries","Entries","int","right",False),
-    ("Hours","Hours","hours","right",False),("Rate","Rate","money","right",False),
-    ("WagesPayable","Wages Payable","money","right",False)]
-_COLS_DETAIL = [("Department","Department","text","left",False),("EmpNo","Emp No","id","left",False),
-    ("Employee","Employee","text","left",False),("ProjectID","Project ID","id","left",False),
-    ("JobName","Job Name","text","left",True),("LaborCategory","Labour Cat.","text","left",False),
-    ("RegularOT","Reg/OT","text","left",False),("Machine","Machine","text","left",False),
-    ("MachineCode","Mach.Code","id","left",False),("JobDetail","Job Detail","text","left",False),
-    ("Customer","Customer","text","left",False),("Rate","Rate","money","right",False),
-    ("Factor","Factor","num","right",False),("WorkDate","Date","date","left",False),
-    ("Hours","Hours","hours","right",False),("Cost","Cost","money","right",False)]
-_COLS_SPEND = [("ProjectID","Project ID","id","left",False),("JobName","Job Name","text","left",True),
-    ("Department","Department","text","left",False),("Employee","Employee","text","left",False),
-    ("EmpNo","Emp No","id","left",False),("RegularOT","Reg/OT","text","left",False),
-    ("Entries","Entries","int","right",False),("Hours","Hours","hours","right",False),
-    ("LabourCost","Labour Cost","money","right",False)]
-
-_LAB_NOTE = ("Applied-rate cost (HourTime × HourRate × HourFactor), live from ETO. "
-             "Labour Cat. = Hour Description · Reg/OT = Hour Class · Job Detail = spec/line-item "
-             "(SDescription) · Mach.Code = SpecID · Machine = equipment type.")
-
-
-def _cols(defs):
-    return [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in defs]
-
-
-def _lab_cards(rows, cost_key):
-    return [Card("Rows", str(len(rows))),
-            Card("Total hours", _fmt_hours(sum(r.get("Hours") or 0 for r in rows))),
-            Card("Total cost", _fmt_money(sum(r.get(cost_key) or 0 for r in rows)))]
-
-
-def _labour_result(qid, title, defs, rows, cost_key, capped=False):
-    note = _LAB_NOTE + (_cap_note(rows, "WorkDate") if capped else "")
-    return QueryResult(qid, title, _cols(defs), rows, _lab_cards(rows, cost_key), note)
-
-
-def _live_labour_costing(cur, pids, dfrom, dto):
-    """Finest grain shared by Project Costing + Departmental Costing."""
-    cur.execute(f"""
-        SELECT t.ProjectID, t.PDescription AS JobName, t.DeptName AS Department,
-               t.HourDescription AS LaborCategory, t.SDescription AS JobDetail, t.Customer,
-               CAST(t.SpecID AS int) AS MachineCode, t.MachineTypeName AS Machine, t.HourClass AS RegularOT,
-               COUNT(DISTINCT t.EmployeeID) AS Employees, COUNT(*) AS Entries,
-               SUM(t.HourTime) AS Hours, SUM({_APPLIED}) AS LabourCost
-        FROM dbo.vwTimecards t
-        WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        GROUP BY t.ProjectID, t.PDescription, t.DeptName, t.HourDescription, t.SDescription,
-                 t.Customer, CAST(t.SpecID AS int), t.MachineTypeName, t.HourClass
-    """)
-    return [{"ProjectID": _int(r[0]), "JobName": r[1], "Department": r[2], "LaborCategory": r[3],
-             "JobDetail": r[4], "Customer": r[5], "MachineCode": _int(r[6]), "Machine": r[7],
-             "RegularOT": r[8], "Employees": _int(r[9]), "Entries": _int(r[10]),
-             "Hours": _num(r[11]), "LabourCost": _num(r[12])} for r in cur.fetchall()]
-
-
-def _labour_proj_result(rows):
-    rows = sorted(rows, key=lambda x: (x["ProjectID"] or 0, x["Department"] or "", x["LaborCategory"] or ""))
-    return _labour_result("labour_proj", f"{L('labour')} — Project Costing", _COLS_PROJ, rows, "LabourCost")
-
-
-def _labour_dept_result(rows):
-    rows = sorted(rows, key=lambda x: (x["Department"] or "", x["ProjectID"] or 0, x["LaborCategory"] or ""))
-    return _labour_result("labour_dept", f"{L('labour')} — Departmental Costing", _COLS_DEPT, rows, "LabourCost")
-
-
-def _live_labour_wages(cur, pids, dfrom, dto):
-    cur.execute(f"""
-        SELECT TOP {_DETAIL_CAP + 1} t.EmpNumber AS EmpNo, {_EMP_NAME} AS Employee,
-               t.DeptName AS Department, t.ProjectID, t.PDescription AS JobName,
-               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.MachineTypeName AS Machine,
-               CAST(t.SpecID AS int) AS MachineCode, t.SDescription AS JobDetail,
-               CAST(t.TimeDate AS date) AS WorkDate, COUNT(*) AS Entries, SUM(t.HourTime) AS Hours,
-               t.HourRate AS Rate, SUM({_APPLIED}) AS WagesPayable
-        FROM dbo.vwTimecards t {_EMP_JOIN}
-        WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        GROUP BY t.EmpNumber, {_EMP_NAME}, t.DeptName, t.ProjectID, t.PDescription, t.HourDescription,
-                 t.HourClass, t.MachineTypeName, CAST(t.SpecID AS int), t.SDescription,
-                 CAST(t.TimeDate AS date), t.HourRate
-        ORDER BY t.DeptName, {_EMP_NAME}, CAST(t.TimeDate AS date) DESC
-    """)
-    raw = cur.fetchall(); capped = len(raw) > _DETAIL_CAP
-    rows = [{"EmpNo": r[0], "Employee": r[1], "Department": r[2], "ProjectID": _int(r[3]),
-             "JobName": r[4], "LaborCategory": r[5], "RegularOT": r[6], "Machine": r[7],
-             "MachineCode": _int(r[8]), "JobDetail": r[9], "WorkDate": _iso(r[10]),
-             "Entries": _int(r[11]), "Hours": _num(r[12]), "Rate": _num(r[13]),
-             "WagesPayable": _num(r[14])} for r in raw[:_DETAIL_CAP]]
-    return _labour_result("labour_wages", f"{L('labour')} — Wages Payable", _COLS_WAGES, rows,
-                          "WagesPayable", capped)
-
-
-def _live_labour_detail(cur, pids, dfrom, dto):
-    cur.execute(f"""
-        SELECT TOP {_DETAIL_CAP + 1} t.DeptName AS Department, t.EmpNumber AS EmpNo,
-               {_EMP_NAME} AS Employee, t.ProjectID, t.PDescription AS JobName,
-               t.HourDescription AS LaborCategory, t.HourClass AS RegularOT, t.MachineTypeName AS Machine,
-               CAST(t.SpecID AS int) AS MachineCode, t.SDescription AS JobDetail, t.Customer,
-               t.HourRate AS Rate, t.HourFactor AS Factor, CAST(t.TimeDate AS date) AS WorkDate,
-               t.HourTime AS Hours, {_APPLIED} AS Cost
-        FROM dbo.vwTimecards t {_EMP_JOIN}
-        WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        ORDER BY t.TimeDate DESC, t.DeptName, t.EmpNumber
-    """)
-    raw = cur.fetchall(); capped = len(raw) > _DETAIL_CAP
-    rows = [{"Department": r[0], "EmpNo": r[1], "Employee": r[2], "ProjectID": _int(r[3]),
-             "JobName": r[4], "LaborCategory": r[5], "RegularOT": r[6], "Machine": r[7],
-             "MachineCode": _int(r[8]), "JobDetail": r[9], "Customer": r[10], "Rate": _num(r[11]),
-             "Factor": _num(r[12]), "WorkDate": _iso(r[13]), "Hours": _num(r[14]),
-             "Cost": _num(r[15])} for r in raw[:_DETAIL_CAP]]
-    return _labour_result("labour_detail", f"{L('labour')} Detail", _COLS_DETAIL, rows, "Cost", capped)
-
-
-def _live_labour_spend(cur, pids, dfrom, dto):
-    cur.execute(f"""
-        SELECT t.ProjectID, t.PDescription AS JobName, t.DeptName AS Department,
-               {_EMP_NAME} AS Employee, t.EmpNumber AS EmpNo, t.HourClass AS RegularOT,
-               COUNT(*) AS Entries, SUM(t.HourTime) AS Hours, SUM({_APPLIED}) AS LabourCost
-        FROM dbo.vwTimecards t {_EMP_JOIN}
-        WHERE t.ProjectID IN ({_ids_sql(pids)}){_date_clause('t.TimeDate', dfrom, dto)}
-        GROUP BY t.ProjectID, t.PDescription, t.DeptName, {_EMP_NAME}, t.EmpNumber, t.HourClass
-        ORDER BY t.ProjectID, t.DeptName, {_EMP_NAME}
-    """)
-    rows = [{"ProjectID": _int(r[0]), "JobName": r[1], "Department": r[2], "Employee": r[3],
-             "EmpNo": r[4], "RegularOT": r[5], "Entries": _int(r[6]), "Hours": _num(r[7]),
-             "LabourCost": _num(r[8])} for r in cur.fetchall()]
-    return _labour_result("labour_spend", f"{L('labour')} — Project Spend", _COLS_SPEND, rows, "LabourCost")
-
-
-# ---- Purchase ------------------------------------------------------------
-def _po_summary_result(rows):
-    cols = [
-        QueryColumn("Vendor", "Vendor", "text", "left"),
-        QueryColumn("Curr", "Curr", "text", "left"),
-        QueryColumn("POs", "# POs", "int", "right"),
-        QueryColumn("Lines", "Lines", "int", "right"),
-        QueryColumn("Value", "Ext. Value", "money", "right"),
-        QueryColumn("BaseValue", f"Ext. Value ({_BASE_CCY})", "money", "right"),
-    ]
-    vendors = {r.get("Vendor") for r in rows}
-    cards = [Card("Vendors", str(len(vendors))),
-             Card(f"Total ({_BASE_CCY})", _fmt_money(sum(r.get("BaseValue") or 0 for r in rows))),
-             Card("POs", str(sum(r.get("POs") or 0 for r in rows)))]
-    return QueryResult("po_summary", "Purchase Summary", cols, rows, cards,
-                       "PO commitment, active POs only, live from ETO. Ext. Value is native "
-                       f"currency (see Curr); Ext. Value ({_BASE_CCY}) = native × the PO's "
-                       "currency rate (PurchaseCurrRate).")
-
-
-def _po_detail_result(rows, capped=False):
-    cols = [
-        QueryColumn("PO", "PO", "id", "left"),
-        QueryColumn("PODate", "PO Date", "date", "left"),
-        QueryColumn("Vendor", "Vendor", "text", "left"),
-        QueryColumn("ProjectID", "Proj ID", "id", "left"),
-        QueryColumn("Item", "Item", "text", "left", wrap=True),
-        QueryColumn("Qty", "Qty", "num", "right"),
-        QueryColumn("UOM", "UOM", "text", "left"),
-        QueryColumn("Received", "Received", "num", "right"),
-        QueryColumn("Value", "Ext. Value", "money", "right"),
-        QueryColumn("Curr", "Curr", "text", "left"),
-        QueryColumn("BaseValue", f"Ext. Value ({_BASE_CCY})", "money", "right"),
-    ]
-    cards = [Card("Lines", str(len(rows))),
-             Card(f"Total ({_BASE_CCY})", _fmt_money(sum(r.get("BaseValue") or 0 for r in rows)))]
-    note = (f"PO line items, active POs only, live from ETO, newest first. Ext. Value native "
-            f"(see Curr); Ext. Value ({_BASE_CCY}) = native × PO rate."
-            + (_cap_note(rows, "PODate") if capped else ""))
-    return QueryResult("po_detail", "Purchase Detail", cols, rows, cards, note)
-
-
-def _live_po_summary(cur, pids, dfrom, dto):
-    cur.execute(f"""
-        SELECT poh.CName AS Vendor, pod.PurchaseCurr AS Curr,
-               COUNT(DISTINCT poh.PurchaseOrderID) AS POs, COUNT(*) AS Lines,
-               SUM(pod.ExtendedPrice) AS Value,
-               SUM(pod.ExtendedPrice *
-                   CASE WHEN pod.PurchaseCurrRate > 0 THEN pod.PurchaseCurrRate ELSE 1 END) AS BaseValue
-        FROM dbo.vwPurchaseOrderDetails pod
-        JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
-        WHERE pod.ProjectID IN ({_ids_sql(pids)}) AND poh.PurchaseActive = 1
-              {_date_clause('poh.PurchaseDate', dfrom, dto)}
-        GROUP BY poh.CName, pod.PurchaseCurr
-        ORDER BY BaseValue DESC
-    """)
-    rows = [{"Vendor": r[0] or "(no vendor)", "Curr": r[1], "POs": _int(r[2]),
-             "Lines": _int(r[3]), "Value": _num(r[4]), "BaseValue": _num(r[5])}
-            for r in cur.fetchall()]
-    return _po_summary_result(rows)
-
-
-def _live_po_detail(cur, pids, dfrom, dto):
-    cur.execute(f"""
-        SELECT TOP {_DETAIL_CAP + 1} poh.PurchaseOrderID AS PO,
-               CAST(poh.PurchaseDate AS date) AS PODate, poh.CName AS Vendor,
-               pod.ProjectID, pod.ItemDescription AS Item,
-               pod.PurchaseQty AS Qty, pod.PurchaseUOM AS UOM, pod.Received AS Received,
-               pod.ExtendedPrice AS Value, pod.PurchaseCurr AS Curr, pod.PurchaseCurrRate AS Rate
-        FROM dbo.vwPurchaseOrderDetails pod
-        JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
-        WHERE pod.ProjectID IN ({_ids_sql(pids)}) AND poh.PurchaseActive = 1
-              {_date_clause('poh.PurchaseDate', dfrom, dto)}
-        ORDER BY poh.PurchaseDate DESC, poh.PurchaseOrderID
-    """)
-    raw = cur.fetchall()
-    capped = len(raw) > _DETAIL_CAP
-    rows = []
-    for r in raw[:_DETAIL_CAP]:
-        val, rate = _num(r[8]), _num(r[10])
-        if not rate or rate <= 0:      # a 0/negative FX rate is invalid data — don't zero the line
-            rate = 1.0
-        base = round(val * rate, 2) if val is not None else None
-        rows.append({"PO": _int(r[0]), "PODate": _iso(r[1]), "Vendor": r[2],
-                     "ProjectID": _int(r[3]), "Item": r[4], "Qty": _num(r[5]), "UOM": r[6],
-                     "Received": _num(r[7]), "Value": val, "Curr": r[9], "BaseValue": base})
-    return _po_detail_result(rows, capped)
-
-
-# ---- Purchasing Exception (mirrors eto_exceptions.py) --------------------
-_LLT_DAYS = 45   # lead time >= this = long-lead item (matches ETO suite)
-
-
-def _po_exception_result(rows, enriched):
-    cols = [
-        QueryColumn("Buyer", "Buyer", "text", "left"),
-        QueryColumn("ProjectID", "Proj ID", "id", "left"),
-        QueryColumn("PO", "PO", "id", "left"),
-        QueryColumn("Vendor", "Vendor", "text", "left"),
-        QueryColumn("Item", "Item", "id", "left"),
-        QueryColumn("Descr", "Description", "text", "left", wrap=True),
-        QueryColumn("Qty", "Qty", "num", "right"),
-        QueryColumn("Received", "Rec'd", "num", "right"),
-        QueryColumn("ExtValue", "Ext. Value", "money", "right"),
-        QueryColumn("NeedBy", "Need-By", "date", "left"),
-        QueryColumn("Ordered", "Ordered", "date", "left"),
-        QueryColumn("Lead", "Lead (d)", "int", "right"),
-        QueryColumn("LLT", "LLT", "text", "left"),
-        QueryColumn("OrdLate", "Ord Late", "text", "left"),
-        QueryColumn("DelLate", "Del Late", "text", "left"),
-        QueryColumn("DaysLate", "Days Late", "int", "right"),
-    ]
-    dl = sum(1 for r in rows if r.get("DelLate"))
-    cards = [Card("Exception lines", str(len(rows))),
-             Card("At-risk value", _fmt_money(sum(r.get("ExtValue") or 0 for r in rows)),
-                  "bad" if rows else "good"),
-             Card("Delivered late", str(dl), "bad" if dl else "good")]
-    note = ("Open PO lines (received < ordered) that are delivered-late (need-by past) "
-            + ("or ordered-late for lead time, by buyer. " if enriched
-               else "— lead-time source unavailable, so Ordered-Late / LLT are blank. ")
-            + "Live from ETO.")
-    return QueryResult("po_exception", "Purchasing — Exception", cols, rows, cards, note)
-
-
-def _classify_exceptions(recs, cols, enriched):
-    import datetime as _dt
-    today = _dt.date.today()
-    out = []
-    for r in recs:
-        d = dict(zip(cols, r))
-        need = d.get("DateRevised") or d.get("DateRequired")
-        ordered = d.get("Ordered")
-        lead = _int(d.get("LeadDays"))
-        del_late = bool(need and need < today)
-        days_late = (today - need).days if del_late else 0
-        ord_late = bool(ordered and lead is not None and need
-                        and (ordered + _dt.timedelta(days=lead)) > need)
-        if not (del_late or ord_late):
-            continue
-        out.append({
-            "Buyer": d.get("Buyer"), "ProjectID": _int(d.get("ProjectID")),
-            "PO": _int(d.get("PO")), "Vendor": d.get("Vendor"), "Item": _int(d.get("Item")),
-            "Descr": d.get("Descr"), "Qty": _num(d.get("Qty")), "Received": _num(d.get("Received")),
-            "ExtValue": _num(d.get("ExtValue")), "NeedBy": _iso(need), "Ordered": _iso(ordered),
-            "Lead": lead, "LLT": "LLT" if (lead is not None and lead >= _LLT_DAYS) else "",
-            "OrdLate": "LATE" if ord_late else "", "DelLate": "LATE" if del_late else "",
-            "DaysLate": days_late,
-        })
-    out.sort(key=lambda x: (-(x["DaysLate"] or 0), str(x.get("Buyer") or "")))
-    return out
-
-
-def _live_po_exception(cur, pids, dfrom, dto):
-    ids, dc = _ids_sql(pids), _date_clause('poh.PurchaseDate', dfrom, dto)
-    base_cols = f"""
-           poh.PurchaseOrderID AS PO, pod.ProjectID AS ProjectID, pod.ItemID AS Item,
-           pod.ItemDescription AS Descr, poh.CName AS Vendor,
-           pod.PurchaseQty AS Qty, pod.Received AS Received, pod.ExtendedPrice AS ExtValue,
-           CAST(pod.DateRequired AS date) AS DateRequired,
-           CAST(pod.DateRevised AS date) AS DateRevised,
-           CAST(poh.PurchaseDate AS date) AS Ordered,
-           COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, CAST(poh.BuyerID AS varchar(20))) AS Buyer"""
-    frm = f"""FROM dbo.vwPurchaseOrderDetails pod
-        JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
-        LEFT JOIN dbo.tblEmployee bu ON bu.EmployeeID = poh.BuyerID"""
-    where = (f"WHERE poh.PurchaseActive = 1 AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty) "
-             f"AND pod.ProjectID IN ({ids}){dc}")
-    full = f"SELECT {base_cols}, eim.EstimatedLeadTime AS LeadDays {frm} " \
-           f"LEFT JOIN dbo.tblEngItemMaster eim ON eim.ItemID = pod.ItemID {where}"
-    nolead = f"SELECT {base_cols}, CAST(NULL AS int) AS LeadDays {frm} {where}"
-    enriched = True
+def _fmt_money2(v):
     try:
-        cur.execute(full)
-    except Exception:
-        enriched = False
-        cur.execute(nolead)
-    cols = [d[0] for d in cur.description]
-    rows = _classify_exceptions(cur.fetchall(), cols, enriched)
-    return _po_exception_result(rows, enriched)
+        return "${:,.2f}".format(float(v))
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _grand_of(col_defs, grouped_rows):
+    keys = [c[0] for c in col_defs]
+    for cells, kind in grouped_rows:
+        if kind == "grand":
+            return dict(zip(keys, cells))
+    return {}
+
+
+def _spec_labour_cards(col_defs, grouped_rows):
+    g = _grand_of(col_defs, grouped_rows)
+    cards = []
+    if g.get("Entries") not in (None, ""):
+        cards.append(Card("Entries", "{:,}".format(int(g["Entries"]))))
+    if g.get("Hours") not in (None, ""):
+        cards.append(Card("Hours", "{:,.2f}".format(float(g["Hours"]))))
+    if g.get("LabourCost") not in (None, ""):
+        cards.append(Card("Labour Cost", _fmt_money2(g["LabourCost"])))
+    return cards
+
+
+def _spec_labour_result(report_id, period_df, life_df, view, p_label, l_label):
+    """Build a labour QueryResult for the requested view, stashing BOTH views'
+    grouped rows in `export` so the xlsx writer can emit the two-sheet workbook."""
+    meta = etospec.LABOUR_REPORTS[report_id]
+    period_rows = meta["builder"](period_df)
+    life_rows = meta["builder"](life_df)
+    active = life_rows if view == "life" else period_rows
+    label = l_label if view == "life" else p_label
+    view_name = "Project Lifetime" if view == "life" else "This Pay Period"
+
+    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(meta["cols"])]
+    rows = etospec.web_rows(meta["cols"], active)
+    cards = _spec_labour_cards(meta["cols"], active)
+    note = (f"{meta['title']} — {view_name} ({label}). Applied-rate cost = Hours × HourRate × "
+            "HourFactor; OT Hours = HourFactor > 1. Labour Category = Hour Description; "
+            "Job Detail = the timecard note (TimecardCustom1).")
+    export = {"kind": "labour", "report_id": report_id,
+              "period_rows": period_rows, "life_rows": life_rows,
+              "p_label": p_label, "l_label": l_label}
+    return QueryResult(report_id, f"{L('labour')} — {meta['label']}", qcols, rows, cards, note, export)
+
+
+def _spec_po_status_result(pdf, label):
+    """pdf is a po_prep'd DataFrame. Web shows the grouped detail; export writes the
+    full Contents & Summary + PO Status workbook."""
+    grouped, _idx = etospec.po_build_rows(pdf)
+    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_PO)]
+    rows = etospec.web_rows(etospec.COLS_PO, grouped)
+    aging = etospec.po_aging_summary(pdf)
+    ov_lines = sum(l for _, l, _ in aging)
+    ov_val = sum(v for _, _, v in aging)
+    open_lines = 0 if pdf is None or pdf.empty else len(pdf)
+    cards = [Card("Open lines", "{:,}".format(open_lines)),
+             Card("Overdue lines", "{:,}".format(ov_lines), "bad" if ov_lines else "good"),
+             Card("Overdue value", _fmt_money2(ov_val), "bad" if ov_val else "good")]
+    note = ("PO Status — On Order, Overdue. Open = Received < Qty; Overdue = revised/required "
+            "date is past. Grouped by project → machine, with an overdue-aging summary; the "
+            "Excel export adds the Contents & Summary landing sheet.")
+    return QueryResult("po_status", "Purchasing — PO Status", qcols, rows, cards, note,
+                       {"kind": "po_status", "df": pdf, "label": label})
+
+
+def _spec_po_exc_result(items, label, enriched=True):
+    """items = exc_aggregate output (one row per project-item)."""
+    grouped = etospec.exc_build_rows(items)
+    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_FLAT)]
+    rows = etospec.web_rows(etospec.COLS_FLAT, grouped)
+    n = 0 if items is None or items.empty else len(items)
+    val = 0.0 if not n else float(items["ExtValue"].sum())
+    cards = [Card("Exception items", "{:,}".format(n), "bad" if n else "good"),
+             Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
+    note = ("Procurement Exceptions by Buyer — open PO lines delivered-late (need-by past) or "
+            "ordered-late for lead time, one sortable row per project-item."
+            + ("" if enriched else " Lead-time source unavailable, so LLT / Critical / Ordered-Late "
+               "are blank (delivered-late still fully evaluated)."))
+    return QueryResult("po_exceptions", "Purchasing — Procurement Exceptions", qcols, rows, cards, note,
+                       {"kind": "exceptions", "items": items, "label": label})
 
 
 # ---- Non-Conformance -----------------------------------------------------
@@ -1124,94 +914,63 @@ class DemoQueryService(QueryService):
                 for hd, disc in sorted(_DEMO_XWALK.items())]
         return _crosswalk_result(rows)
 
-    # -- ETO report families (canned; the 5 eto-reporting labour reports) -------
-    def _demo_labour_rows(self, project_ids):
-        out = []
-        for pid in self._sel(project_ids):
-            e = _DEMO_EXEC[pid]
-            for d, emp, dept, hd, ot, hrs, rate in _DEMO_LABOUR_DETAIL[pid]:
-                factor = 1.5 if ot == "OT" else 1.0
-                out.append({"Department": dept, "EmpNo": emp, "Employee": f"Emp {emp}",
-                            "ProjectID": pid, "JobName": e["name"], "LaborCategory": hd,
-                            "RegularOT": ("Overtime" if ot == "OT" else "Regular"),
-                            "Machine": f"Equipment - {dept.split()[0]}", "MachineCode": 1,
-                            "JobDetail": e["name"],
-                            "Customer": e["client"], "Rate": float(rate), "Factor": factor,
-                            "WorkDate": d, "Hours": float(hrs), "Cost": round(hrs * rate * factor, 2)})
-        return out
-
-    @staticmethod
-    def _agg(rows, keys, cost_out):
-        agg = {}
-        for r in rows:
-            k = tuple(r[x] for x in keys)
-            a = agg.setdefault(k, {"emps": set(), "Entries": 0, "Hours": 0.0, "cost": 0.0})
-            a["emps"].add(r["EmpNo"]); a["Entries"] += 1
-            a["Hours"] += r["Hours"]; a["cost"] += r["Cost"]
-        out = []
-        for k, a in agg.items():
-            row = dict(zip(keys, k))
-            row["Employees"] = len(a["emps"]); row["Entries"] = a["Entries"]
-            row["Hours"] = round(a["Hours"], 2); row[cost_out] = round(a["cost"], 2)
-            out.append(row)
-        return out
-
-    def _q_labour_proj(self, project_ids, date_from=None, date_to=None, **kw):
-        keys = ["ProjectID","JobName","Department","LaborCategory","JobDetail","Customer",
-                "MachineCode","Machine","RegularOT"]
-        return _labour_proj_result(self._agg(self._demo_labour_rows(project_ids), keys, "LabourCost"))
-
-    def _q_labour_dept(self, project_ids, date_from=None, date_to=None, **kw):
-        keys = ["ProjectID","JobName","Department","LaborCategory","JobDetail","Customer",
-                "MachineCode","Machine","RegularOT"]
-        return _labour_dept_result(self._agg(self._demo_labour_rows(project_ids), keys, "LabourCost"))
-
-    def _q_labour_wages(self, project_ids, date_from=None, date_to=None, **kw):
-        keys = ["EmpNo","Employee","Department","ProjectID","JobName","LaborCategory","RegularOT",
-                "Machine","MachineCode","JobDetail","WorkDate","Rate"]
-        rows = self._agg(self._demo_labour_rows(project_ids), keys, "WagesPayable")
-        rows.sort(key=lambda r: (r["Department"], r["Employee"], r["WorkDate"]))
-        return _labour_result("labour_wages", f"{L('labour')} — Wages Payable", _COLS_WAGES,
-                              rows, "WagesPayable")
-
-    def _q_labour_detail(self, project_ids, date_from=None, date_to=None, **kw):
-        rows = self._demo_labour_rows(project_ids)
-        rows.sort(key=lambda r: r["WorkDate"], reverse=True)
-        return _labour_result("labour_detail", f"{L('labour')} Detail", _COLS_DETAIL, rows, "Cost")
-
-    def _q_labour_spend(self, project_ids, date_from=None, date_to=None, **kw):
-        keys = ["ProjectID","JobName","Department","Employee","EmpNo","RegularOT"]
-        rows = self._agg(self._demo_labour_rows(project_ids), keys, "LabourCost")
-        return _labour_result("labour_spend", f"{L('labour')} — Project Spend", _COLS_SPEND,
-                              rows, "LabourCost")
-
-    def _q_po_summary(self, project_ids, date_from=None, date_to=None, **kw):
-        agg = {}
-        for pid in self._sel(project_ids):
-            for po, d, vendor, item, qty, uom, value, recv, curr in _DEMO_PO[pid]:
-                a = agg.setdefault((vendor, curr), {"pos": set(), "lines": 0, "value": 0.0, "base": 0.0})
-                a["pos"].add(po); a["lines"] += 1
-                a["value"] += value; a["base"] += value * _DEMO_FX.get(curr, 1.0)
-        rows = [{"Vendor": v, "Curr": c, "POs": len(a["pos"]), "Lines": a["lines"],
-                 "Value": a["value"], "BaseValue": round(a["base"], 2)}
-                for (v, c), a in sorted(agg.items(), key=lambda kv: -kv[1]["base"])]
-        return _po_summary_result(rows)
-
-    def _q_po_detail(self, project_ids, date_from=None, date_to=None, **kw):
+    # -- Labour + Purchasing (canned; the deployed daily reports A–E + PO) ------
+    def _demo_labour_df(self, project_ids, lifetime=False):
+        import pandas as pd
+        sel = set(self._sel(project_ids))
+        src = _DEMO_LAB_LIFE if lifetime else _DEMO_LAB_PERIOD
         rows = []
-        for pid in self._sel(project_ids):
-            for po, d, vendor, item, qty, uom, value, recv, curr in _DEMO_PO[pid]:
-                rows.append({"PO": po, "PODate": d, "Vendor": vendor, "ProjectID": pid,
-                             "Item": item, "Qty": float(qty), "UOM": uom,
-                             "Received": float(recv), "Value": float(value), "Curr": curr,
-                             "BaseValue": round(value * _DEMO_FX.get(curr, 1.0), 2)})
-        rows.sort(key=lambda r: r["PODate"], reverse=True)
-        return _po_detail_result(rows, capped=False)
+        for rec in src:
+            if rec["ProjectID"] not in sel:
+                continue
+            factor = rec.get("Factor", 1.0)
+            hrs = rec["Hours"]
+            rows.append({"Department": rec["Department"], "ProjectID": rec["ProjectID"],
+                         "JobName": rec["JobName"], "Customer": rec["Customer"],
+                         "EmpNo": rec["EmpNo"], "Employee": rec["Employee"],
+                         "Category": rec["Category"], "JobDetail": rec.get("JobDetail", ""),
+                         "Entries": 1, "Hours": hrs, "OTHours": (hrs if factor > 1 else 0),
+                         "LabourCost": round(hrs * rec["Rate"] * factor, 2)})
+        cols = ["Department", "ProjectID", "JobName", "Customer", "EmpNo", "Employee",
+                "Category", "JobDetail", "Entries", "Hours", "OTHours", "LabourCost"]
+        return pd.DataFrame(rows, columns=cols)
 
-    def _q_po_exception(self, project_ids, date_from=None, date_to=None, **kw):
-        rows = [dict(r) for r in _DEMO_EXC if r["ProjectID"] in self._sel(project_ids)]
-        rows.sort(key=lambda r: (-(r["DaysLate"] or 0), r["Buyer"]))
-        return _po_exception_result(rows, enriched=True)
+    def _labour_demo(self, project_ids, report_id, view):
+        return _spec_labour_result(report_id,
+                                   self._demo_labour_df(project_ids, lifetime=False),
+                                   self._demo_labour_df(project_ids, lifetime=True), view,
+                                   "Pay-period-to-date (demo)", "Project lifetime-to-date (demo)")
+
+    def _q_lab_a(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour_demo(project_ids, "lab_a", view)
+
+    def _q_lab_b(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour_demo(project_ids, "lab_b", view)
+
+    def _q_lab_c(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour_demo(project_ids, "lab_c", view)
+
+    def _q_lab_d(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour_demo(project_ids, "lab_d", view)
+
+    def _q_lab_e(self, project_ids, date_from=None, date_to=None, view="period", **kw):
+        return self._labour_demo(project_ids, "lab_e", view)
+
+    def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
+        import pandas as pd, datetime as _dt
+        sel = set(self._sel(project_ids))
+        raw = pd.DataFrame([r for r in _DEMO_PO_STATUS if r["ProjectID"] in sel],
+                           columns=_DEMO_PO_STATUS_COLS)
+        pdf = etospec.po_prep(raw, today=_dt.date(2026, 7, 24))
+        return _spec_po_status_result(pdf, "As at Jul 24, 2026 (demo)")
+
+    def _q_po_exceptions(self, project_ids, date_from=None, date_to=None, **kw):
+        import pandas as pd, datetime as _dt
+        sel = set(self._sel(project_ids))
+        raw = pd.DataFrame([r for r in _DEMO_EXC_RAW if r["ProjectID"] in sel],
+                           columns=_DEMO_EXC_COLS)
+        items = etospec.exc_aggregate(etospec.exc_classify(raw, today=_dt.date(2026, 7, 22)))
+        return _spec_po_exc_result(items, "As at Jul 22, 2026 (demo)", True)
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids))
@@ -1286,6 +1045,84 @@ _DEMO_EXC = [
      "Item": 20055, "Descr": "S7-1500 PLC + IO", "Qty": 1.0, "Received": 0.0,
      "ExtValue": 47600.0, "NeedBy": "2026-07-01", "Ordered": "2026-06-22", "Lead": 50,
      "LLT": "LLT", "OrdLate": "LATE", "DelLate": "LATE", "DaysLate": 24},
+]
+
+# ── Canned ETO-shaped frames for the deployed daily reports (demo) ────────────
+_D19 = ("230219 - 5500 Ton Forging Press", "Williams International")
+_D12 = ("230312 - 2500T Compression Press", "Eaton Corporation")
+_D87 = ("240087 - 650 Ton Trim Press", "Norris Cylinder")
+
+
+def _lab(dept, pid, jn, cust, empno, emp, cat, jd, hrs, rate, factor=1.0):
+    return {"Department": dept, "ProjectID": pid, "JobName": jn, "Customer": cust,
+            "EmpNo": empno, "Employee": emp, "Category": cat, "JobDetail": jd,
+            "Hours": hrs, "Rate": rate, "Factor": factor}
+
+
+# "This Pay Period" — a handful of charges per project
+_DEMO_LAB_PERIOD = [
+    _lab("Administration", 230219, *_D19, "5143", "5143 - Yang, Qin", "Customer Support", "Misc", 2.5, 95),
+    _lab("Engineering", 230219, *_D19, "222", "222 - Papenfuss, Paul", "Mechanical Engineering", "HPU Design", 8.0, 95),
+    _lab("Engineering", 230219, *_D19, "5070", "5070 - Rozik, Greg", "Electrical Engineering", "PLC programming", 4.0, 80, 1.5),
+    _lab("Manufacturing", 230219, *_D19, "5281", "5281 - Hacault, Nathan", "Mechanical Assembly", "", 10.5, 95),
+    _lab("Engineering", 230312, *_D12, "155", "155 - Tam, SzeWai", "Hydraulic Engineering", "Manifold layout", 7.0, 95),
+    _lab("Manufacturing", 230312, *_D12, "121", "121 - Ferns, Rob", "Tubing/Piping", "", 8.0, 95),
+    _lab("Engineering", 240087, *_D87, "203", "203 - Kerridge, Trevor", "Electrical Engineering", "Controls", 8.0, 95),
+]
+# "Project Lifetime" — everything above plus prior-period history (same jobs)
+_DEMO_LAB_LIFE = _DEMO_LAB_PERIOD + [
+    _lab("Engineering", 230219, *_D19, "222", "222 - Papenfuss, Paul", "Mechanical Engineering", "Frame design", 152.0, 95),
+    _lab("Engineering", 230219, *_D19, "5070", "5070 - Rozik, Greg", "Electrical Engineering", "Schematics", 88.0, 80),
+    _lab("Manufacturing", 230219, *_D19, "5281", "5281 - Hacault, Nathan", "Mechanical Assembly", "", 240.0, 95),
+    _lab("Administration", 230219, *_D19, "5141", "5141 - Mirzaei, Anna", "Project Coordination", "", 146.5, 88),
+    _lab("Engineering", 230312, *_D12, "155", "155 - Tam, SzeWai", "Hydraulic Engineering", "HPU sizing", 96.0, 95),
+    _lab("Manufacturing", 230312, *_D12, "121", "121 - Ferns, Rob", "Tubing/Piping", "", 130.0, 95),
+    _lab("Engineering", 240087, *_D87, "203", "203 - Kerridge, Trevor", "Electrical Engineering", "Controls", 210.0, 95),
+]
+
+# PO Status — query_po_status_open output shape
+_DEMO_PO_STATUS_COLS = ["ProjectID", "JobName", "Customer", "MachineCode", "Item", "Description",
+                        "PO", "Supplier", "ProjStatus", "Qty", "Received", "Price", "ExtValue",
+                        "Required", "Revised"]
+_DEMO_PO_STATUS = [
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10.0,
+     "Item": "48210", "Description": "Main hydraulic pump A10VSO", "PO": "48210",
+     "Supplier": "Bosch Rexroth", "ProjStatus": "Sold", "Qty": 2, "Received": 1,
+     "Price": 92250.0, "ExtValue": 92250.0, "Required": "2026-05-10", "Revised": None},
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10.0,
+     "Item": "48255", "Description": "Spherical roller bearings (lot)", "PO": "48255",
+     "Supplier": "SKF Canada", "ProjStatus": "Sold", "Qty": 40, "Received": 0,
+     "Price": 720.0, "ExtValue": 28800.0, "Required": "2026-06-30", "Revised": None},
+    {"ProjectID": 230312, "JobName": _D12[0], "Customer": _D12[1], "MachineCode": 10.0,
+     "Item": "48120", "Description": "S7-1500 PLC + IO", "PO": "48120",
+     "Supplier": "Siemens", "ProjStatus": "Sold", "Qty": 1, "Received": 0,
+     "Price": 47600.0, "ExtValue": 47600.0, "Required": "2026-07-01", "Revised": "2026-08-15"},
+    {"ProjectID": 240087, "JobName": _D87[0], "Customer": _D87[1], "MachineCode": 20.0,
+     "Item": "48301", "Description": "Servo motors (pair)", "PO": "48301",
+     "Supplier": "Nachi", "ProjStatus": "Sold", "Qty": 2, "Received": 0,
+     "Price": 16700.0, "ExtValue": 33400.0, "Required": "2026-08-01", "Revised": None},
+]
+
+# Procurement Exceptions — query_po_exceptions output shape
+_DEMO_EXC_COLS = ["Buyer", "ProjectID", "JobName", "Item", "Description", "PO", "Vendor",
+                  "Qty", "Received", "ExtValue", "DateRequired", "DateRevised", "Ordered",
+                  "LeadDays", "LLTFlag", "OverFlag", "EngReleaseDate"]
+_DEMO_EXC_RAW = [
+    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Item": "48255",
+     "Description": "Spherical roller bearings (lot)", "PO": "48255", "Vendor": "SKF Canada",
+     "Qty": 40, "Received": 0, "ExtValue": 28800.0, "DateRequired": "2026-06-30",
+     "DateRevised": None, "Ordered": "2026-05-02", "LeadDays": 62, "LLTFlag": 1,
+     "OverFlag": 0, "EngReleaseDate": "2026-04-15"},
+    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Item": "48260",
+     "Description": "Cylinder seals & glands", "PO": "48260", "Vendor": "Bosch Rexroth",
+     "Qty": 12, "Received": 0, "ExtValue": 15400.0, "DateRequired": "2026-07-10",
+     "DateRevised": None, "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0,
+     "OverFlag": 0, "EngReleaseDate": None},
+    {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Item": "48120",
+     "Description": "S7-1500 PLC + IO", "PO": "48120", "Vendor": "Siemens",
+     "Qty": 1, "Received": 0, "ExtValue": 47600.0, "DateRequired": "2026-07-01",
+     "DateRevised": None, "Ordered": "2026-06-22", "LeadDays": 120, "LLTFlag": 1,
+     "OverFlag": 1, "EngReleaseDate": "2026-05-30"},
 ]
 
 
