@@ -132,6 +132,30 @@ def probe_view(cur, view):
         print(f"  !! could not fetch sample row: {e}")
 
 
+def fx_rate_check(cur):
+    """Is PurchaseCurrRate the as-of-PO-date rate (varies by date) or a static one?"""
+    rule("FX RATE BEHAVIOUR — is PurchaseCurrRate booked at the PO date, or static?")
+    try:
+        cur.execute("""
+            SELECT PurchaseCurr, PurchaseCurrRate, COUNT(*) AS POs,
+                   MIN(CAST(PurchaseDate AS date)) AS FirstPO,
+                   MAX(CAST(PurchaseDate AS date)) AS LastPO
+            FROM dbo.vwPurchaseOrderHeader
+            GROUP BY PurchaseCurr, PurchaseCurrRate
+            ORDER BY PurchaseCurr, PurchaseCurrRate""")
+        print(f"  {'Curr':6} {'Rate':>10} {'#POs':>8}  {'FirstPO':>12}  {'LastPO':>12}")
+        for curr, rate, pos, first, last in cur.fetchall():
+            print(f"  {str(curr):6} {float(rate):>10.4f} {pos:>8}  {str(first):>12}  {str(last):>12}")
+        print("\n  READ IT LIKE THIS:")
+        print("   * A non-base currency (e.g. US) showing MANY distinct rates, each over a")
+        print("     narrow date span  -> rate is captured at the PO date (as-of-purchase). GOOD:")
+        print("     our ExtendedPrice x PurchaseCurrRate is already the transaction-date value.")
+        print("   * The same currency showing ONE rate across all dates -> it's a STATIC rate;")
+        print("     we'd need a period FX source for true as-of-date conversion.")
+    except Exception as ex:
+        print(f"  !! FX rate check failed: {ex}")
+
+
 def scoped_checks(cur, pids):
     ids = ",".join(str(int(p)) for p in pids)
     rule(f"SCOPED SANITY CHECKS — project(s) {ids}")
@@ -178,6 +202,7 @@ def main():
         cur = conn.cursor()
         for view in ["vwTimecards", "vwPurchaseOrderHeader", "vwPurchaseOrderDetails"]:
             probe_view(cur, view)
+        fx_rate_check(cur)
         if args.project:
             pids = [int(p) for p in args.project.split(",") if p.strip()]
             scoped_checks(cur, pids)
