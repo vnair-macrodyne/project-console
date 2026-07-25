@@ -370,16 +370,12 @@ LABOUR_REPORTS = {
 }
 
 
-def labour_book_bytes(report_id, period_rows, life_rows, p_label, l_label):
-    """Two-tab workbook (This Pay Period + Project Lifetime), same as run_labour_po."""
+def labour_book_bytes(report_id, grouped_rows, label):
+    """Single-sheet workbook for the selected time window (cumulative to the end date)."""
     meta = LABOUR_REPORTS[report_id]
     wb = Workbook(); wb.remove(wb.active)
-    for i, (tab, subtitle, rows, label) in enumerate([
-        ("This Pay Period",  "Cumulative pay-period-to-date",    period_rows, p_label),
-        ("Project Lifetime", "Cumulative over project lifetime", life_rows,   l_label),
-    ]):
-        ws = wb.create_sheet(title=tab[:31], index=i)
-        _populate_sheet(ws, meta["title"], subtitle, meta["cols"], rows, label)
+    ws = wb.create_sheet(title=(meta["label"][:31] or "Labour"))
+    _populate_sheet(ws, meta["title"], "Applied-rate labour spend", meta["cols"], grouped_rows, label)
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 

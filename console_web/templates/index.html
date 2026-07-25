@@ -181,10 +181,6 @@
       </div>
       <div class="dsub" id="dsub"></div>
     </div>
-    <div class="card" id="viewcard" style="display:none">
-      <p class="label">Cumulative view</p>
-      <div class="chips" id="viewchips"></div>
-    </div>
   </div>
 
   <div class="main">
@@ -215,7 +211,7 @@
 
 <script>
 const state = { queries:[], projects:[], selQuery:null, selProjects:new Set(),
-               result:null, sort:{key:null,dir:1}, cfg:{}, datePreset:'start', view:'period',
+               result:null, sort:{key:null,dir:1}, cfg:{}, datePreset:'start',
                page:1, pageSize:250 };
 let refreshTimer=null;
 
@@ -307,7 +303,7 @@ el('toggleAll').onclick = ()=>{
 };
 
 // ── Date presets ─────────────────────────────────────────────────────────────
-const PRESETS = [['start','From Project Start'],['pay','Pay Period'],['ytd','YTD'],['custom','Custom']];
+const PRESETS = [['start','Start of Project to Date'],['ytd','YTD'],['pay','Pay Period'],['custom','Custom']];
 function renderChips(){
   const c=el('chips'); c.innerHTML='';
   PRESETS.forEach(([k,lbl])=>{
@@ -319,21 +315,9 @@ function setPreset(k){ state.datePreset=k; renderChips();
   el('daterow').style.display = k==='custom' ? 'flex' : 'none';
   syncDateVisibility(); scheduleRefresh(); }
 function syncDateVisibility(){
-  const q=currentQuery();
-  const eto = isEtoReport(q);
+  const eto = isEtoReport(currentQuery());
   el('chips').parentElement.style.display = eto ? 'block' : 'none';
-  el('viewcard').style.display = (q && q.views) ? 'block' : 'none';
-  if(q && q.views) renderViewChips();
 }
-const VIEWS = [['period','This Pay Period'],['life','Project Lifetime']];
-function renderViewChips(){
-  const c=el('viewchips'); c.innerHTML='';
-  VIEWS.forEach(([k,lbl])=>{
-    const b=document.createElement('div'); b.className='chip'+(state.view===k?' sel':'');
-    b.textContent=lbl; b.onclick=()=>setView(k); c.appendChild(b);
-  });
-}
-function setView(k){ state.view=k; renderViewChips(); if(state.selQuery) runQuery(); }
 // resolve preset -> {from,to} (ISO strings or null). Uses tenant fiscal/pay-period config.
 function resolveDates(){
   const p=state.datePreset;
@@ -357,17 +341,15 @@ function resolveDates(){
 }
 function dateLabel(){
   const d=resolveDates();
-  if(state.datePreset==='start') return 'All history (project start → now)';
+  if(state.datePreset==='start') return 'Cumulative — start of project → today';
   if(!d.from && !d.to) return '';
   return (d.from||'…')+'  →  '+(d.to||'today');
 }
 
 function payload(){
   const d=resolveDates();
-  const q=currentQuery();
   return { query_id: state.selQuery, project_ids: Array.from(state.selProjects),
-           date_from: d.from, date_to: d.to,
-           view: (q && q.views) ? state.view : 'period' };
+           date_from: d.from, date_to: d.to };
 }
 function scheduleRefresh(){ clearTimeout(refreshTimer); refreshTimer=setTimeout(()=>{ if(state.selQuery) runQuery(); }, 450); }
 

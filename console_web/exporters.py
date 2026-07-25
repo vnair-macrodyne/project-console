@@ -92,8 +92,7 @@ def _spec_xlsx(exp) -> bytes:
     the vendored writer so the download matches the on-prem report exactly."""
     kind = exp["kind"]
     if kind == "labour":
-        return etospec.labour_book_bytes(exp["report_id"], exp["period_rows"],
-                                         exp["life_rows"], exp["p_label"], exp["l_label"])
+        return etospec.labour_book_bytes(exp["report_id"], exp["rows"], exp["label"])
     if kind == "po_status":
         return etospec.po_status_book_bytes(exp["df"], exp["label"])
     if kind == "exceptions":

@@ -110,19 +110,19 @@ def catalogue():
         {"id": "lab_a", "menu": labour, "label": "Departmental Project Detail",
          "desc": f"Department → {proj.lower()} → employee: entries, hours, OT and labour cost, "
                  "with per-project and department subtotals.",
-         "needs_projects": True, "views": True},
+         "needs_projects": True},
         {"id": "lab_b", "menu": labour, "label": "Employee Summary",
          "desc": "Department → employee: entries, hours, OT and labour cost, one row per employee.",
-         "needs_projects": True, "views": True},
+         "needs_projects": True},
         {"id": "lab_c", "menu": labour, "label": "Job-Category Summary",
          "desc": "Department → labour category (Hour Description) with % of department hours.",
-         "needs_projects": True, "views": True},
+         "needs_projects": True},
         {"id": "lab_d", "menu": labour, "label": "Employee Job Detail",
          "desc": "Department → employee → job-detail lines (the timecard note per task).",
-         "needs_projects": True, "views": True},
+         "needs_projects": True},
         {"id": "lab_e", "menu": labour, "label": "Project Labour Spend",
          "desc": f"{proj} → department → employee — entries, hours, OT and labour cost.",
-         "needs_projects": True, "views": True},
+         "needs_projects": True},
         # ── Purchasing (the deployed PO reports) ───────────────────────────
         {"id": "po_status", "menu": "Purchasing", "label": "PO Status",
          "desc": f"Open PO lines On Order / Overdue, grouped {proj.lower()} → machine, with an "
@@ -321,37 +321,28 @@ class LiveQueryService(QueryService):
         cols = [d[0] for d in cur.description]
         return pd.DataFrame([tuple(r) for r in cur.fetchall()], columns=cols)
 
-    def _labour(self, project_ids, report_id, date_from, date_to, view):
-        period_df, life_df, p_label, l_label = self._labour_frames(project_ids, date_from, date_to)
-        return _spec_labour_result(report_id, period_df, life_df, view, p_label, l_label)
-
-    def _labour_frames(self, project_ids, date_from, date_to):
+    def _labour(self, project_ids, report_id, date_from, date_to):
         import datetime as _dt
         dto = _as_date(date_to) or _dt.date.today()
-        dfrom = _as_date(date_from) or etospec.period_to_date(dto)[0]
+        dfrom = _as_date(date_from)      # None = Start of Project to Date (no lower bound)
         pids = [int(p) for p in project_ids] if project_ids else None
-        period_df = self._df(etospec.query_daily_labour(dfrom, dto, pids))
-        active = set(period_df["ProjectID"].dropna().unique()) if not period_df.empty else set()
-        life_df = (self._df(etospec.query_daily_labour(None, dto, list(active)))
-                   if active else period_df.iloc[0:0])
-        p_label = f"Pay-period-to-date: {dfrom:%b %d} – {dto:%b %d, %Y}"
-        l_label = f"Project lifetime-to-date (through {dto:%b %d, %Y})"
-        return period_df, life_df, p_label, l_label
+        df = self._df(etospec.query_daily_labour(dfrom, dto, pids))
+        return _spec_labour_result(report_id, df, _window_label(dfrom, dto))
 
-    def _q_lab_a(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour(project_ids, "lab_a", date_from, date_to, view)
+    def _q_lab_a(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour(project_ids, "lab_a", date_from, date_to)
 
-    def _q_lab_b(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour(project_ids, "lab_b", date_from, date_to, view)
+    def _q_lab_b(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour(project_ids, "lab_b", date_from, date_to)
 
-    def _q_lab_c(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour(project_ids, "lab_c", date_from, date_to, view)
+    def _q_lab_c(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour(project_ids, "lab_c", date_from, date_to)
 
-    def _q_lab_d(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour(project_ids, "lab_d", date_from, date_to, view)
+    def _q_lab_d(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour(project_ids, "lab_d", date_from, date_to)
 
-    def _q_lab_e(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour(project_ids, "lab_e", date_from, date_to, view)
+    def _q_lab_e(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour(project_ids, "lab_e", date_from, date_to)
 
     def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
@@ -680,25 +671,24 @@ def _spec_labour_cards(col_defs, grouped_rows):
     return cards
 
 
-def _spec_labour_result(report_id, period_df, life_df, view, p_label, l_label):
-    """Build a labour QueryResult for the requested view, stashing BOTH views'
-    grouped rows in `export` so the xlsx writer can emit the two-sheet workbook."""
-    meta = etospec.LABOUR_REPORTS[report_id]
-    period_rows = meta["builder"](period_df)
-    life_rows = meta["builder"](life_df)
-    active = life_rows if view == "life" else period_rows
-    label = l_label if view == "life" else p_label
-    view_name = "Project Lifetime" if view == "life" else "This Pay Period"
+def _window_label(dfrom, dto):
+    """Human label for the reporting window (all windows are cumulative to `dto`)."""
+    if dfrom is None:
+        return f"from project start through {dto:%b %d, %Y}"
+    return f"{dfrom:%b %d, %Y} – {dto:%b %d, %Y}"
 
+
+def _spec_labour_result(report_id, df, label):
+    """Build a labour QueryResult for one time window (single control = the date range)."""
+    meta = etospec.LABOUR_REPORTS[report_id]
+    grouped = meta["builder"](df)
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(meta["cols"])]
-    rows = etospec.web_rows(meta["cols"], active)
-    cards = _spec_labour_cards(meta["cols"], active)
-    note = (f"{meta['title']} — {view_name} ({label}). Applied-rate cost = Hours × HourRate × "
-            "HourFactor; OT Hours = HourFactor > 1. Labour Category = Hour Description; "
-            "Job Detail = the timecard note (TimecardCustom1).")
-    export = {"kind": "labour", "report_id": report_id,
-              "period_rows": period_rows, "life_rows": life_rows,
-              "p_label": p_label, "l_label": l_label}
+    rows = etospec.web_rows(meta["cols"], grouped)
+    cards = _spec_labour_cards(meta["cols"], grouped)
+    note = (f"{meta['title']} — {label}. Applied-rate cost = Hours × HourRate × HourFactor; "
+            "OT Hours = HourFactor > 1. Labour Category = Hour Description; Job Detail = the "
+            "timecard note (TimecardCustom1). Cumulative to the end date.")
+    export = {"kind": "labour", "report_id": report_id, "rows": grouped, "label": label}
     return QueryResult(report_id, f"{L('labour')} — {meta['label']}", qcols, rows, cards, note, export)
 
 
@@ -1032,26 +1022,27 @@ class DemoQueryService(QueryService):
                 "Category", "JobDetail", "Entries", "Hours", "OTHours", "LabourCost"]
         return pd.DataFrame(rows, columns=cols)
 
-    def _labour_demo(self, project_ids, report_id, view):
-        return _spec_labour_result(report_id,
-                                   self._demo_labour_df(project_ids, lifetime=False),
-                                   self._demo_labour_df(project_ids, lifetime=True), view,
-                                   "Pay-period-to-date (demo)", "Project lifetime-to-date (demo)")
+    def _labour_demo(self, project_ids, report_id, date_from):
+        lifetime = _as_date(date_from) is None      # Start of Project to Date = all history
+        df = self._demo_labour_df(project_ids, lifetime=lifetime)
+        label = ("from project start through Jul 25, 2026 (demo)" if lifetime
+                 else "selected window (demo)")
+        return _spec_labour_result(report_id, df, label)
 
-    def _q_lab_a(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour_demo(project_ids, "lab_a", view)
+    def _q_lab_a(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour_demo(project_ids, "lab_a", date_from)
 
-    def _q_lab_b(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour_demo(project_ids, "lab_b", view)
+    def _q_lab_b(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour_demo(project_ids, "lab_b", date_from)
 
-    def _q_lab_c(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour_demo(project_ids, "lab_c", view)
+    def _q_lab_c(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour_demo(project_ids, "lab_c", date_from)
 
-    def _q_lab_d(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour_demo(project_ids, "lab_d", view)
+    def _q_lab_d(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour_demo(project_ids, "lab_d", date_from)
 
-    def _q_lab_e(self, project_ids, date_from=None, date_to=None, view="period", **kw):
-        return self._labour_demo(project_ids, "lab_e", view)
+    def _q_lab_e(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour_demo(project_ids, "lab_e", date_from)
 
     def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
         import pandas as pd, datetime as _dt
