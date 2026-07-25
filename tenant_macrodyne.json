@@ -1,0 +1,16 @@
+{
+  "product_name": "Project Console",
+  "tenant_id": "macrodyne",
+  "company_name": "Macrodyne Technologies Inc.",
+  "header_color": "1F3864",
+  "eto_server": "MACRO-ETO-SVR\\SQLEXPRESS",
+  "eto_database": "Macrodyne_Production",
+  "reporting_server": "MACRO-ETO-SVR\\SQLEXPRESS",
+  "reporting_database": "Macrodyne_Reporting",
+  "fiscal_year_start_month": 4,
+  "pay_period_anchor": "2026-07-06",
+  "pay_period_days": 14,
+  "capital_min": 190000, "capital_max": 269999, "service_min": 500000,
+  "active_min_hours": 4.0,
+  "output_root": "\\\\MACRO-FILESVR\\Projects\\Reports"
+}

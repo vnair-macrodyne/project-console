@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets — never commit credentials (they live in env vars by design)
+.env
+*.env
+*.secret
+
+# Customer DATA — never commit any workbook or extract (confidential)
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*_AUTO.xlsx
+
+# Real tenant profiles (connection details) — commit only the sample below
+tenant_*.json
+!tenant_macrodyne.json
+
+# Rendered outputs / scratch
+*.pdf
+*.png
