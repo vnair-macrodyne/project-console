@@ -100,6 +100,8 @@ def _spec_xlsx(exp) -> bytes:
         return etospec.exceptions_book_bytes(exp["items"], exp["label"])
     if kind == "late":
         return etospec.late_vendors_book_bytes(exp["df"], exp["label"])
+    if kind == "delivered":
+        return etospec.delivered_book_bytes(exp["df"], exp["label"])
     raise ValueError(f"unknown spec export kind '{kind}'")
 
 

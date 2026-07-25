@@ -561,12 +561,9 @@ COLS_FLAT = [
     ("ExtValue",    "Ext. Value",  11, "R", True),
     ("NeedBy",      "Need-By",     10, "C", False),
     ("DaysLate",    "Days Late",    7, "R", True),
-    ("Lead",        "Lead(d)",      6, "R", True),
     ("EngRelease",  "Eng Rel'd",   10, "C", False),
     ("LLT",         "LLT",          5, "C", False),
-    ("Critical",    "Critical",     7, "C", False),
     ("Oversized",   "Oversize",     8, "C", False),
-    ("OrdLate",     "Ord Late",     7, "C", False),
     ("DelLate",     "Del Late",     7, "C", False),
 ]
 
@@ -644,24 +641,21 @@ def exc_classify(df, today=None):
         rev = pd.to_datetime(r.get("DateRevised"), errors="coerce")
         need = (rev if pd.notna(rev) else req)
         need = need.date() if pd.notna(need) else None
-        ordered = pd.to_datetime(r.get("Ordered"), errors="coerce")
-        ordered = ordered.date() if pd.notna(ordered) else None
-        lead = r.get("LeadDays")
-        lead = int(lead) if (lead is not None and str(lead).strip() not in ("", "None") and not pd.isna(lead)) else None
         eng_rel = pd.to_datetime(r.get("EngReleaseDate"), errors="coerce")
         eng_rel = eng_rel.date() if pd.notna(eng_rel) else None
+        # Delivered-late (overdue) is the only ETO-consistent lateness signal on open lines.
+        # Ord Late / Critical were derived from EstimatedLeadTime, which is unmaintained
+        # (always NULL) — dropped. LLT / Oversize stay: they're maintained ETO flags.
         del_late = bool(need and need < today)
         days_late = (today - need).days if del_late else 0
-        ord_late = bool(ordered and lead is not None and need and (ordered + _dt.timedelta(days=lead)) > need)
         llt = _flag(r.get("LLTFlag"))
         oversized = _flag(r.get("OverFlag"))
-        critical = bool(lead is not None and lead >= _LLT_CRITICAL_DAYS)
-        if not (del_late or ord_late):
+        if not del_late:
             continue
         rec = dict(r)
         rec.update(Buyer=(str(r.get("Buyer")).strip() if not _blank(r.get("Buyer")) else "(unassigned)"),
-                   NeedBy=need, Lead=lead, EngRel=eng_rel, LLT=llt, Critical=critical,
-                   Oversized=oversized, OrdLate=ord_late, DelLate=del_late, DaysLate=days_late)
+                   NeedBy=need, EngRel=eng_rel, LLT=llt, Oversized=oversized,
+                   DelLate=del_late, DaysLate=days_late)
         out.append(rec)
     return pd.DataFrame(out)
 
@@ -694,12 +688,9 @@ def exc_aggregate(ex):
             "ExtValue": round(float(g["ExtValue"].fillna(0).sum()), 2),
             "NeedBy": min(need_vals).isoformat() if need_vals else "",
             "DaysLate": int(g["DaysLate"].max()),
-            "Lead": int(g["Lead"].dropna().max()) if g["Lead"].notna().any() else "",
             "EngRelease": next((d.isoformat() for d in g["EngRel"] if d), ""),
             "LLT": "LLT" if g["LLT"].any() else "",
-            "Critical": "CRIT" if g["Critical"].any() else "",
             "Oversized": "OVER" if g["Oversized"].any() else "",
-            "OrdLate": "LATE" if g["OrdLate"].any() else "",
             "DelLate": "LATE" if g["DelLate"].any() else "",
         })
     out = pd.DataFrame(rows)
@@ -845,6 +836,114 @@ def late_vendors_book_bytes(df, label):
                     "Open PO lines past their need-by (revised, else required) — overdue, by vendor",
                     COLS_LATE, rows, label)
     ci = [i for i, c in enumerate(COLS_LATE, 1) if c[0] == "ExtValue"][0]
+    for row in range(4, ws.max_row + 1):
+        ws.cell(row=row, column=ci).number_format = "$#,##0.00"
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LATE VENDORS (DELIVERED LATE) — the urpPurchasingLateVendors logic, our parameters.
+# RECEIVED lines that arrived after need-by, by vendor (the vendor delivery scorecard).
+#   need-by  = ISNULL(DateRevised, DateRequired)
+#   receipt  = vwReceiverLogSummed.MaxOfDate   (actual last receipt date — the SP's source)
+#   DaysLate = receipt − need-by   (> 0);  fully received: PurchaseQty − SumOfQtyReceived <= 0
+# Built on the PO views + vwReceiverLogSummed so we can scope by the selected projects and by
+# a PO-created window (@datPOCreated*) — the parameters the proc itself doesn't take. If the
+# account lacks direct SELECT on vwReceiverLogSummed, the service falls back to EXEC_LATE_VENDORS.
+# ─────────────────────────────────────────────────────────────────────────────
+COLS_DELIVERED = [
+    ("ProjectID",   "Project",     8,  "C", False),
+    ("PO",          "PO #",        7,  "L", False),
+    ("Item",        "Item",        12, "L", False),
+    ("Description", "Description", 24, "L", False),
+    ("Qty",         "Qty",          6, "R", True),
+    ("QtyReceived", "Rec'd",        6, "R", True),
+    ("Required",    "Required",    10, "C", False),
+    ("Revised",     "Revised",     10, "C", False),
+    ("Received",    "Received",    10, "C", False),
+    ("DaysLate",    "Days Late",    8, "R", True),
+    ("ExtValue",    "Ext. Value",  11, "R", True),
+]
+
+# EXEC fallback: the proc bounds by PO-created window; projects are filtered client-side.
+EXEC_LATE_VENDORS = ("SET NOCOUNT ON; EXEC dbo.urpPurchasingLateVendors "
+                     "@nvcCompanyIDIn=NULL, @datPOCreatedLower=?, @datPOCreatedUpper=?")
+# proc output column → our delivered-late column
+EXEC_COLMAP = {"SupplierName": "Supplier", "ProjectID": "ProjectID", "PurchaseOrderID": "PO",
+               "ItemCompanyID": "Item", "ItemDescription": "Description", "PurchaseQty": "Qty",
+               "QtyReceived": "QtyReceived", "DateRequired": "Required", "DateRevised": "Revised",
+               "MaxOfDate": "Received", "DaysLate": "DaysLate", "ExtendedPriceExchange": "ExtValue"}
+
+
+def query_delivered_late(project_ids=None, date_from=None, date_to=None):
+    """Our own project/date-scoped transcription of urpPurchasingLateVendors."""
+    proj = ""
+    if project_ids:
+        ids = ",".join(str(int(p)) for p in project_ids)
+        proj = f" AND pod.ProjectID IN ({ids})"
+    win = ""
+    if date_from:
+        win += f" AND poh.PurchaseDate >= '{date_from}'"
+    if date_to:
+        win += f" AND poh.PurchaseDate < DATEADD(day, 1, '{date_to}')"
+    need_by = "ISNULL(pod.DateRevised, pod.DateRequired)"
+    return f"""
+    SELECT
+        poh.CName                        AS Supplier,
+        pod.ProjectID                    AS ProjectID,
+        poh.PurchaseOrderID              AS PO,
+        ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30))) AS Item,
+        pod.ItemDescription              AS Description,
+        pod.PurchaseQty                  AS Qty,
+        CAST(rls.SumOfQtyReceived AS decimal(20,6)) AS QtyReceived,
+        CAST(pod.DateRequired AS date)   AS Required,
+        CAST(pod.DateRevised  AS date)   AS Revised,
+        CAST(rls.MaxOfDate    AS date)   AS Received,
+        DATEDIFF(d, {need_by}, rls.MaxOfDate) AS DaysLate,
+        CAST(pod.PurchaseQty * pod.PurchasePrice * poh.PurchaseCurrRate AS decimal(20,6)) AS ExtValue,
+        p.DisplayName                    AS JobName,
+        p.PStatus                        AS ProjStatus
+    FROM vwPurchaseOrderHeader poh
+    JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
+    JOIN vwReceiverLogSummed rls ON rls.PurchaseDetailID = pod.PurchaseDetailID
+    LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
+    WHERE poh.PurchaseActive = 1
+      AND (pod.PurchaseQty - ISNULL(rls.SumOfQtyReceived, 0)) <= 0
+      AND {need_by} IS NOT NULL
+      AND DATEDIFF(d, {need_by}, rls.MaxOfDate) > 0{proj}{win}
+    ORDER BY poh.CName, DaysLate DESC
+    """
+
+
+def delivered_build_rows(df):
+    """Group by vendor: band → late lines (worst first) → per-vendor subtotal → grand."""
+    n = len(COLS_DELIVERED)
+    if df.empty:
+        return [(["No delivered-late lines in the selected window."] + [""] * (n - 1), "grand")]
+    rows = []
+    for sup in sorted(df["Supplier"].dropna().unique(), key=str):
+        ssub = df[df["Supplier"] == sup].sort_values("DaysLate", ascending=False)
+        avg = ssub["DaysLate"].mean()
+        rows.append(([f"Vendor: {sup}   ·   {len(ssub)} late line(s) · avg {avg:.0f}d"] + [""] * (n - 1), "l3_sub"))
+        for _, r in ssub.iterrows():
+            rows.append(([r.ProjectID, r.PO, r.Item, r.Description, r.Qty, r.QtyReceived,
+                          _ds(r.Required), _ds(r.Revised), _ds(r.Received),
+                          int(r.DaysLate), round(float(r.ExtValue), 2)], "detail"))
+        rows.append(([f"{sup} — Late Value", "", "", "", "", "", "", "", "",
+                      int(ssub["DaysLate"].max()), round(float(ssub["ExtValue"].sum()), 2)], "l1_sub"))
+    rows.append((["GRAND TOTAL — Late Value"] + [""] * 8
+                 + [int(df["DaysLate"].max()), round(float(df["ExtValue"].sum()), 2)], "grand"))
+    return rows
+
+
+def delivered_book_bytes(df, label):
+    rows = delivered_build_rows(df)
+    wb = Workbook(); wb.remove(wb.active)
+    ws = wb.create_sheet("Late Vendors")
+    _populate_sheet(ws, "Purchasing — Late Vendors (Delivered Late)",
+                    "Received lines that arrived after need-by (revised, else required) — by vendor",
+                    COLS_DELIVERED, rows, label)
+    ci = [i for i, c in enumerate(COLS_DELIVERED, 1) if c[0] == "ExtValue"][0]
     for row in range(4, ws.max_row + 1):
         ws.cell(row=row, column=ci).number_format = "$#,##0.00"
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
