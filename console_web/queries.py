@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, asdict
 
 from console.config import TENANT
 from console_web import etospec
+from console_web import ncspec
 
 
 def L(key: str) -> str:
@@ -70,12 +71,14 @@ class QueryResult:
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
               "po_status", "po_exceptions", "po_late", "po_delivered",
-              "nc_summary", "nc_detail"}
+              "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
+              "nc_supplier", "nc_detail"}
 
 # reports that read ETO live and honour the optional date range / view
 ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
                   "po_status", "po_exceptions", "po_late", "po_delivered",
-                  "nc_summary", "nc_detail"}
+                  "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
+                  "nc_supplier", "nc_detail"}
 
 # labour reports carry the two-view toggle (This Pay Period / Project Lifetime)
 LABOUR_VIEW_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e"}
@@ -143,10 +146,30 @@ def catalogue():
          "needs_projects": True},
         # ── Non-Conformance ───────────────────────────────────────────────
         {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
-         "desc": "NCR counts by source, split open vs closed.",
+         "desc": "NCR counts and cost by source (where detected), split open vs closed.",
+         "needs_projects": True},
+        {"id": "nc_costs", "menu": "Non-Conformance", "label": "Costing",
+         "desc": "Per-NCR cost of non-conformance — labour / purchased / inventory / extra / "
+                 "total, with source, root cause, discipline, department and supplier.",
+         "needs_projects": True},
+        {"id": "nc_impact", "menu": "Non-Conformance", "label": "Project Impact",
+         "desc": f"One row per {proj.lower()}: open/closed NCRs, cost of non-conformance, and "
+                 f"NC cost as a % of {material.lower()} actual spend.",
+         "needs_projects": True},
+        {"id": "nc_cause", "menu": "Non-Conformance", "label": "By Root Cause",
+         "desc": "Cost grouped by origin / root cause — recurring, expensive failure modes "
+                 "(mirrors ETO's NonConformanceCostingCompared).",
+         "needs_projects": True},
+        {"id": "nc_discipline", "menu": "Non-Conformance", "label": "By Discipline",
+         "desc": f"Cost attributed to {disc.lower()} (derived from the origin) and the ETO "
+                 "responsible department — apart from the supplier attribution.",
+         "needs_projects": True},
+        {"id": "nc_supplier", "menu": "Non-Conformance", "label": "By Supplier",
+         "desc": "Vendor attribution — NCR count and cost by supplier (PO-linked NCRs).",
          "needs_projects": True},
         {"id": "nc_detail", "menu": "Non-Conformance", "label": "Details",
-         "desc": "NCR list — status, source, origin, part, supplier, PO, closed date.",
+         "desc": "Full NCR list — number, status, source, origin, discipline, part, supplier, "
+                 "PO, cost, open corrective actions, root cause and CAPA.",
          "needs_projects": True},
     ]
 
@@ -274,10 +297,13 @@ class LiveQueryService(QueryService):
         fin = self._financials(project_ids)
         ov = self._overlay_map()
         meta = self._project_meta(project_ids)
+        nc = self._nc_by_project(project_ids)
         rows = []
         for pid in fin:
             f = fin[pid]
-            rec = ov.get(str(pid), {})
+            rec = dict(ov.get(str(pid), {}))       # copy — we augment with NC actuals
+            g = nc.get(pid, {})
+            rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             name, client = meta.get(pid, (None, None))
             disc_pct = {d.discipline: d.consumed_pct for d in (f.disciplines if f else [])}
             rows.append(_exec_row(pid, name, client, f, rec, disc_pct))
@@ -286,10 +312,13 @@ class LiveQueryService(QueryService):
     def _q_scorecard(self, project_ids, **kw):
         fin = self._financials(project_ids)
         ov = self._overlay_map()
+        nc = self._nc_by_project(project_ids)
         rows = []
         for pid in sorted(fin):
             f = fin[pid]
-            rec = ov.get(str(pid), {})
+            rec = dict(ov.get(str(pid), {}))
+            g = nc.get(pid, {})
+            rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rows.append(_scorecard_row(pid, f, rec))
         return _scorecard_result(rows)
 
@@ -397,14 +426,48 @@ class LiveQueryService(QueryService):
             recs.append({v: d.get(k) for k, v in etospec.EXEC_COLMAP.items()})
         return pd.DataFrame(recs, columns=list(etospec.EXEC_COLMAP.values()))
 
+    def _nc_rows(self, project_ids, date_from, date_to):
+        return _live_nc_cost_rows(self._eto_conn().cursor(), project_ids, date_from, date_to)
+
+    def _material_actuals(self, project_ids):
+        """{pid: material_actual_$} from the manual overlay (for the impact %)."""
+        out = {}
+        for pid, rec in self._overlay_map().items():
+            if str(pid).isdigit():
+                out[int(pid)] = _num(rec.get("MatActual"))
+        return out
+
+    def _nc_by_project(self, project_ids):
+        """{pid: {'open': n, 'cost': $}} for the dashboard NC-actuals columns."""
+        if not project_ids:
+            return {}
+        try:
+            rows = _live_nc_cost_rows(self._eto_conn().cursor(), project_ids, None, None)
+            return ncspec.by_project_totals(rows)
+        except Exception:
+            return {}
+
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
-        return _nc_summary_result(
-            _live_nc_rows(self._eto_conn().cursor(), project_ids, date_from, date_to))
+        return _nc_summary_result(self._nc_rows(project_ids, date_from, date_to))
+
+    def _q_nc_costs(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_costs_result(self._nc_rows(project_ids, date_from, date_to))
+
+    def _q_nc_cause(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_cause_result(self._nc_rows(project_ids, date_from, date_to))
+
+    def _q_nc_discipline(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_discipline_result(self._nc_rows(project_ids, date_from, date_to))
+
+    def _q_nc_supplier(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_supplier_result(self._nc_rows(project_ids, date_from, date_to))
+
+    def _q_nc_impact(self, project_ids, date_from=None, date_to=None, **kw):
+        rows = self._nc_rows(project_ids, date_from, date_to)
+        return _nc_impact_result(rows, self._material_actuals(project_ids))
 
     def _q_nc_detail(self, project_ids, date_from=None, date_to=None, **kw):
-        rows = _live_nc_rows(self._eto_conn().cursor(), project_ids, date_from, date_to)
-        rows.sort(key=lambda r: (r.get("Status") != "Open", -(r.get("NCR") or 0)))
-        return _nc_detail_result(rows)
+        return _nc_detail_result(self._nc_rows(project_ids, date_from, date_to))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,6 +483,8 @@ def _scorecard_result(rows):
         QueryColumn("MaterialBudget", f"{material} Budget", "money", "right"),
         QueryColumn("MaterialActual", f"{material} Actual", "money", "right"),
         QueryColumn("MaterialPct", f"{material} %", "pct", "right"),
+        QueryColumn("NCOpen", "Open NCRs", "int", "right"),
+        QueryColumn("NCCost", "Cost of NC", "money", "right"),
         QueryColumn("PctDone", "% Done", "pct", "right"),
         QueryColumn("CustAgreedDate", "Cust Agreed Ship", "date", "left"),
         QueryColumn("RunoutLabour", f"{labour} Runout", "hours", "right"),
@@ -489,6 +554,8 @@ def _scorecard_row(pid, f, rec):
         "MaterialBudget": f.material_budget,
         "MaterialActual": f.material_actual,
         "MaterialPct": f.material_consumed_pct,
+        "NCOpen": _int(rec.get("NCOpen")),
+        "NCCost": _num(rec.get("NCCost")),
         "PctDone": _num(rec.get("PctDone")),
         "CustAgreedDate": _iso(rec.get("CustAgreedDate") or rec.get("POShipDate")),
         "RunoutLabour": _num(rec.get("RunoutLabour")),
@@ -551,6 +618,9 @@ def _exec_columns():
                      ("LLTPDelLate", "LLTP Del. Late"), ("PartsRelLate", "Parts Rel. Late"),
                      ("PartsOrdLate", "Parts Ord. Late")]:
         cols.append(QueryColumn(key, lab, "int", "right", "Procurement"))
+    # Non-Conformance actuals (open count + cost of NC)
+    cols.append(QueryColumn("NCOpen", "Open NCRs", "int", "right", "Non-Conformance"))
+    cols.append(QueryColumn("NCCost", "Cost of NC", "money", "right", "Non-Conformance"))
     return cols
 
 
@@ -596,6 +666,8 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
         "LLTPDelLate": _int(rec.get("LLTPDelLate")),
         "PartsRelLate": _int(rec.get("PartsRelLate")),
         "PartsOrdLate": _int(rec.get("PartsOrdLate")),
+        "NCOpen": _int(rec.get("NCOpen")),
+        "NCCost": _num(rec.get("NCCost")),
     }
     for d in _EXEC_DISC_ORDER:
         row[f"disc::{d}"] = disc_pct.get(d)
@@ -784,95 +856,191 @@ def _spec_delivered_result(df, label):
                        {"kind": "delivered", "df": df, "label": label})
 
 
-# ---- Non-Conformance -----------------------------------------------------
-_NC_COLMAP = {   # tolerant lookup: our key -> candidate view column names
-    "id": ["NonConformanceID", "NCRNumber", "NCNumber"],
-    "source": ["SourceDescription", "NonConformanceSourceDescription"],
-    "origin": ["NonConformanceOriginDescription", "OriginDescription"],
-    "part": ["PartNumber", "PartNo"],
-    "partdesc": ["PartDescription"],
-    "supplier": ["Supplier"],
-    "customer": ["Customer"],
-    "resolved": ["Resolved"],
-    "closed": ["Released", "ClosedDate", "DateClosed"],
-    "po": ["PurchaseOrderID"],
-    "raised": ["NonConformanceDate", "DateEntered", "Created", "CreatedDate"],
-}
+# ---- Non-Conformance (costed + attributed) -------------------------------
+# One scoped source feeds every NC report: vwNonConformances LEFT JOIN
+# vwCostingSummed_ByNC (+ origin department) — a transcription of ETO's
+# urpNonConformancesWithCosts (verified 2026-07-26). Rows are ncspec-normalized
+# dicts, shared with the demo backend. Labour books $0 at Macrodyne (no rework time
+# attributed to NCs); cost is purchased material + inventory + extra/payables.
+
+_NC_COST_NOTE = (
+    "Cost of non-conformance from ETO's costing rollup (vwCostingSummed_ByNC): "
+    "Total = Labour + Purchased + Inventory + Extra. Labour books $0 — Macrodyne "
+    "attributes no rework time to NCRs — so cost is remedy material (purchased) + "
+    "inventory + payables. Discipline is derived from the origin (Hydraulic / Mechanical "
+    "/ Electrical; else Other); Department is ETO's maintained responsible dept. "
+    "Live from ETO, read-only.")
 
 
-def _nc_pick(rec, key):
-    for cand in _NC_COLMAP[key]:
-        if cand in rec:
-            return rec[cand]
-    return None
-
-
-def _live_nc_rows(cur, pids, dfrom, dto):
-    cur.execute(f"SELECT * FROM dbo.vwNonConformances WHERE ProjectID IN ({_ids_sql(pids)})")
+def _live_nc_cost_rows(cur, pids, dfrom, dto):
+    """Fetch + normalize the costed NC rows, with best-effort corrective-action counts."""
+    cur.execute(ncspec.sql_nc_costs(_ids_sql(pids)))
     cols = [d[0] for d in cur.description]
-    out = []
-    for raw in cur.fetchall():
-        rec = dict(zip(cols, raw))
-        raised = _as_date(_nc_pick(rec, "raised"))
-        if dfrom and raised and raised < _as_date(dfrom):
-            continue
-        if dto and raised and raised > _as_date(dto):
-            continue
-        resolved = _nc_pick(rec, "resolved")
-        out.append({
-            "NCR": _nc_pick(rec, "id"),
-            "ProjectID": _int(rec.get("ProjectID")),
-            "Status": "Closed" if (resolved in (1, True, "1")) else "Open",
-            "Source": _nc_pick(rec, "source"),
-            "Origin": _nc_pick(rec, "origin"),
-            "Part": _nc_pick(rec, "part"),
-            "Supplier": _nc_pick(rec, "supplier"),
-            "PO": _int(_nc_pick(rec, "po")),
-            "Closed": _iso(_nc_pick(rec, "closed")),
-        })
-    return out
+    recs = [dict(zip(cols, r)) for r in cur.fetchall()]
+    rows = ncspec.to_rows(recs, dfrom, dto)
+    try:  # Outstanding corrective-actions live on a separate view — tolerate its absence
+        cur.execute(ncspec.sql_nc_outstanding(_ids_sql(pids)))
+        ocols = [d[0] for d in cur.description]
+        obync = {}
+        for r in cur.fetchall():
+            d = dict(zip(ocols, r))
+            obync[d.get("NonConformanceID")] = d.get("Outstanding")
+        ncspec.attach_outstanding(rows, obync)
+    except Exception:
+        ncspec.attach_outstanding(rows, {})
+    return rows
+
+
+def _nc_cards(rows):
+    t = ncspec.totals(rows)
+    return [Card("NCRs", "{:,}".format(t["NCRs"])),
+            Card("Open", "{:,}".format(t["Open"]), "bad" if t["Open"] else "good"),
+            Card("Cost of NC", _fmt_money2(t["Total"]), "bad" if t["Total"] else "good"),
+            Card("Material", _fmt_money2(t["Material"]))]
 
 
 def _nc_summary_result(rows):
-    """rows here are the detail NC dicts; roll up by source × status."""
-    agg = {}
-    for r in rows:
-        src = r.get("Source") or "(unspecified)"
-        a = agg.setdefault(src, {"Open": 0, "Closed": 0})
-        a[r["Status"]] = a.get(r["Status"], 0) + 1
-    out = [{"Source": s, "Open": v["Open"], "Closed": v["Closed"],
-            "Total": v["Open"] + v["Closed"]} for s, v in sorted(agg.items())]
+    out = ncspec.by_source(rows)
     cols = [
-        QueryColumn("Source", "Source", "text", "left"),
+        QueryColumn("Source", "Source (detected)", "text", "left"),
+        QueryColumn("NCRs", "NCRs", "int", "right"),
         QueryColumn("Open", "Open", "int", "right"),
         QueryColumn("Closed", "Closed", "int", "right"),
-        QueryColumn("Total", "Total", "int", "right"),
+        QueryColumn("Material", "Material $", "money", "right"),
+        QueryColumn("Total", "Cost of NC", "money", "right"),
     ]
-    tot_open = sum(r["Open"] for r in out)
-    cards = [Card("NCRs", str(len(rows))),
-             Card("Open", str(tot_open), "bad" if tot_open else "good"),
-             Card("Closed", str(sum(r["Closed"] for r in out)))]
-    return QueryResult("nc_summary", "Non-Conformance Summary", cols, out, cards,
-                       "Open = Resolved bit is 0; live from ETO.")
+    return QueryResult("nc_summary", "Non-Conformance — Summary", cols, out, _nc_cards(rows),
+                       "Counts and cost by source (where the NCR was detected). " + _NC_COST_NOTE)
 
 
-def _nc_detail_result(rows):
+def _nc_costs_result(rows):
+    ordered = sorted(rows, key=lambda r: (-r["Total"], r["Status"] != "Open", -(r["NCID"] or 0)))
     cols = [
         QueryColumn("NCR", "NCR", "id", "left"),
         QueryColumn("ProjectID", "Proj ID", "id", "left"),
         QueryColumn("Status", "Status", "text", "left"),
         QueryColumn("Source", "Source", "text", "left"),
-        QueryColumn("Origin", "Origin", "text", "left"),
+        QueryColumn("Origin", "Origin / Root Cause", "text", "left", wrap=True),
+        QueryColumn("Discipline", "Discipline", "text", "left"),
+        QueryColumn("Department", "Dept (ETO)", "text", "left"),
+        QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
+        QueryColumn("Labour", "Labour $", "money", "right"),
+        QueryColumn("Purchased", "Purchased $", "money", "right"),
+        QueryColumn("Inventory", "Inventory $", "money", "right"),
+        QueryColumn("Extra", "Extra $", "money", "right"),
+        QueryColumn("Total", "Total $", "money", "right"),
+    ]
+    return QueryResult("nc_costs", "Non-Conformance — Costing", cols, ordered, _nc_cards(rows),
+                       "One row per NCR, sorted by cost. " + _NC_COST_NOTE)
+
+
+def _nc_cause_result(rows):
+    out = ncspec.by_cause(rows)
+    cols = [
+        QueryColumn("Origin", "Origin / Root Cause", "text", "left", wrap=True),
+        QueryColumn("NCRs", "NCRs", "int", "right"),
+        QueryColumn("Open", "Open", "int", "right"),
+        QueryColumn("Closed", "Closed", "int", "right"),
+        QueryColumn("Labour", "Labour $", "money", "right"),
+        QueryColumn("Material", "Material $", "money", "right"),
+        QueryColumn("Total", "Total $", "money", "right"),
+    ]
+    return QueryResult("nc_cause", "Non-Conformance — Cost by Root Cause", cols, out,
+                       _nc_cards(rows), "Cost grouped by origin / root cause. " + _NC_COST_NOTE)
+
+
+def _nc_regroup(items, keyname):
+    """Relabel a roll-up's group key to the shared 'Group' column."""
+    out = []
+    for d in items:
+        row = {"Group": d.get(keyname)}
+        for k in ("NCRs", "Open", "Closed", "Labour", "Material", "Total"):
+            row[k] = d.get(k)
+        out.append(row)
+    return out
+
+
+def _nc_discipline_result(rows):
+    # Two stacked sections: derived discipline, then ETO responsible department.
+    out = ([{"_kind": "section", "Group": "By discipline (derived from origin)"}]
+           + _nc_regroup(ncspec.by_discipline(rows), "Discipline")
+           + [{"_kind": "section", "Group": "By ETO responsible department"}]
+           + _nc_regroup(ncspec.by_department(rows), "Department"))
+    cols = [
+        QueryColumn("Group", "Discipline / Department", "text", "left"),
+        QueryColumn("NCRs", "NCRs", "int", "right"),
+        QueryColumn("Open", "Open", "int", "right"),
+        QueryColumn("Closed", "Closed", "int", "right"),
+        QueryColumn("Labour", "Labour $", "money", "right"),
+        QueryColumn("Material", "Material $", "money", "right"),
+        QueryColumn("Total", "Total $", "money", "right"),
+    ]
+    return QueryResult("nc_discipline", "Non-Conformance — By Discipline / Department", cols, out,
+                       _nc_cards(rows),
+                       "Cost attributed to a derived discipline (from the origin text) and to "
+                       "ETO's maintained responsible department. " + _NC_COST_NOTE)
+
+
+def _nc_supplier_result(rows):
+    out = ncspec.by_supplier(rows)
+    cols = [
+        QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
+        QueryColumn("NCRs", "NCRs", "int", "right"),
+        QueryColumn("Open", "Open", "int", "right"),
+        QueryColumn("Closed", "Closed", "int", "right"),
+        QueryColumn("Material", "Material $", "money", "right"),
+        QueryColumn("Total", "Total $", "money", "right"),
+    ]
+    return QueryResult("nc_supplier", "Non-Conformance — By Supplier", cols, out, _nc_cards(rows),
+                       "Vendor attribution (supplier is set on PO-linked NCRs; internal NCRs "
+                       "group as 'no supplier'). " + _NC_COST_NOTE)
+
+
+def _nc_impact_result(rows, material_by_pid=None):
+    out = ncspec.impact(rows, material_by_pid or {})
+    cols = [
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
+        QueryColumn("NCRs", "NCRs", "int", "right"),
+        QueryColumn("Open", "Open", "int", "right"),
+        QueryColumn("Closed", "Closed", "int", "right"),
+        QueryColumn("NCCost", "Cost of NC", "money", "right"),
+        QueryColumn("MaterialActual", "Material Actual", "money", "right"),
+        QueryColumn("NCPctOfMaterial", "NC % of Material", "pct", "right"),
+    ]
+    return QueryResult("nc_impact", "Non-Conformance — Project Impact", cols, out, _nc_cards(rows),
+                       "Per-project cost of non-conformance and its share of material actual "
+                       "spend. " + _NC_COST_NOTE)
+
+
+def _nc_detail_result(rows):
+    ordered = sorted(rows, key=lambda r: (r["Status"] != "Open", -(r["NCID"] or 0)))
+    cols = [
+        QueryColumn("NCR", "NCR", "id", "left"),
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
+        QueryColumn("Status", "Status", "text", "left"),
+        QueryColumn("Source", "Source", "text", "left"),
+        QueryColumn("Origin", "Origin", "text", "left", wrap=True),
+        QueryColumn("Discipline", "Discipline", "text", "left"),
+        QueryColumn("Department", "Dept (ETO)", "text", "left"),
         QueryColumn("Part", "Part", "text", "left"),
-        QueryColumn("Supplier", "Supplier", "text", "left"),
+        QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
         QueryColumn("PO", "PO", "id", "left"),
+        QueryColumn("Raised", "Raised", "date", "left"),
         QueryColumn("Closed", "Closed", "date", "left"),
+        QueryColumn("Outstanding", "Open Actions", "int", "right"),
+        QueryColumn("Total", "Cost $", "money", "right"),
+        QueryColumn("RootCause", "Root Cause", "text", "left", wrap=True),
+        QueryColumn("CAPA", "Corrective / Preventive Action", "text", "left", wrap=True),
     ]
     openn = sum(1 for r in rows if r.get("Status") == "Open")
-    cards = [Card("NCRs", str(len(rows))),
-             Card("Open", str(openn), "bad" if openn else "good")]
-    return QueryResult("nc_detail", "Non-Conformance Detail", cols, rows, cards,
-                       "PO link is 70% null (LEFT JOIN); live from ETO.")
+    outstanding = sum(int(r.get("Outstanding") or 0) for r in rows)
+    cards = [Card("NCRs", "{:,}".format(len(rows))),
+             Card("Open", str(openn), "bad" if openn else "good"),
+             Card("Open actions", str(outstanding), "bad" if outstanding else "good"),
+             Card("Cost of NC", _fmt_money2(ncspec.totals(rows)["Total"]))]
+    return QueryResult("nc_detail", "Non-Conformance — Detail", cols, ordered, cards,
+                       "PO link is ~70% null (LEFT JOIN). Open Actions = outstanding corrective "
+                       "actions (vwNonConformanceList). " + _NC_COST_NOTE)
 
 
 def _fmt_hours(v):
@@ -965,6 +1133,8 @@ class DemoQueryService(QueryService):
                    "PctDoneDelta": e["done_delta"], "LabHrs2wk": e["lab2wk"],
                    "MatSpend2wk": e["mat2wk"]}
             rec.update(dict(zip(_PROC_KEYS, e["proc"])))
+            g = _demo_nc_by_project().get(pid, {})
+            rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rows.append(_exec_row(pid, e["name"], e["client"], f, rec, disc_pct))
         return _finalize_exec(rows)
 
@@ -979,6 +1149,8 @@ class DemoQueryService(QueryService):
             f = _DemoFin(d)
             rec = {"PctDone": d["done"], "RunoutLabour": d["runout"], "Rank": d["rank"],
                    "CustAgreedDate": d["ship"]}
+            g = _demo_nc_by_project().get(pid, {})
+            rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rows.append(_scorecard_row(pid, f, rec))
         return _scorecard_result(rows)
 
@@ -1073,22 +1245,33 @@ class DemoQueryService(QueryService):
                           columns=_DEMO_DELIVERED_COLS)
         return _spec_delivered_result(df, "POs created — all history (demo)")
 
+    def _nc_rows(self, project_ids):
+        sel = set(self._sel(project_ids))
+        return [dict(r) for r in _DEMO_NC if r["ProjectID"] in sel]
+
+    def _nc_mat_actuals(self, project_ids):
+        return {pid: _DEMO[pid]["ma"] for pid in self._sel(project_ids)}
+
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids))
 
-    def _q_nc_detail(self, project_ids, date_from=None, date_to=None, **kw):
-        rows = self._nc_rows(project_ids)
-        rows.sort(key=lambda r: (r["Status"] != "Open", -(r["NCR"] or 0)))
-        return _nc_detail_result(rows)
+    def _q_nc_costs(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_costs_result(self._nc_rows(project_ids))
 
-    def _nc_rows(self, project_ids):
-        rows = []
-        for pid in self._sel(project_ids):
-            for ncr, status, source, origin, part, supplier, po, closed in _DEMO_NC[pid]:
-                rows.append({"NCR": ncr, "ProjectID": pid, "Status": status,
-                             "Source": source, "Origin": origin, "Part": part,
-                             "Supplier": supplier, "PO": po, "Closed": closed})
-        return rows
+    def _q_nc_cause(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_cause_result(self._nc_rows(project_ids))
+
+    def _q_nc_discipline(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_discipline_result(self._nc_rows(project_ids))
+
+    def _q_nc_supplier(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_supplier_result(self._nc_rows(project_ids))
+
+    def _q_nc_impact(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_impact_result(self._nc_rows(project_ids), self._nc_mat_actuals(project_ids))
+
+    def _q_nc_detail(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_detail_result(self._nc_rows(project_ids))
 
 
 # Canned ETO data for the demo (plausible Macrodyne press-shop figures)
@@ -1125,13 +1308,50 @@ _DEMO_PO = {   # pid -> [(po, date, vendor, item, qty, uom, value, received, cur
     240087: [(48301, "2026-07-05", "Nachi", "Servo motors (pair)", 2, "EA", 33400.0, 0, "US")],
 }
 _DEMO_FX = {"US": 1.31, "CA": 1.0}   # demo currency rate → base (CAD)
-_DEMO_NC = {   # pid -> [(ncr, status, source, origin, part, supplier, po, closed)]
-    230219: [(7714, "Open", "Receiving Inspection", "Supplier", "P-10231", "Bosch Rexroth", 48210, None),
-             (7702, "Closed", "In-Process", "Machining", "M-5521", None, None, "2026-06-02"),
-             (7688, "Closed", "Final Inspection", "Assembly", "A-3300", None, None, "2026-05-20")],
-    230312: [(7731, "Open", "In-Process", "Welding", "W-2210", None, None, None)],
-    240087: [(7750, "Open", "Receiving Inspection", "Supplier", "S-9001", "Nachi", 48301, None)],
-}
+def _dnc(ncid, pid, status, source, origin, dept, supplier, part, purchased,
+         raised="2026-03-01", closed=None, po=None, outstanding=0, inventory=0.0,
+         extra=0.0, rootcause="", capa=""):
+    """Build one normalized demo NC row (same shape ncspec.normalize produces)."""
+    total = purchased + inventory + extra           # labour books $0 (as in live)
+    return {
+        "NCID": ncid, "NCR": f"NCO{ncid:010d}", "ProjectID": pid, "Title": "",
+        "Status": status, "Source": source, "Origin": origin, "Department": dept,
+        "Discipline": ncspec.derive_discipline(origin),
+        "Part": part, "Supplier": supplier, "Customer": None, "PO": po,
+        "Raised": raised, "Closed": closed, "RootCause": rootcause, "CAPA": capa,
+        "Labour": 0.0, "Purchased": purchased, "Inventory": inventory, "Extra": extra,
+        "Total": total, "Outstanding": outstanding,
+    }
+
+
+_DEMO_NC = [   # normalized demo NC rows (validated-shape figures)
+    _dnc(2563, 230219, "Open", "Manufacturing", "Macrodyne Part Handling Error",
+         "Manufacturing", None, None, 8711.88, raised="2026-02-04", outstanding=1,
+         rootcause="Parts consumed on another job", capa="Tighten kit control"),
+    _dnc(2586, 230219, "Open", "Manufacturing", "Hydraulic Design Error",
+         "Engineering", None, "7075H0.0.0.0-00", 0.0, raised="2026-02-17", outstanding=2,
+         rootcause="Interference with light curtain", capa="Check mechanical first"),
+    _dnc(2592, 230219, "Closed", "Manufacturing", "Supplier Machining Error",
+         "Manufacturing", "Sudak Precision", "GUIDE BLOCK", 760.0, raised="2026-02-19",
+         closed="2026-03-05", po=33706, rootcause="Radius left in corner",
+         capa="Supplier inspection procedure"),
+    _dnc(2604, 230219, "Closed", "Receiving", "Supplier Fabrication Error",
+         "Purchasing", "Quinton Steel", "FRAME", 2190.0, raised="2026-01-20",
+         closed="2026-02-15", po=33050, outstanding=0),
+    _dnc(2711, 230312, "Open", "Engineering", "Electrical Design Error",
+         "Engineering", None, "W-2210", 0.0, raised="2026-04-11", outstanding=1,
+         rootcause="Duplicate wire numbers", capa="Renumber before fuse blocks"),
+    _dnc(2750, 230312, "Closed", "Manufacturing", "Mechanical Design Error",
+         "Engineering", "Qingdao CPL", "PLATFORM", 1340.0, raised="2026-03-22",
+         closed="2026-04-30", po=34269),
+    _dnc(2801, 240087, "Open", "Receiving", "Supplier Machining Error",
+         "Purchasing", "Nachi", "S-9001", 3450.0, raised="2026-05-02", outstanding=3,
+         rootcause="Servo shaft undersized", capa="Return + re-machine"),
+]
+
+
+def _demo_nc_by_project():
+    return ncspec.by_project_totals(_DEMO_NC)
 # Canned procurement exceptions (open PO lines, delivered/ordered-late)
 _DEMO_EXC = [
     {"Buyer": "Nolan, Pat", "ProjectID": 230219, "PO": 48255, "Vendor": "SKF Canada",
