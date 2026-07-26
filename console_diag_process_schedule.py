@@ -69,37 +69,52 @@ def main():
         # 2. The process-type catalogue (the "activity type" list a step is an instance of).
         show(cur, "2. tlkpProcess — process/operation types", "SELECT * FROM dbo.tlkpProcess")
 
-        # 3. Population per project — headers (scoped via the header's own Project/Spec keys).
-        show(cur, f"3. Process-schedule HEADERS per project {ids} (is it maintained?)",
+        # 3. HOW BROADLY is the process schedule maintained (all projects, not just the sample)?
+        show(cur, "3. Overall maintenance — projects with any process schedule vs total",
+             "SELECT COUNT(*) AS Headers, COUNT(DISTINCT ProjectID) AS ProjectsWithPS "
+             "FROM dbo.tblProcessScheduleHeader")
+
+        # 3b. Headers per sample project.
+        show(cur, f"3b. Process-schedule HEADERS per project {ids}",
              "SELECT h.ProjectID, COUNT(*) AS Headers, COUNT(DISTINCT h.SpecID) AS Specs "
              f"FROM dbo.tblProcessScheduleHeader h WHERE h.ProjectID IN ({ids}) "
              "GROUP BY h.ProjectID ORDER BY h.ProjectID")
 
         # 4. Detail (operations) per project — the count of task-rows a plan would use.
+        #    detail links to header via ProcessScheduleID (the header PK).
         show(cur, "4. Process-schedule DETAIL rows per project (the operations / units of work)",
              "SELECT h.ProjectID, COUNT(*) AS Operations, "
-             "CAST(SUM(d.TotalHours) AS decimal(18,1)) AS TotalHours, "
-             "CAST(SUM(d.EstimateHours) AS decimal(18,1)) AS EstimateHours "
+             "CAST(SUM(d.EstimateHours) AS decimal(18,1)) AS EstimateHours, "
+             "CAST(SUM(d.TotalHours) AS decimal(18,1)) AS TotalHours "
              "FROM dbo.tblProcessScheduleDetail d "
-             "JOIN dbo.tblProcessScheduleHeader h ON h.ProcessScheduleHeaderID = d.ProcessScheduleHeaderID "
+             "JOIN dbo.tblProcessScheduleHeader h ON h.ProcessScheduleID = d.ProcessScheduleID "
              f"WHERE h.ProjectID IN ({ids}) GROUP BY h.ProjectID ORDER BY h.ProjectID")
 
-        # 5. What a task row looks like — sample operations for the first project.
-        show(cur, f"5. Sample operations for project {pids[0]} (spec, process, hours, qty, status)",
-             "SELECT TOP 25 h.ProjectID, h.SpecID, pr.Process AS ProcessName, "
-             "d.EstimateHours, d.SetupHours, d.TotalHours, d.QuantityOrdered, d.QuantityReceived "
+        # 5. What a task row looks like — sample operations for the first project (with sequence).
+        show(cur, f"5. Sample operations for project {pids[0]} (item, process, seq, hours, qty, dates)",
+             "SELECT TOP 30 h.SpecID, h.Number AS ItemNo, pr.ProcessName, d.Sequence, "
+             "d.EstimateHours, d.TotalHours, d.QuantityOrdered, d.QuantityReceived, "
+             "d.RequiredDate, d.LastReceivedCompletedDate "
              "FROM dbo.tblProcessScheduleDetail d "
-             "JOIN dbo.tblProcessScheduleHeader h ON h.ProcessScheduleHeaderID = d.ProcessScheduleHeaderID "
+             "JOIN dbo.tblProcessScheduleHeader h ON h.ProcessScheduleID = d.ProcessScheduleID "
              "LEFT JOIN dbo.tlkpProcess pr ON pr.ProcessID = d.ProcessID "
-             f"WHERE h.ProjectID = {pids[0]} ORDER BY h.SpecID")
+             f"WHERE h.ProjectID = {pids[0]} ORDER BY h.Number, d.Sequence")
 
-        # 6. Progress tracking — is the completed-log used? (labour link was empty)
+        # 6. Progress tracking — is the completed-log actually used?
         cols_of(cur, "tblPSCompletedLog")
         show(cur, "6. Completed-log rows for the sample projects (is step completion recorded?)",
-             "SELECT COUNT(*) AS CompletedLogRows FROM dbo.tblPSCompletedLog cl "
+             "SELECT h.ProjectID, COUNT(*) AS CompletedLogRows, "
+             "COUNT(DISTINCT cl.ProcessScheduleDetailID) AS StepsWithProgress "
+             "FROM dbo.tblPSCompletedLog cl "
              "JOIN dbo.tblProcessScheduleDetail d ON d.ProcessScheduleDetailID = cl.ProcessScheduleDetailID "
-             "JOIN dbo.tblProcessScheduleHeader h ON h.ProcessScheduleHeaderID = d.ProcessScheduleHeaderID "
-             f"WHERE h.ProjectID IN ({ids})")
+             "JOIN dbo.tblProcessScheduleHeader h ON h.ProcessScheduleID = d.ProcessScheduleID "
+             f"WHERE h.ProjectID IN ({ids}) GROUP BY h.ProjectID ORDER BY h.ProjectID")
+
+        # 7. Header status semantics (StatusID → name) + a sample of header schedule/qty.
+        show(cur, "7. Header status distribution (StatusID)",
+             "SELECT StatusID, COUNT(*) AS Headers, "
+             "SUM(CASE WHEN CompletionDate IS NOT NULL THEN 1 ELSE 0 END) AS Completed "
+             f"FROM dbo.tblProcessScheduleHeader WHERE ProjectID = {pids[0]} GROUP BY StatusID ORDER BY StatusID")
     finally:
         conn.close()
     print("\nDone. Paste the output back — populated + progress-trackable ⇒ the activity is a "
