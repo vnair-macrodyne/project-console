@@ -71,13 +71,13 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
-              "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
+              "po_all", "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail"}
 
 # reports that read ETO live and honour the optional date range / view
 ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
-                  "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
+                  "po_all", "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
                   "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
                   "nc_supplier", "nc_detail"}
 
@@ -128,9 +128,14 @@ def catalogue():
          "desc": f"{proj} → department → employee — entries, hours, OT and labour cost.",
          "needs_projects": True},
         # ── Purchasing (the deployed PO reports) ───────────────────────────
+        {"id": "po_all", "menu": "Purchasing", "label": "PO Report",
+         "desc": f"All purchases per {proj.lower()} — total purchase value with the received "
+                 "(closed) and open portions, and the overdue part. Scoped to orders placed in "
+                 "the selected date range.",
+         "needs_projects": True},
         {"id": "po_status", "menu": "Purchasing", "label": "PO Status",
          "desc": f"Open purchase-order lines — On Order and Overdue — grouped by {proj.lower()} "
-                 "and machine, with an overdue-aging summary.",
+                 "and machine, with an overdue-aging summary and total-purchases context.",
          "needs_projects": True},
         {"id": "po_exceptions", "menu": "Purchasing", "label": "Procurement Exceptions",
          "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
@@ -457,6 +462,24 @@ class LiveQueryService(QueryService):
     def _q_lab_e(self, project_ids, date_from=None, date_to=None, **kw):
         return self._labour(project_ids, "lab_e", date_from, date_to)
 
+    def _po_totals(self, pids, dfrom, dto):
+        """Grand purchase totals (closed + open) across the selection, for context/cards."""
+        try:
+            df = self._df(etospec.query_po_totals_by_project(pids, dfrom, dto))
+            if df is None or df.empty:
+                return None
+            return {k: float(df[k].fillna(0).sum())
+                    for k in ("TotalPurchases", "ReceivedValue", "OpenValue", "OverdueValue")}
+        except Exception:
+            return None
+
+    def _q_po_all(self, project_ids, date_from=None, date_to=None, **kw):
+        pids = [int(p) for p in project_ids] if project_ids else None
+        dfrom, dto = _as_date(date_from), _as_date(date_to)
+        df = self._df(etospec.query_po_totals_by_project(pids, dfrom, dto))
+        rows = [] if df is None or df.empty else df.to_dict("records")
+        return _po_all_result(rows, _po_window_label(dfrom, dto))
+
     def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else None
@@ -464,7 +487,12 @@ class LiveQueryService(QueryService):
         raw = self._df(etospec.query_po_status_open(pids, dfrom, dto))
         as_of = _dt.date.today()
         pdf = etospec.po_prep(raw, today=as_of)
-        return _spec_po_status_result(pdf, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}")
+        result = _spec_po_status_result(pdf, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}")
+        t = self._po_totals(pids, dfrom, dto)     # total purchases (closed + open) context
+        if t:
+            result.cards.append(Card("Total purchases", _fmt_money2(t["TotalPurchases"])))
+            result.cards.append(Card("Received (closed)", _fmt_money2(t["ReceivedValue"])))
+        return result
 
     def _q_po_exceptions(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
@@ -977,7 +1005,46 @@ def _spec_delivered_result(df, label):
                        {"kind": "delivered", "df": df, "label": label})
 
 
-# ---- Purchasing — By Buyer -----------------------------------------------
+# ---- Purchasing — PO Report (all purchases) + By Buyer -------------------
+def _po_all_result(rows, window_label=""):
+    out = []
+    for r in rows:
+        out.append({
+            "ProjectID": _int(r.get("ProjectID")),
+            "Project": r.get("JobName") or "",
+            "POs": _int(r.get("POs")),
+            "Lines": _int(r.get("Lines")),
+            "TotalPurchases": _num(r.get("TotalPurchases")),
+            "ReceivedValue": _num(r.get("ReceivedValue")),
+            "OpenValue": _num(r.get("OpenValue")),
+            "OverdueValue": _num(r.get("OverdueValue")),
+        })
+    out.sort(key=lambda d: -(d["TotalPurchases"] or 0))
+    cols = [
+        QueryColumn("ProjectID", "Proj ID", "id", "left"),
+        QueryColumn("Project", "Project", "text", "left", wrap=True),
+        QueryColumn("POs", "POs", "int", "right"),
+        QueryColumn("Lines", "Lines", "int", "right"),
+        QueryColumn("TotalPurchases", "Total Purchases", "money", "right"),
+        QueryColumn("ReceivedValue", "Received (closed)", "money", "right"),
+        QueryColumn("OpenValue", "Open", "money", "right"),
+        QueryColumn("OverdueValue", "Overdue", "money", "right"),
+    ]
+    total = sum(x["TotalPurchases"] or 0 for x in out)
+    opn = sum(x["OpenValue"] or 0 for x in out)
+    rcv = sum(x["ReceivedValue"] or 0 for x in out)
+    od = sum(x["OverdueValue"] or 0 for x in out)
+    cards = [Card(L("projects"), str(len(out))),
+             Card("Total purchases", _fmt_money2(total)),
+             Card("Received (closed)", _fmt_money2(rcv)),
+             Card("Open", _fmt_money2(opn)),
+             Card("Overdue", _fmt_money2(od), "bad" if od else "good")]
+    note = ("All purchase-order lines per project — closed (received) and open — with total "
+            "purchases, the open portion and the overdue portion. Committed value in Canadian "
+            "dollars." + (window_label or ""))
+    return QueryResult("po_all", "Purchasing — PO Report (all purchases)", cols, out, cards, note)
+
+
 def _po_window_label(dfrom, dto):
     """Subtitle fragment naming the PO-placed window (blank when unbounded)."""
     if not dfrom and not dto:
@@ -1415,6 +1482,25 @@ class DemoQueryService(QueryService):
 
     def _nc_mat_actuals(self, project_ids):
         return {pid: _DEMO[pid]["ma"] for pid in self._sel(project_ids)}
+
+    def _q_po_all(self, project_ids, date_from=None, date_to=None, **kw):
+        sel = set(self._sel(project_ids))
+        agg = {}
+        for r in _DEMO_PO_STATUS:
+            if r["ProjectID"] not in sel:
+                continue
+            g = agg.setdefault(r["ProjectID"], {"ProjectID": r["ProjectID"], "JobName": r["JobName"],
+                               "_pos": set(), "Lines": 0, "TotalPurchases": 0.0,
+                               "ReceivedValue": 0.0, "OpenValue": 0.0, "OverdueValue": 0.0})
+            g["_pos"].add(r["PO"])
+            g["Lines"] += 1
+            ext = r["ExtValue"]
+            g["TotalPurchases"] += ext
+            closed = r["Received"] is not None and r["Received"] >= r["Qty"]
+            g["ReceivedValue" if closed else "OpenValue"] += ext
+        rows = [{**{k: v for k, v in g.items() if k != "_pos"}, "POs": len(g["_pos"])}
+                for g in agg.values()]
+        return _po_all_result(rows, " (demo)")
 
     def _q_po_buyer(self, project_ids, date_from=None, date_to=None, **kw):
         sel = set(self._sel(project_ids))

@@ -807,6 +807,42 @@ def query_late_vendors(project_ids=None, date_from=None, date_to=None):
     """
 
 
+def query_po_totals_by_project(project_ids=None, date_from=None, date_to=None):
+    """Per-project purchase totals over ALL active PO lines — closed (received) AND open —
+    scoped by the PO-placed window. Total = received + open; overdue is the open-past-need-by
+    subset. Values in CAD (rate≤0 guarded to 1)."""
+    proj = ""
+    if project_ids:
+        ids = ",".join(str(int(p)) for p in project_ids)
+        proj = f" AND pod.ProjectID IN ({ids})"
+    dt = _po_date_window(date_from, date_to)
+    rate = "CASE WHEN poh.PurchaseCurrRate > 0 THEN poh.PurchaseCurrRate ELSE 1 END"
+    ext = f"pod.ExtendedPrice * {rate}"
+    open_ = "(pod.Received IS NULL OR pod.Received < pod.PurchaseQty)"
+    closed = "(pod.Received IS NOT NULL AND pod.Received >= pod.PurchaseQty)"
+    needby = "ISNULL(pod.DateRevised, pod.DateRequired)"
+    overdue = f"({open_} AND {needby} < CAST(GETDATE() AS date))"
+    return f"""
+    SELECT
+        pod.ProjectID                                       AS ProjectID,
+        MAX(p.DisplayName)                                  AS JobName,
+        COUNT(DISTINCT poh.PurchaseOrderID)                 AS POs,
+        COUNT(*)                                            AS Lines,
+        SUM(CASE WHEN {open_}   THEN 1 ELSE 0 END)          AS OpenLines,
+        SUM(CASE WHEN {closed}  THEN 1 ELSE 0 END)          AS ClosedLines,
+        CAST(SUM({ext}) AS decimal(20,2))                                        AS TotalPurchases,
+        CAST(SUM(CASE WHEN {closed}  THEN {ext} ELSE 0 END) AS decimal(20,2))    AS ReceivedValue,
+        CAST(SUM(CASE WHEN {open_}   THEN {ext} ELSE 0 END) AS decimal(20,2))    AS OpenValue,
+        CAST(SUM(CASE WHEN {overdue} THEN {ext} ELSE 0 END) AS decimal(20,2))    AS OverdueValue
+    FROM vwPurchaseOrderHeader poh
+    JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
+    LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
+    WHERE poh.PurchaseActive = 1{proj}{dt}
+    GROUP BY pod.ProjectID
+    ORDER BY TotalPurchases DESC
+    """
+
+
 def query_po_by_buyer(project_ids=None, date_from=None, date_to=None):
     """Per-buyer purchasing rollup over active PO lines (scoped by project + PO-placed window):
     POs, lines, committed value (CAD), and the open / overdue subset. The buyer-centric view."""
