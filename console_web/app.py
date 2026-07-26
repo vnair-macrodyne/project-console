@@ -19,8 +19,10 @@ Run:
 """
 import argparse
 
-from flask import Flask, jsonify, request, send_file, render_template, g
+from flask import (Flask, jsonify, request, send_file, render_template, g,
+                   redirect, url_for, session)
 import io
+import os
 
 from console_web.queries import make_service, catalogue, branding
 from console_web import exporters, auth
@@ -28,6 +30,9 @@ from console_web.pm import make_pm_service
 
 app = Flask(__name__)
 app.config["DEMO"] = False
+# Session signing key — set CONSOLE_SECRET_KEY in prod so sessions survive restarts.
+app.secret_key = os.environ.get("CONSOLE_SECRET_KEY") or os.urandom(32)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
 
 def _service():
@@ -50,24 +55,58 @@ def _run_from_payload(payload):
             close()
 
 
-# ── Auth: Windows/network identity on every request; APIs require it ──────────
-_OPEN_PATHS = {"/api/me"}
-_PAGE_PATHS = {"/", "/pm", "/admin"}
+# ── Auth: AD login form → session identity; unauth pages go to /login ─────────
+_EXEMPT = {"/login", "/logout", "/api/login", "/api/me"}
 
 
 @app.before_request
 def _auth_ctx():
     g.user, g.role = auth.resolve_user()
     p = request.path
-    if p in _OPEN_PATHS or p in _PAGE_PATHS or p.startswith("/static"):
-        return  # pages + /api/me always render; they self-gate client-side
+    if p in _EXEMPT or p.startswith("/static"):
+        return
     if not g.user:
-        return jsonify({"error": "not authenticated (Windows sign-in not detected)"}), 401
+        if p.startswith("/api/"):
+            return jsonify({"error": "not authenticated"}), 401
+        return redirect(url_for("login_page", next=p))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    from console.config import TENANT
+    nxt = request.values.get("next") or "/"
+    if not nxt.startswith("/"):
+        nxt = "/"
+    err = None
+    if request.method == "POST":
+        u = request.form.get("username", "")
+        pw = request.form.get("password", "")
+        try:
+            ok, user, display = auth.ldap_authenticate(u, pw)
+        except Exception as e:
+            app.logger.exception("ldap auth error")
+            ok, user, display, err = False, None, None, "Sign-in is not configured. Contact IT."
+        if ok:
+            session.clear()
+            session["user"] = user
+            session["display"] = display or user
+            return redirect(nxt)
+        err = err or "Invalid username or password."
+    return render_template("login.html", error=err, product=TENANT.product_name,
+                           company=TENANT.company_name,
+                           environment=getattr(TENANT, "environment", "prod"), next=nxt)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login_page"))
 
 
 @app.route("/api/me")
 def api_me():
     return jsonify({"user": g.get("user"), "role": g.get("role"),
+                    "display": session.get("display"),
                     "demo": app.config["DEMO"], "environment": _environment()})
 
 

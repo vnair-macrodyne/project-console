@@ -1,22 +1,26 @@
 """
-auth.py — Windows/network identity + basic RBAC for the Project Console.
+auth.py — AD login-form identity + basic RBAC for the Project Console.
 
-Identity: the app is meant to run behind IIS with Windows Authentication, which passes
-the authenticated domain login to the WSGI app as REMOTE_USER (e.g. 'MACR\\vnair').
-We read that (or an X-Remote-User header from a reverse proxy). For local dev without
-IIS, set CONSOLE_DEV_USER. In --demo there is no DB — a fixed demo user is used and
-'?as=viewer|pm|admin' impersonates a role for testing the gates.
+No IIS. Identity is established by an **LDAP bind against Active Directory**: the user
+enters their existing domain username + password on /login, we bind to a DC over LDAPS
+with those creds (no service account, no separate password store), and on success store
+the username in the Flask session. Every later request reads the session.
+  Config (env or tenant): CONSOLE_LDAP_SERVER (e.g. ldaps://dc01.macrodynepress.com),
+  CONSOLE_AD_DOMAIN (UPN suffix, e.g. macrodynepress.com), CONSOLE_LDAP_SSL (default 1),
+  CONSOLE_LDAP_TLS_VALIDATE (0 = accept the DC's self-signed cert; set 1 + a CA in prod).
+In --demo there is no DC: any non-empty password logs in, the username maps to a role,
+and '?as=viewer|pm|admin' still impersonates a role for testing the gates.
 
 Roles (rank): viewer < pm < admin
   viewer — read all reports & dashboards
   pm     — + bring projects in / add-modify budgets  (write /api/pm/*)
   admin  — + manage users (/admin) and the crosswalk
-Role is looked up per user in Reporting.tblConsoleUser; an unmapped domain user
-defaults to 'viewer' (they're already inside Windows auth). Grant pm/admin explicitly.
+Role is looked up per user in Reporting.tblConsoleUser; an authenticated domain user
+not listed there defaults to 'viewer'. Grant pm/admin explicitly.
 """
 import os
 
-from flask import request, jsonify, g, current_app
+from flask import request, jsonify, g, current_app, session
 
 RANK = {"viewer": 1, "pm": 2, "admin": 3}
 
@@ -34,21 +38,59 @@ def _norm(raw):
 
 
 def resolve_user():
-    """(username, role) for the current request. (None, None) if unauthenticated."""
+    """(username, role) for the current request, from the session. (None, None) if not
+    signed in. Demo: a signed-in session or the default demo user, with ?as= role override."""
     demo = current_app.config.get("DEMO")
-    env = request.environ
-    raw = (env.get("REMOTE_USER") or env.get("HTTP_REMOTE_USER")
-           or env.get("HTTP_X_REMOTE_USER") or os.environ.get("CONSOLE_DEV_USER") or "")
-    user = _norm(raw)
+    user = _norm(session.get("user") or "")
     if demo:
         if not user:
-            user = "demo.user"
+            user = os.environ.get("CONSOLE_DEV_USER", "demo.user")
         as_ = (request.args.get("as") or "").lower()
         role = as_ if as_ in RANK else _DEMO_USERS.get(user, {}).get("role", "admin")
         return user, role
+    # dev convenience (no DC handy): CONSOLE_DEV_USER bypasses the login form
+    if not user:
+        user = _norm(os.environ.get("CONSOLE_DEV_USER") or "")
     if not user:
         return None, None
     return user, (_role_for(user) or "viewer")
+
+
+def ldap_authenticate(username, password):
+    """Verify (username, password) by binding to AD. Returns (ok, username, display_name).
+    Demo: any non-empty password succeeds so the flow is exercisable without a DC."""
+    username = _norm(username)
+    if not username or not password:
+        return False, None, None
+    if current_app.config.get("DEMO"):
+        return True, username, _DEMO_USERS.get(username, {}).get("display", username)
+
+    from console.config import TENANT
+    server_host = os.environ.get("CONSOLE_LDAP_SERVER") or getattr(TENANT, "ldap_server", None)
+    domain = os.environ.get("CONSOLE_AD_DOMAIN") or getattr(TENANT, "ad_domain", None)
+    if not server_host or not domain:
+        raise RuntimeError("LDAP not configured — set CONSOLE_LDAP_SERVER and CONSOLE_AD_DOMAIN")
+    use_ssl = os.environ.get("CONSOLE_LDAP_SSL", "1") != "0"
+    validate = os.environ.get("CONSOLE_LDAP_TLS_VALIDATE", "0") == "1"
+
+    import ssl as _ssl
+    from ldap3 import Server, Connection, Tls, ALL
+    tls = Tls(validate=_ssl.CERT_REQUIRED if validate else _ssl.CERT_NONE) if use_ssl else None
+    server = Server(server_host, use_ssl=use_ssl, tls=tls, get_info=ALL)
+    upn = f"{username}@{domain}"          # AD accepts UPN bind
+    conn = Connection(server, user=upn, password=password, authentication="SIMPLE")
+    if not conn.bind():
+        return False, None, None
+    display = username
+    try:  # best-effort: read the user's display name (as the just-bound user)
+        base = ",".join(f"DC={p}" for p in domain.split("."))
+        conn.search(base, f"(sAMAccountName={username})", attributes=["displayName"])
+        if conn.entries and conn.entries[0].displayName:
+            display = str(conn.entries[0].displayName)
+    except Exception:
+        pass
+    conn.unbind()
+    return True, username, display
 
 
 def _role_for(user):

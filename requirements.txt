@@ -4,3 +4,5 @@ openpyxl
 python-dotenv
 flask
 reportlab
+ldap3>=2.9   # AD login-form (LDAP bind auth)
+waitress   # production WSGI server (no IIS needed): waitress-serve --listen=0.0.0.0:8000 console_web.app:app

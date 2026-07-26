@@ -69,7 +69,8 @@ let me=null;
 async function boot(){
   me=await (await fetch('/api/me'+location.search)).json();
   el('logo').textContent='PC';
-  el('who').textContent = me.user ? `${me.user} · ${me.role}${me.demo?' · DEMO':''}` : 'not signed in';
+  el('who').innerHTML = (me.user ? `${me.user} · ${me.role}${me.demo?' · DEMO':''}` : 'not signed in')
+    + ' · <a href="/logout" style="color:#fff;text-decoration:underline">Sign out</a>';
   if(me.role!=='admin'){ el('denied').style.display='block'; return; }
   el('panel').style.display='block';
   await refresh();

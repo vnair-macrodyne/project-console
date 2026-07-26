@@ -92,6 +92,10 @@ class TenantProfile:
     reporting_user: str | None = None         # $CONSOLE_STORE_USER
     reporting_pwd: str | None = None          # $CONSOLE_STORE_PWD
 
+    # ── auth: AD login-form (LDAP bind) ────────────────────────────────────
+    ldap_server: str | None = None            # $CONSOLE_LDAP_SERVER e.g. ldaps://dc01.macrodynepress.com
+    ad_domain: str | None = None              # $CONSOLE_AD_DOMAIN    e.g. macrodynepress.com (UPN suffix)
+
     # ------------------------------------------------------------------ helpers
     def term(self, key: str) -> str:
         """Display label for a canonical term (falls back to the key itself)."""
@@ -158,6 +162,9 @@ class TenantProfile:
         prof.reporting_server = os.environ.get("CONSOLE_STORE_SERVER", prof.reporting_server)
         prof.reporting_database = os.environ.get("CONSOLE_STORE_DB", prof.reporting_database)
         prof.environment = os.environ.get("CONSOLE_ENV", "prod").lower()
+        # auth (LDAP) config — env wins over profile
+        prof.ldap_server = os.environ.get("CONSOLE_LDAP_SERVER", prof.ldap_server)
+        prof.ad_domain = os.environ.get("CONSOLE_AD_DOMAIN", prof.ad_domain)
         return prof
 
 

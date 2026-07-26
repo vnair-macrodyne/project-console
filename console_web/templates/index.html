@@ -227,7 +227,9 @@ function iso(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0
 async function boot(){
   try{ state.me = await (await fetch('/api/me'+location.search)).json(); }catch(e){ state.me={}; }
   if(state.me){
-    el('who').textContent = state.me.user ? `${state.me.user} · ${state.me.role||'viewer'}` : 'not signed in';
+    el('who').innerHTML = state.me.user
+      ? `${state.me.user} · ${state.me.role||'viewer'} · <a href="/logout" style="color:#fff;text-decoration:underline">Sign out</a>`
+      : '<a href="/login" style="color:#fff">Sign in</a>';
     if((state.me.environment||'prod')==='staging') el('envBadge').style.display='inline-block';
   }
   const br = await fetch('/api/branding');
