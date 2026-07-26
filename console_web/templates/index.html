@@ -96,6 +96,7 @@
   thead th .arrow{opacity:.55;font-size:10px;margin-left:4px}
   tbody td{padding:9px 13px;border-top:1px solid var(--line);white-space:nowrap;vertical-align:middle}
   tbody td.r{text-align:right}
+  tbody td.calc{font-style:italic}
   tbody tr:nth-child(even){background:#f8fafd}
   /* eto-reporting subtotal bands (match the deployed workbook tiers) */
   tbody tr.k-l1_sub td{background:#D6E4F0;font-weight:600;border-top:1px solid #b9d0ea}
@@ -505,7 +506,7 @@ function renderPlain(r,rows){
       return;
     }
     h+=`<tr${kc?` class="${kc.trim()}"`:''}>`;
-    r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':''].filter(Boolean).join(' ');
+    r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':'', c.calc?'calc':''].filter(Boolean).join(' ');
       const cell=c.type==='pct'?pctPill(row[c.key]):fmt(row[c.key],c.type);
       h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`; });
     h+='</tr>'; });
@@ -528,7 +529,7 @@ function renderExec(r,rows){
   rows.forEach(row=>{ h+='<tr>';
     cols.forEach((c,idx)=>{ const v=row[c.key]; const sc=stickClass(idx);
       const drill=canDrill&&(idx===1||idx===2);
-      const cls=[sc, c.align==='left'||c.type==='text'?'l':'', c.wrap?'wrap':'',
+      const cls=[sc, c.align==='left'||c.type==='text'?'l':'', c.wrap?'wrap':'', c.calc?'calc':'',
                  tlClass(v,c.type), sc?'':'zebra', drill?'drillable':''].filter(Boolean).join(' ');
       const attr=drill?` data-pid="${row.ProjectID}"`:'';
       let content=fmt(v,c.type);

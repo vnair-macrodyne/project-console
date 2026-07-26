@@ -35,6 +35,7 @@ class QueryColumn:
     align: str = "left"       # left | right
     block: str = ""           # group-band label (Executive Dashboard); "" = ungrouped
     wrap: bool = False         # long-text column: wrap within a max-width (others stay 1-line)
+    calc: bool = False         # value is calculated live from ETO (rendered italic) vs manual entry
 
 
 @dataclass
@@ -297,16 +298,55 @@ class LiveQueryService(QueryService):
         ov = self._overlay_map()
         meta = self._project_meta(project_ids)
         nc = self._nc_by_project(project_ids)
+        proc = self._procurement_actuals(project_ids)
         rows = []
         for pid in fin:
             f = fin[pid]
-            rec = dict(ov.get(str(pid), {}))       # copy — we augment with NC actuals
+            rec = dict(ov.get(str(pid), {}))       # copy — we augment with live actuals
             g = nc.get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
+            rec.update(proc.get(pid, {}))          # calculated Line Items / LLTP Del. Late
             name, client = meta.get(pid, (None, None))
             disc_pct = {d.discipline: d.consumed_pct for d in (f.disciplines if f else [])}
             rows.append(_exec_row(pid, name, client, f, rec, disc_pct))
         return _finalize_exec(rows)
+
+    def _procurement_actuals(self, project_ids):
+        """{pid: {'TotalLineItems': n, 'LLTPDelLate': n}} computed live from ETO.
+
+        Only the two figures ETO can support are calculated: total PO line items, and
+        long-lead-time parts delivered after their need-by date (using ETO's maintained
+        LLT flag). Ordered-late / released-late are NOT derivable — ETO holds no item
+        lead time or planned engineering-release date — so those stay as PM entries.
+        """
+        out = {}
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return out
+        ids = ",".join(str(p) for p in pids)
+        try:  # total PO line items per project
+            df = self._df("SELECT ProjectID, COUNT(*) AS n FROM dbo.vwPurchaseOrderDetails "
+                          f"WHERE ProjectID IN ({ids}) GROUP BY ProjectID")
+            for _, r in df.iterrows():
+                out.setdefault(int(r["ProjectID"]), {})["TotalLineItems"] = int(r["n"])
+        except Exception:
+            pass
+        try:  # LLTP delivered-late (needs the maintained item LLT flag)
+            import datetime as _dt
+            raw = self._df(etospec.query_po_exceptions(True, pids))
+            items = etospec.exc_aggregate(etospec.exc_classify(raw, today=_dt.date.today()))
+            if items is not None and not items.empty:
+                for rec in items.to_dict("records"):
+                    if str(rec.get("LLT")) == "LLT" and str(rec.get("DelLate")) == "LATE":
+                        pv = rec.get("ProjectID")
+                        if pv in (None, ""):
+                            continue
+                        pid = int(float(pv))
+                        d = out.setdefault(pid, {})
+                        d["LLTPDelLate"] = d.get("LLTPDelLate", 0) + 1
+        except Exception:
+            pass
+        return out
 
     def _q_scorecard(self, project_ids, **kw):
         fin = self._financials(project_ids)
@@ -611,15 +651,16 @@ def _exec_columns():
     # Labour by discipline (block band reads as the labour word, per the workbook)
     for d in _EXEC_DISC_ORDER:
         cols.append(QueryColumn(f"disc::{d}", _EXEC_DISC_SHORT[d], "pct", "right", labour))
-    # Procurement
+    # Procurement — italicised columns are calculated live from ETO; the rest are PM entries.
+    _CALC_PROC = {"TotalLineItems", "LLTPDelLate"}
     for key, lab in [("TotalLineItems", "Line Items"), ("LLTPOrdered", "LLTP Ord."),
                      ("LLTPRelLate", "LLTP Rel. Late"), ("LLTPOrdLate", "LLTP Ord. Late"),
                      ("LLTPDelLate", "LLTP Del. Late"), ("PartsRelLate", "Parts Rel. Late"),
                      ("PartsOrdLate", "Parts Ord. Late")]:
-        cols.append(QueryColumn(key, lab, "int", "right", "Procurement"))
-    # Non-Conformance actuals (open count + cost of NC)
-    cols.append(QueryColumn("NCOpen", "Open NCRs", "int", "right", "Non-Conformance"))
-    cols.append(QueryColumn("NCCost", "Cost of NC", "money", "right", "Non-Conformance"))
+        cols.append(QueryColumn(key, lab, "int", "right", "Procurement", calc=(key in _CALC_PROC)))
+    # Non-Conformance actuals (calculated live from ETO → italic)
+    cols.append(QueryColumn("NCOpen", "Open NCRs", "int", "right", "Non-Conformance", calc=True))
+    cols.append(QueryColumn("NCCost", "Cost of NC", "money", "right", "Non-Conformance", calc=True))
     return cols
 
 
@@ -632,8 +673,10 @@ def _exec_result(rows):
         Card(f"Over {L('labour').lower()} budget", str(len(over)), "bad" if over else "good"),
         Card("Schedule slipped", str(len(slipped)), "bad" if slipped else "good"),
     ]
-    note = (f"Budget and {L('labour').lower()} are live actuals; schedule and procurement come "
-            f"from the PM entries. Ranked by {L('labour').lower()} % of budget (hours).")
+    note = (f"Budget and {L('labour').lower()} are live actuals. In Procurement, italicised "
+            "figures (Line Items, LLTP Del. Late) and the Non-Conformance figures are calculated "
+            "live from the system; the remaining schedule and procurement figures are PM entries. "
+            f"Ranked by {L('labour').lower()} % of budget (hours).")
     return QueryResult("exec", "Executive Dashboard", cols, rows, cards, note)
 
 

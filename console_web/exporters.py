@@ -183,8 +183,9 @@ def to_xlsx(result) -> bytes:
             else:
                 cell.value = _fmt(raw, col.type) if col.type not in ("text", "date") else (raw or "")
             cell.alignment = Alignment(horizontal=col.align)
-            if grouped:
-                cell.font = Font(name="Helvetica", size=9)
+            calc = getattr(col, "calc", False)      # calculated-live cells render italic
+            if grouped or calc:
+                cell.font = Font(name="Helvetica", size=9, italic=calc)
             tl = _tl_hex(col.type, raw)
             if tl:
                 cell.fill = PatternFill("solid", fgColor=tl)
