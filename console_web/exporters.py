@@ -24,9 +24,7 @@ def _fmt(value, ctype):
         if ctype == "num":
             f = float(value)
             return "{:,.0f}".format(f) if f == int(f) else "{:,.2f}".format(f)
-        if ctype == "money":
-            return "${:,.0f}".format(float(value))
-        if ctype == "money2":
+        if ctype == "money" or ctype == "money2":
             return "${:,.2f}".format(float(value))
         if ctype == "pct":
             return "{:.1f}%".format(float(value) * 100)
@@ -174,9 +172,9 @@ def to_xlsx(result) -> bytes:
             elif col.type == "id" and isinstance(raw, (int, float)):
                 cell.value = int(raw)
                 cell.number_format = "0"
-            elif col.type == "money" and isinstance(raw, (int, float)):
+            elif col.type in ("money", "money2") and isinstance(raw, (int, float)):
                 cell.value = raw
-                cell.number_format = '"$"#,##0'
+                cell.number_format = '"$"#,##0.00'
             elif col.type == "pct" and isinstance(raw, (int, float)):
                 cell.value = raw
                 cell.number_format = "0.0%"
@@ -194,7 +192,7 @@ def to_xlsx(result) -> bytes:
 
     for j, col in enumerate(cols, start=1):
         if grouped:
-            w = {"text": 22, "date": 12, "pct": 11, "money": 12, "int": 9, "days": 10}.get(col.type, 11)
+            w = {"text": 22, "date": 12, "pct": 11, "money": 14, "money2": 14, "int": 9, "days": 10}.get(col.type, 11)
         else:
             w = min(max(len(col.label) + 2, 12), 34)
         ws.column_dimensions[get_column_letter(j)].width = w
@@ -268,7 +266,7 @@ def to_pdf(result) -> bytes:
     # column widths
     avail = landscape(letter)[0] - inch
     if grouped:
-        wmap = {"text": 3.2, "date": 1.5, "pct": 1.3, "money": 1.5, "int": 1.0, "days": 1.1}
+        wmap = {"text": 3.2, "date": 1.5, "pct": 1.3, "money": 1.7, "money2": 1.7, "int": 1.0, "days": 1.1}
         weights = [wmap.get(c.type, 1.2) for c in cols]
     else:
         weights = [max(len(c.label), 6) for c in cols]

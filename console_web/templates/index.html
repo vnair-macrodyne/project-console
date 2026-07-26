@@ -408,8 +408,7 @@ async function runQuery(){
 function fmt(v,type){
   if(v===null||v===undefined||v==='') return '';
   if(type==='pct') return (v*100).toFixed(1)+'%';
-  if(type==='money') return '$'+Math.round(v).toLocaleString();
-  if(type==='money2') return '$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  if(type==='money'||type==='money2') return '$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
   if(type==='hours') return Math.round(v).toLocaleString();
   if(type==='num') return Number(v).toLocaleString(undefined,{maximumFractionDigits:2});
   if(type==='int') return Math.round(v).toLocaleString();

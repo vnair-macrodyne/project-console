@@ -1267,11 +1267,13 @@ def _nc_detail_result(rows):
     outstanding = sum(int(r.get("Outstanding") or 0) for r in rows)
     cards = [Card("NCRs", "{:,}".format(len(rows))),
              Card("Open", str(openn), "bad" if openn else "good"),
-             Card("Open actions", str(outstanding), "bad" if outstanding else "good"),
+             Card("Open action items", str(outstanding), "bad" if outstanding else "good"),
              Card("Cost of NC", _fmt_money2(ncspec.totals(rows)["Total"]))]
     return QueryResult("nc_detail", "Non-Conformance — Detail", cols, ordered, cards,
-                       "Not every NCR is linked to a purchase order. Open Actions = corrective "
-                       "actions still outstanding. " + _NC_COST_NOTE)
+                       "Not every NCR is linked to a purchase order. Open action items = "
+                       "outstanding corrective-action tasks across these NCRs — one NCR can have "
+                       "several, so this total is action items, not NCRs, and can exceed the NCR "
+                       "count. " + _NC_COST_NOTE)
 
 
 def _fmt_hours(v):
@@ -1843,7 +1845,7 @@ def _slip(planned, agreed):
 
 
 def _fmt_money(v):
-    return "${:,.0f}".format(v or 0)
+    return "${:,.2f}".format(v or 0)
 
 
 def make_service(demo=False) -> QueryService:
