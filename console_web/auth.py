@@ -56,15 +56,60 @@ def resolve_user():
     return user, (_role_for(user) or "viewer")
 
 
-def ldap_authenticate(username, password):
-    """Verify (username, password) by binding to AD. Returns (ok, username, display_name).
-    Demo: any non-empty password succeeds so the flow is exercisable without a DC."""
+def authenticate(username, password):
+    """Verify a domain user's (username, password). Returns (ok, username, display_name).
+    Method (env CONSOLE_AUTH): 'windows' (pywin32 LogonUser — no LDAP server/cert needed) or
+    'ldap' (ldap3 bind). Default: Windows when pywin32 is available, else LDAP.
+    Demo: any non-empty password succeeds so the flow works without a DC."""
     username = _norm(username)
     if not username or not password:
         return False, None, None
     if current_app.config.get("DEMO"):
         return True, username, _DEMO_USERS.get(username, {}).get("display", username)
+    method = (os.environ.get("CONSOLE_AUTH") or "").lower()
+    if method not in ("windows", "ldap"):
+        method = "windows" if _win_available() else "ldap"
+    if method == "windows":
+        return _win_authenticate(username, password)
+    return _ldap_authenticate(username, password)
 
+
+# back-compat alias
+ldap_authenticate = authenticate
+
+
+def _win_available():
+    try:
+        import win32security  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _win_authenticate(username, password):
+    """Validate the domain password via the Windows LogonUser API (pywin32). No LDAP server
+    or LDAPS certificate needed — the OS authenticates against AD. Needs CONSOLE_AD_DOMAIN
+    (UPN suffix, e.g. macrodynepress.com) so we log on as user@domain."""
+    from console.config import TENANT
+    import win32security
+    import win32con
+    domain = os.environ.get("CONSOLE_AD_DOMAIN") or getattr(TENANT, "ad_domain", None)
+    if domain and "@" not in username and "\\" not in username:
+        user_arg, dom_arg = f"{username}@{domain}", None          # UPN logon
+    else:
+        user_arg, dom_arg = username, (os.environ.get("CONSOLE_AD_NETBIOS") or None)
+    try:
+        handle = win32security.LogonUser(
+            user_arg, dom_arg, password,
+            win32con.LOGON32_LOGON_NETWORK, win32con.LOGON32_PROVIDER_DEFAULT)
+        handle.Close()
+        return True, username, username
+    except Exception:
+        return False, None, None
+
+
+def _ldap_authenticate(username, password):
+    """Verify (username, password) by binding to AD over LDAPS (ldap3)."""
     from console.config import TENANT
     server_host = os.environ.get("CONSOLE_LDAP_SERVER") or getattr(TENANT, "ldap_server", None)
     domain = os.environ.get("CONSOLE_AD_DOMAIN") or getattr(TENANT, "ad_domain", None)

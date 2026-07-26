@@ -82,9 +82,9 @@ def login_page():
         u = request.form.get("username", "")
         pw = request.form.get("password", "")
         try:
-            ok, user, display = auth.ldap_authenticate(u, pw)
+            ok, user, display = auth.authenticate(u, pw)
         except Exception as e:
-            app.logger.exception("ldap auth error")
+            app.logger.exception("auth error")
             ok, user, display, err = False, None, None, "Sign-in is not configured. Contact IT."
         if ok:
             session.clear()
