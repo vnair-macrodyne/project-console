@@ -264,8 +264,7 @@ class LiveQueryService(QueryService):
         bdao = BudgetDAO(self._console_conn())
         adao = DisciplineActualsDAO(self._eto_conn(), self._crosswalk())
         svc = ProjectFinancialsService(bdao, adao)
-        mats = {int(pid): _num(rec.get("MatActual"))
-                for pid, rec in self._overlay_map().items() if pid.isdigit()}
+        mats = self._material_actuals(project_ids)     # committed PO value, live from ETO
         pids = [int(p) for p in project_ids]
         return svc.for_projects(pids, material_actuals=mats)
 
@@ -469,12 +468,35 @@ class LiveQueryService(QueryService):
         return _live_nc_cost_rows(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
     def _material_actuals(self, project_ids):
-        """{pid: material_actual_$} from the manual overlay (for the impact %)."""
-        out = {}
-        for pid, rec in self._overlay_map().items():
-            if str(pid).isdigit():
-                out[int(pid)] = _num(rec.get("MatActual"))
-        return out
+        """{pid: committed material $ (CAD)} derived live from purchase orders.
+
+        Committed (ordered) = the value of every active PO line for the project, converted
+        to Canadian dollars at the rate stored on each PO (an invalid/zero rate is treated
+        as 1.0). Because it sums ALL orders — including the extra and rework POs raised off
+        late deliveries and non-conformances — it captures the true committed material
+        spend. Falls back to the manual PM entry only if the purchase data can't be read.
+        """
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return {}
+        ids = ",".join(str(p) for p in pids)
+        try:
+            df = self._df(
+                "SELECT pod.ProjectID AS ProjectID, "
+                "SUM(pod.ExtendedPrice * CASE WHEN poh.PurchaseCurrRate > 0 "
+                "     THEN poh.PurchaseCurrRate ELSE 1 END) AS Committed "
+                "FROM dbo.vwPurchaseOrderDetails pod "
+                "JOIN dbo.vwPurchaseOrderHeader poh "
+                "     ON poh.PurchaseOrderID = pod.PurchaseOrderID "
+                f"WHERE pod.ProjectID IN ({ids}) AND poh.PurchaseActive = 1 "
+                "GROUP BY pod.ProjectID")
+            return {int(r["ProjectID"]): round(float(r["Committed"] or 0), 2)
+                    for _, r in df.iterrows()}
+        except Exception:
+            keep = set(pids)
+            return {int(pid): _num(rec.get("MatActual"))
+                    for pid, rec in self._overlay_map().items()
+                    if str(pid).isdigit() and int(pid) in keep}
 
     def _nc_by_project(self, project_ids):
         """{pid: {'open': n, 'cost': $}} for the dashboard NC-actuals columns."""
@@ -517,13 +539,13 @@ def _scorecard_result(rows):
     cols = [
         QueryColumn("ProjectID", proj, "id", "left"),
         QueryColumn("LabourBudget", f"{labour} Budget (hrs)", "hours", "right"),
-        QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right"),
+        QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right", calc=True),
         QueryColumn("LabourPct", f"{labour} %", "pct", "right"),
         QueryColumn("MaterialBudget", f"{material} Budget", "money", "right"),
-        QueryColumn("MaterialActual", f"{material} Actual", "money", "right"),
+        QueryColumn("MaterialActual", f"{material} Actual", "money", "right", calc=True),
         QueryColumn("MaterialPct", f"{material} %", "pct", "right"),
-        QueryColumn("NCOpen", "Open NCRs", "int", "right"),
-        QueryColumn("NCCost", "Cost of NC", "money", "right"),
+        QueryColumn("NCOpen", "Open NCRs", "int", "right", calc=True),
+        QueryColumn("NCCost", "Cost of NC", "money", "right", calc=True),
         QueryColumn("PctDone", "% Done", "pct", "right"),
         QueryColumn("CustAgreedDate", "Cust Agreed Ship", "date", "left"),
         QueryColumn("RunoutLabour", f"{labour} Runout", "hours", "right"),
@@ -536,7 +558,10 @@ def _scorecard_result(rows):
         Card(f"Total {material.lower()} budget",
              _fmt_money(sum(r.get("MaterialBudget") or 0 for r in rows))),
     ]
-    return QueryResult("scorecard", f"{proj} {L('scorecard')}", cols, rows, cards)
+    note = (f"Italic figures are live actuals: {labour.lower()} from timecards, {material.lower()} "
+            f"is the committed (ordered) purchase value in Canadian dollars, and NCR figures from "
+            f"the costing data. Budgets and % Done are the PM plan.")
+    return QueryResult("scorecard", f"{proj} {L('scorecard')}", cols, rows, cards, note)
 
 
 def _discipline_result(rows):
@@ -545,7 +570,7 @@ def _discipline_result(rows):
         QueryColumn("ProjectID", proj, "id", "left"),
         QueryColumn("Discipline", disc, "text", "left"),
         QueryColumn("BudgetHours", "Budget (hrs)", "hours", "right"),
-        QueryColumn("ActualHours", "Actual (hrs)", "hours", "right"),
+        QueryColumn("ActualHours", "Actual (hrs)", "hours", "right", calc=True),
         QueryColumn("ConsumedPct", "Consumed %", "pct", "right"),
         QueryColumn("RemainingHours", "Remaining (hrs)", "hours", "right"),
     ]
@@ -562,16 +587,19 @@ def _budget_actual_result(rows):
     cols = [
         QueryColumn("ProjectID", proj, "id", "left"),
         QueryColumn("LabourBudget", f"{labour} Budget (hrs)", "hours", "right"),
-        QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right"),
+        QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right", calc=True),
         QueryColumn("LabourVar", f"{labour} Variance (hrs)", "hours", "right"),
         QueryColumn("LabourPct", f"{labour} %", "pct", "right"),
         QueryColumn("MaterialBudget", f"{material} Budget", "money", "right"),
-        QueryColumn("MaterialActual", f"{material} Actual", "money", "right"),
+        QueryColumn("MaterialActual", f"{material} Actual", "money", "right", calc=True),
         QueryColumn("MaterialVar", f"{material} Variance", "money", "right"),
         QueryColumn("MaterialPct", f"{material} %", "pct", "right"),
     ]
     cards = [Card(L("projects"), str(len(rows)))]
-    return QueryResult("budget_actual", "Budget vs Actual", cols, rows, cards)
+    note = (f"Italic Actual columns are live from ETO — {labour.lower()} hours from timecards and "
+            f"{material.lower()} as the committed (ordered) purchase value in Canadian dollars. "
+            "Budgets are the PM plan; variance = budget − actual.")
+    return QueryResult("budget_actual", "Budget vs Actual", cols, rows, cards, note)
 
 
 def _crosswalk_result(rows):
