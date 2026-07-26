@@ -115,7 +115,7 @@ def main():
         show(cur, "3. tblNonConformance headline counts",
              "SELECT COUNT(*) AS Total, "
              "SUM(CASE WHEN Resolved = 1 THEN 1 ELSE 0 END) AS Closed, "
-             "SUM(CASE WHEN Resolved = 0 THEN 1 ELSE 0 END) AS Open, "
+             "SUM(CASE WHEN Resolved = 0 THEN 1 ELSE 0 END) AS [Open], "
              "SUM(CASE WHEN PurchaseOrderID IS NOT NULL THEN 1 ELSE 0 END) AS WithPO, "
              "SUM(CASE WHEN CreationDate IS NULL THEN 1 ELSE 0 END) AS NullCreationDate, "
              "MIN(CreationDate) AS FirstCreated, MAX(CreationDate) AS LastCreated "
@@ -170,8 +170,8 @@ def main():
         # 7. Project-scoped sanity check on the canonical test project.
         show(cur, f"7. NCRs for the canonical test project {TEST_PROJECT}",
              "SELECT COUNT(*) AS Total, "
-             "SUM(CASE WHEN Resolved = 0 THEN 1 ELSE 0 END) AS Open, "
-             "SUM(CASE WHEN Resolved = 1 THEN 1 ELSE 0 END) AS Closed "
+             "SUM(CASE WHEN Resolved = 0 THEN 1 ELSE 0 END) AS [Open], "
+             "SUM(CASE WHEN Resolved = 1 THEN 1 ELSE 0 END) AS [Closed] "
              "FROM dbo.tblNonConformance WHERE ProjectID = ?", (TEST_PROJECT,))
 
         # 8. One sample open + one sample closed NCR (redact nothing; small, read-only).
