@@ -248,6 +248,11 @@ async function boot(){
   state.queries = await (await fetch('/api/queries')).json();
   renderNav();
   renderChips();
+  // Custom range: re-run when either date is picked (debounced). A missing bound is
+  // open-ended, so picking just one end is valid too.
+  el('dfrom').onchange = el('dto').onchange = () => {
+    if(state.datePreset === 'custom') scheduleRefresh();
+  };
 
   state.projects = await (await fetch('/api/projects')).json();
   state.selProjects = new Set(state.projects.map(p=>p.id));   // default: all projects
@@ -341,7 +346,11 @@ function renderChips(){
 }
 function setPreset(k){ state.datePreset=k; renderChips();
   el('daterow').style.display = k==='custom' ? 'flex' : 'none';
-  syncDateVisibility(); scheduleRefresh(); }
+  syncDateVisibility();
+  // For Custom, wait until a date is actually entered (the dfrom/dto handlers re-run);
+  // don't run with an empty range on the chip click.
+  if(k==='custom' && !el('dfrom').value && !el('dto').value) return;
+  scheduleRefresh(); }
 function syncDateVisibility(){
   const eto = isEtoReport(currentQuery());
   el('chips').parentElement.style.display = eto ? 'block' : 'none';
