@@ -128,44 +128,43 @@ def catalogue():
          "needs_projects": True},
         # ── Purchasing (the deployed PO reports) ───────────────────────────
         {"id": "po_status", "menu": "Purchasing", "label": "PO Status",
-         "desc": f"Open PO lines On Order / Overdue, grouped {proj.lower()} → machine, with an "
-                 "overdue-aging summary. Export includes the Contents & Summary sheet.",
+         "desc": f"Open purchase-order lines — On Order and Overdue — grouped by {proj.lower()} "
+                 "and machine, with an overdue-aging summary.",
          "needs_projects": True},
         {"id": "po_exceptions", "menu": "Purchasing", "label": "Procurement Exceptions",
-         "desc": "OPEN PO lines (receiver-log based) past their need-by, one sortable row per "
-                 "project-item, by buyer. Forward-looking / at-risk.",
+         "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
+                 "grouped by buyer. A forward-looking, at-risk view.",
          "needs_projects": True},
         {"id": "po_late", "menu": "Purchasing", "label": "Overdue POs",
-         "desc": "Open PO lines overdue against their need-by (revised, else required — ETO's "
-                 "lateness definition), by vendor. Days Late = today − need-by. Expediting view.",
+         "desc": "Open purchase-order lines whose need-by date has passed, grouped by vendor, "
+                 "with how many days late. The expediting view — what's still outstanding.",
          "needs_projects": True},
         {"id": "po_delivered", "menu": "Purchasing", "label": "Late Vendors",
-         "desc": "Delivered-late — received lines that arrived after need-by, by vendor (the "
-                 "vendor delivery scorecard, matching ETO's urpPurchasingLateVendors). Days Late "
-                 "= receipt − need-by. Date range = the PO-created window.",
+         "desc": "Vendor delivery scorecard — items that arrived after their need-by date, "
+                 "grouped by vendor, with how many days late. Choose the date range by when the "
+                 "orders were placed.",
          "needs_projects": True},
         # ── Non-Conformance ───────────────────────────────────────────────
         {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
          "desc": "NCR counts and cost by source (where detected), split open vs closed.",
          "needs_projects": True},
         {"id": "nc_costs", "menu": "Non-Conformance", "label": "Costing",
-         "desc": "Per-NCR cost of non-conformance — labour / purchased / inventory / extra / "
-                 "total, with source, root cause, discipline, department and supplier.",
+         "desc": "Cost of non-conformance for each NCR — labour, material and total — with its "
+                 "source, root cause, discipline, department and supplier.",
          "needs_projects": True},
         {"id": "nc_impact", "menu": "Non-Conformance", "label": "Project Impact",
          "desc": f"One row per {proj.lower()}: open/closed NCRs, cost of non-conformance, and "
                  f"NC cost as a % of {material.lower()} actual spend.",
          "needs_projects": True},
         {"id": "nc_cause", "menu": "Non-Conformance", "label": "By Root Cause",
-         "desc": "Cost grouped by origin / root cause — recurring, expensive failure modes "
-                 "(mirrors ETO's NonConformanceCostingCompared).",
+         "desc": "Cost grouped by root cause — the recurring, expensive types of fault.",
          "needs_projects": True},
         {"id": "nc_discipline", "menu": "Non-Conformance", "label": "By Discipline",
-         "desc": f"Cost attributed to {disc.lower()} (derived from the origin) and the ETO "
-                 "responsible department — apart from the supplier attribution.",
+         "desc": f"Cost attributed to a {disc.lower()} and to the responsible department — "
+                 "a separate view from the supplier breakdown.",
          "needs_projects": True},
         {"id": "nc_supplier", "menu": "Non-Conformance", "label": "By Supplier",
-         "desc": "Vendor attribution — NCR count and cost by supplier (PO-linked NCRs).",
+         "desc": "NCR count and cost broken down by supplier.",
          "needs_projects": True},
         {"id": "nc_detail", "menu": "Non-Conformance", "label": "Details",
          "desc": "Full NCR list — number, status, source, origin, discipline, part, supplier, "
@@ -633,8 +632,8 @@ def _exec_result(rows):
         Card(f"Over {L('labour').lower()} budget", str(len(over)), "bad" if over else "good"),
         Card("Schedule slipped", str(len(slipped)), "bad" if slipped else "good"),
     ]
-    note = (f"Budget & {L('labour')} blocks: ETO (live)  ·  Schedule & Procurement: "
-            f"manual overlay  ·  lead metric = {L('labour')} % (hrs)")
+    note = (f"Budget and {L('labour').lower()} are live actuals; schedule and procurement come "
+            f"from the PM entries. Ranked by {L('labour').lower()} % of budget (hours).")
     return QueryResult("exec", "Executive Dashboard", cols, rows, cards, note)
 
 
@@ -757,9 +756,8 @@ def _spec_labour_result(report_id, df, label):
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(meta["cols"])]
     rows = etospec.web_rows(meta["cols"], grouped)
     cards = _spec_labour_cards(meta["cols"], grouped)
-    note = (f"{meta['title']} — {label}. Applied-rate cost = Hours × HourRate × HourFactor; "
-            "OT Hours = HourFactor > 1. Labour Category = Hour Description; Job Detail = the "
-            "timecard note (TimecardCustom1). Cumulative to the end date.")
+    note = (f"{meta['title']} — {label}. Labour cost includes overtime and uses the rate on "
+            "each timecard. Figures run from project start through the end date.")
     export = {"kind": "labour", "report_id": report_id, "rows": grouped, "label": label}
     return QueryResult(report_id, f"{L('labour')} — {meta['label']}", qcols, rows, cards, note, export)
 
@@ -777,9 +775,9 @@ def _spec_po_status_result(pdf, label):
     cards = [Card("Open lines", "{:,}".format(open_lines)),
              Card("Overdue lines", "{:,}".format(ov_lines), "bad" if ov_lines else "good"),
              Card("Overdue value", _fmt_money2(ov_val), "bad" if ov_val else "good")]
-    note = ("PO Status — On Order, Overdue. Open = Received < Qty; Overdue = revised/required "
-            "date is past. Grouped by project → machine, with an overdue-aging summary; the "
-            "Excel export adds the Contents & Summary landing sheet.")
+    note = ("Open purchase-order lines — On Order and Overdue. Overdue means the need-by date "
+            "has passed. Grouped by project and machine, with an overdue-aging summary; the "
+            "Excel export adds a contents and summary sheet.")
     return QueryResult("po_status", "Purchasing — PO Status", qcols, rows, cards, note,
                        {"kind": "po_status", "df": pdf, "label": label})
 
@@ -793,12 +791,9 @@ def _spec_po_exc_result(items, label, enriched=True):
     val = 0.0 if not n else float(items["ExtValue"].sum())
     cards = [Card("Exception items", "{:,}".format(n), "bad" if n else "good"),
              Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
-    note = ("Procurement Exceptions by Buyer — OPEN PO lines (open = Received < PurchaseQty) past "
-            "their need-by (Del Late; need-by = revised, else required — ETO's own definition), "
-            "one sortable row per project-item. LLT / Oversize are maintained ETO flags "
-            "(tblEngItemMaster PartCustom7/8). (Ord Late / Critical were dropped — they derived "
-            "from EstimatedLeadTime, which isn't maintained.)"
-            + ("" if enriched else " Item-master unavailable this run, so LLT / Oversize are blank."))
+    note = ("Open purchase-order lines that are past their need-by date, one row per item, "
+            "grouped by buyer. LLT and Oversize are flags maintained on the item."
+            + ("" if enriched else " Item details weren't available this run, so LLT / Oversize are blank."))
     return QueryResult("po_exceptions", "Purchasing — Procurement Exceptions", qcols, rows, cards, note,
                        {"kind": "exceptions", "items": items, "label": label})
 
@@ -818,11 +813,9 @@ def _spec_late_result(df, label):
              Card("Vendors", "{:,}".format(vendors)),
              Card("Worst (days)", "{:,}".format(worst), "bad" if worst else "good"),
              Card("Overdue value", _fmt_money2(val), "bad" if val else "good")]
-    note = ("Overdue POs — OPEN PO lines (Received < PurchaseQty) whose need-by (revised, else "
-            "required — ETO's own lateness definition, per urpPurchasingLateVendors) is already "
-            "past, grouped by vendor. Days Late = today − need-by. The expediting view (what's "
-            "still outstanding and late). The historical 'delivered-late' scorecard is the "
-            "separate Late Vendors report.")
+    note = ("Open purchase-order lines whose need-by date has already passed, grouped by vendor. "
+            "Days Late = today minus the need-by date. This is the expediting view — what's still "
+            "outstanding and late. For items that were delivered late, see the Late Vendors report.")
     return QueryResult("po_late", "Purchasing — Overdue POs", qcols, rows, cards, note,
                        {"kind": "late", "df": df, "label": label})
 
@@ -847,11 +840,10 @@ def _spec_delivered_result(df, label):
              Card("Vendors", "{:,}".format(vendors)),
              Card("Worst (days)", "{:,}".format(worst), "bad" if worst else "good"),
              Card("Late value", _fmt_money2(val), "bad" if val else "good")]
-    note = ("Late Vendors (delivered-late) — RECEIVED lines whose actual receipt date is later "
-            "than need-by (revised, else required), grouped by vendor. Days Late = receipt − "
-            "need-by; base value = qty × price × PurchaseCurrRate. Same logic as ETO's "
-            "urpPurchasingLateVendors, scoped to the selected projects and the PO-created window. "
-            "Receipt date comes from the receiver log (vwReceiverLogSummed).")
+    note = ("Vendor delivery scorecard — items received after their need-by date, grouped by "
+            "vendor. Days Late = the receipt date minus the need-by date; value is shown in "
+            "Canadian dollars. Covers the selected projects and the date range you chose (by "
+            "when the orders were placed).")
     return QueryResult("po_delivered", "Purchasing — Late Vendors", qcols, rows, cards, note,
                        {"kind": "delivered", "df": df, "label": label})
 
@@ -864,12 +856,11 @@ def _spec_delivered_result(df, label):
 # attributed to NCs); cost is purchased material + inventory + extra/payables.
 
 _NC_COST_NOTE = (
-    "Cost of non-conformance from ETO's costing rollup (vwCostingSummed_ByNC): "
-    "Total = Labour + Purchased + Inventory + Extra. Labour books $0 — Macrodyne "
-    "attributes no rework time to NCRs — so cost is remedy material (purchased) + "
-    "inventory + payables. Discipline is derived from the origin (Hydraulic / Mechanical "
-    "/ Electrical; else Other); Department is ETO's maintained responsible dept. "
-    "Live from ETO, read-only.")
+    "Cost of non-conformance is the total cost tied to each NCR — labour, plus material "
+    "(purchased and from stock), plus other costs. Labour currently shows $0 because rework "
+    "time isn't recorded against NCRs today, so the figure reflects replacement material and "
+    "related purchases. Discipline is inferred from the type of fault; Department is the "
+    "responsible area recorded against it.")
 
 
 def _live_nc_cost_rows(cur, pids, dfrom, dto):
@@ -922,12 +913,12 @@ def _nc_costs_result(rows):
         QueryColumn("Source", "Source", "text", "left"),
         QueryColumn("Origin", "Origin / Root Cause", "text", "left", wrap=True),
         QueryColumn("Discipline", "Discipline", "text", "left"),
-        QueryColumn("Department", "Dept (ETO)", "text", "left"),
+        QueryColumn("Department", "Department", "text", "left"),
         QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
         QueryColumn("Labour", "Labour $", "money", "right"),
         QueryColumn("Purchased", "Purchased $", "money", "right"),
-        QueryColumn("Inventory", "Inventory $", "money", "right"),
-        QueryColumn("Extra", "Extra $", "money", "right"),
+        QueryColumn("Inventory", "Stock $", "money", "right"),
+        QueryColumn("Extra", "Other $", "money", "right"),
         QueryColumn("Total", "Total $", "money", "right"),
     ]
     return QueryResult("nc_costs", "Non-Conformance — Costing", cols, ordered, _nc_cards(rows),
@@ -977,8 +968,8 @@ def _nc_discipline_result(rows):
     ]
     return QueryResult("nc_discipline", "Non-Conformance — By Discipline / Department", cols, out,
                        _nc_cards(rows),
-                       "Cost attributed to a derived discipline (from the origin text) and to "
-                       "ETO's maintained responsible department. " + _NC_COST_NOTE)
+                       "Cost attributed to a discipline (inferred from the type of fault) and "
+                       "to the responsible department. " + _NC_COST_NOTE)
 
 
 def _nc_supplier_result(rows):
@@ -1021,7 +1012,7 @@ def _nc_detail_result(rows):
         QueryColumn("Source", "Source", "text", "left"),
         QueryColumn("Origin", "Origin", "text", "left", wrap=True),
         QueryColumn("Discipline", "Discipline", "text", "left"),
-        QueryColumn("Department", "Dept (ETO)", "text", "left"),
+        QueryColumn("Department", "Department", "text", "left"),
         QueryColumn("Part", "Part", "text", "left"),
         QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
         QueryColumn("PO", "PO", "id", "left"),
@@ -1039,8 +1030,8 @@ def _nc_detail_result(rows):
              Card("Open actions", str(outstanding), "bad" if outstanding else "good"),
              Card("Cost of NC", _fmt_money2(ncspec.totals(rows)["Total"]))]
     return QueryResult("nc_detail", "Non-Conformance — Detail", cols, ordered, cards,
-                       "PO link is ~70% null (LEFT JOIN). Open Actions = outstanding corrective "
-                       "actions (vwNonConformanceList). " + _NC_COST_NOTE)
+                       "Not every NCR is linked to a purchase order. Open Actions = corrective "
+                       "actions still outstanding. " + _NC_COST_NOTE)
 
 
 def _fmt_hours(v):
