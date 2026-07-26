@@ -1,13 +1,24 @@
 """
 auth.py — AD login-form identity + basic RBAC for the Project Console.
 
-No IIS. Identity is established by an **LDAP bind against Active Directory**: the user
-enters their existing domain username + password on /login, we bind to a DC over LDAPS
-with those creds (no service account, no separate password store), and on success store
-the username in the Flask session. Every later request reads the session.
-  Config (env or tenant): CONSOLE_LDAP_SERVER (e.g. ldaps://dc01.macrodynepress.com),
-  CONSOLE_AD_DOMAIN (UPN suffix, e.g. macrodynepress.com), CONSOLE_LDAP_SSL (default 1),
-  CONSOLE_LDAP_TLS_VALIDATE (0 = accept the DC's self-signed cert; set 1 + a CA in prod).
+No IIS. Identity is established against **Active Directory** with the user's own
+domain username + password entered on /login (no service account, no separate
+password store); on success the username is stored in the Flask session and every
+later request reads the session. Three backends, none of which need a DC certificate
+except LDAPS/SIMPLE:
+  • windows  — Windows LogonUser (pywin32). The OS validates the password against AD.
+               No LDAP server or cert. Default on Windows. Needs CONSOLE_AD_DOMAIN.
+  • ldap+ntlm — ldap3 NTLM bind as NETBIOS\\user over port 389. Challenge/response,
+               so the password never crosses the wire in cleartext, and NO cert is
+               needed. The go-to when LDAPS isn't set up. Default LDAP style.
+  • ldap+simple — ldap3 SIMPLE bind as user@domain over LDAPS (636). Needs a valid
+               LDAPS cert on the DC; use only when that exists.
+  Backend: CONSOLE_AUTH = windows | ldap (auto: windows if pywin32 present, else ldap).
+  LDAP style: CONSOLE_LDAP_METHOD = ntlm | simple (auto: simple if SSL, else ntlm).
+  Config (env or tenant): CONSOLE_LDAP_SERVER (host or ldap[s]://host),
+  CONSOLE_AD_DOMAIN (UPN suffix, e.g. macrodynepress.com), CONSOLE_AD_NETBIOS
+  (short domain for NTLM; defaults to the first label of the UPN suffix),
+  CONSOLE_LDAP_SSL (default 0 → 389/NTLM, no cert), CONSOLE_LDAP_TLS_VALIDATE.
 In --demo there is no DC: any non-empty password logs in, the username maps to a role,
 and '?as=viewer|pm|admin' still impersonates a role for testing the gates.
 
@@ -109,21 +120,50 @@ def _win_authenticate(username, password):
 
 
 def _ldap_authenticate(username, password):
-    """Verify (username, password) by binding to AD over LDAPS (ldap3)."""
+    """Verify (username, password) by binding to Active Directory with ldap3.
+
+    Two bind styles, chosen by CONSOLE_LDAP_METHOD (or auto):
+      • ntlm   — NTLM bind as NETBIOS\\user over port 389 (no SSL). NTLM is
+                 challenge/response so the password never crosses the wire in
+                 cleartext, and it needs NO certificate on the DC. This is the
+                 default and the one to use when LDAPS isn't set up.
+      • simple — SIMPLE bind as user@domain over LDAPS (636). Requires the DC to
+                 present a valid LDAPS certificate; use only when that's in place.
+    Auto: 'simple' if the server is ldaps:// or CONSOLE_LDAP_SSL=1, else 'ntlm'.
+    Env: CONSOLE_LDAP_SERVER (host or ldap[s]://host), CONSOLE_AD_DOMAIN (UPN
+    suffix), CONSOLE_AD_NETBIOS (short domain for NTLM; falls back to the first
+    label of the UPN suffix, upper-cased), CONSOLE_LDAP_TLS_VALIDATE (SSL only)."""
     from console.config import TENANT
     server_host = os.environ.get("CONSOLE_LDAP_SERVER") or getattr(TENANT, "ldap_server", None)
     domain = os.environ.get("CONSOLE_AD_DOMAIN") or getattr(TENANT, "ad_domain", None)
     if not server_host or not domain:
         raise RuntimeError("LDAP not configured — set CONSOLE_LDAP_SERVER and CONSOLE_AD_DOMAIN")
-    use_ssl = os.environ.get("CONSOLE_LDAP_SSL", "1") != "0"
-    validate = os.environ.get("CONSOLE_LDAP_TLS_VALIDATE", "0") == "1"
+
+    host_l = server_host.lower()
+    # explicit scheme in the host wins; else honour CONSOLE_LDAP_SSL (default off → no cert needed)
+    if host_l.startswith("ldaps://"):
+        use_ssl = True
+    elif host_l.startswith("ldap://"):
+        use_ssl = os.environ.get("CONSOLE_LDAP_SSL") == "1"
+    else:
+        use_ssl = os.environ.get("CONSOLE_LDAP_SSL", "0") == "1"
+    method = (os.environ.get("CONSOLE_LDAP_METHOD") or "").lower()
+    if method not in ("ntlm", "simple"):
+        method = "simple" if use_ssl else "ntlm"
 
     import ssl as _ssl
-    from ldap3 import Server, Connection, Tls, ALL
+    from ldap3 import Server, Connection, Tls, ALL, NTLM, SIMPLE
+    validate = os.environ.get("CONSOLE_LDAP_TLS_VALIDATE", "0") == "1"
     tls = Tls(validate=_ssl.CERT_REQUIRED if validate else _ssl.CERT_NONE) if use_ssl else None
     server = Server(server_host, use_ssl=use_ssl, tls=tls, get_info=ALL)
-    upn = f"{username}@{domain}"          # AD accepts UPN bind
-    conn = Connection(server, user=upn, password=password, authentication="SIMPLE")
+
+    if method == "ntlm":
+        netbios = (os.environ.get("CONSOLE_AD_NETBIOS") or domain.split(".")[0]).upper()
+        conn = Connection(server, user=f"{netbios}\\{username}", password=password,
+                          authentication=NTLM)
+    else:
+        conn = Connection(server, user=f"{username}@{domain}", password=password,
+                          authentication=SIMPLE)
     if not conn.bind():
         return False, None, None
     display = username
