@@ -298,6 +298,7 @@ class LiveQueryService(QueryService):
         meta = self._project_meta(project_ids)
         nc = self._nc_by_project(project_ids)
         proc = self._procurement_actuals(project_ids)
+        tw = self._two_week_actuals(project_ids)
         rows = []
         for pid in fin:
             f = fin[pid]
@@ -305,6 +306,7 @@ class LiveQueryService(QueryService):
             g = nc.get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rec.update(proc.get(pid, {}))          # calculated Line Items / LLTP Del. Late
+            rec.update(tw.get(pid, {}))            # calculated 2-week labour hrs / material $
             name, client = meta.get(pid, (None, None))
             disc_pct = {d.discipline: d.consumed_pct for d in (f.disciplines if f else [])}
             rows.append(_exec_row(pid, name, client, f, rec, disc_pct))
@@ -343,6 +345,45 @@ class LiveQueryService(QueryService):
                         pid = int(float(pv))
                         d = out.setdefault(pid, {})
                         d["LLTPDelLate"] = d.get("LLTPDelLate", 0) + 1
+        except Exception:
+            pass
+        return out
+
+    def _two_week_actuals(self, project_ids, days=14):
+        """{pid: {'LabHrs2wk': hours, 'MatSpend2wk': $CAD}} over the trailing window, live.
+
+        Labour hours from timecards; material = committed PO value (CAD) for POs placed in
+        the window. The % Done 2-week delta stays a PM entry — % done isn't recorded in ETO.
+        """
+        import datetime as _dt
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return {}
+        ids = ",".join(str(p) for p in pids)
+        today = _dt.date.today()
+        start = today - _dt.timedelta(days=days - 1)
+        out = {}
+        try:  # labour hours in the window
+            df = self._df(
+                "SELECT ProjectID, SUM(HourTime) AS Hrs FROM dbo.vwTimecards "
+                f"WHERE ProjectID IN ({ids}) AND TimeDate >= '{start}' AND TimeDate <= '{today}' "
+                "GROUP BY ProjectID")
+            for _, r in df.iterrows():
+                out.setdefault(int(r["ProjectID"]), {})["LabHrs2wk"] = round(float(r["Hrs"] or 0), 1)
+        except Exception:
+            pass
+        try:  # material committed (POs placed) in the window, CAD
+            rate = "CASE WHEN poh.PurchaseCurrRate > 0 THEN poh.PurchaseCurrRate ELSE 1 END"
+            df = self._df(
+                "SELECT pod.ProjectID AS ProjectID, "
+                f"SUM(pod.ExtendedPrice * {rate}) AS Spend "
+                "FROM dbo.vwPurchaseOrderDetails pod "
+                "JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID "
+                f"WHERE pod.ProjectID IN ({ids}) AND poh.PurchaseActive = 1 "
+                f"AND poh.PurchaseDate >= '{start}' AND poh.PurchaseDate <= '{today}' "
+                "GROUP BY pod.ProjectID")
+            for _, r in df.iterrows():
+                out.setdefault(int(r["ProjectID"]), {})["MatSpend2wk"] = round(float(r["Spend"] or 0), 2)
         except Exception:
             pass
         return out
@@ -673,8 +714,8 @@ def _exec_columns():
         QueryColumn("RunoutMaterial", f"Run-out {material}", "pct", "right", "Budget"),
         # 2-Week Delta
         QueryColumn("PctDoneDelta", "Δ % Done", "pct", "right", "2-Week Delta"),
-        QueryColumn("LabHrs2wk", f"Δ {labour} Hrs", "hours", "right", "2-Week Delta"),
-        QueryColumn("MatSpend2wk", f"Δ {material} $", "money", "right", "2-Week Delta"),
+        QueryColumn("LabHrs2wk", f"Δ {labour} Hrs", "hours", "right", "2-Week Delta", calc=True),
+        QueryColumn("MatSpend2wk", f"Δ {material} $", "money", "right", "2-Week Delta", calc=True),
     ]
     # Labour by discipline (block band reads as the labour word, per the workbook)
     for d in _EXEC_DISC_ORDER:
@@ -701,10 +742,12 @@ def _exec_result(rows):
         Card(f"Over {L('labour').lower()} budget", str(len(over)), "bad" if over else "good"),
         Card("Schedule slipped", str(len(slipped)), "bad" if slipped else "good"),
     ]
-    note = (f"Budget and {L('labour').lower()} are live actuals. In Procurement, italicised "
-            "figures (Line Items, LLTP Del. Late) and the Non-Conformance figures are calculated "
-            "live from the system; the remaining schedule and procurement figures are PM entries. "
-            f"Ranked by {L('labour').lower()} % of budget (hours).")
+    note = (f"Italicised figures are calculated live from the system: {L('labour').lower()} & "
+            f"{L('material').lower()} %, the 2-week {L('labour').lower()}-hours and "
+            f"{L('material').lower()}-$ deltas, Line Items, LLTP Del. Late, and the "
+            "Non-Conformance figures. Schedule, % Done (incl. its 2-week delta), run-outs and the "
+            f"remaining procurement counts are PM entries. Ranked by {L('labour').lower()} % of "
+            "budget (hours).")
     return QueryResult("exec", "Executive Dashboard", cols, rows, cards, note)
 
 

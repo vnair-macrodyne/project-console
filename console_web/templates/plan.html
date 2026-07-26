@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Console — Project Plan</title>
+<style>
+  :root{--brand:#1F3864;--brand-2:#2f4f8f;--ink:#1a1f2b;--muted:#6b7280;--line:#e3e7ee;
+        --panel:#f7f9fc;--entry:#FFF7DB;--good:#137333;--good-bg:#e6f4ea;--bad:#b3261e;--bad-bg:#fce8e6;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:#eef1f6}
+  header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:14px}
+  header .logo{width:34px;height:34px;border-radius:8px;background:#33518c;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  header h1{font-size:16px;margin:0;font-weight:700}
+  header .co{color:#c7d4ee;font-size:13px}
+  header a.back{margin-left:auto;color:#fff;text-decoration:none;font-size:13px;border:1px solid #4a67a0;padding:6px 12px;border-radius:8px}
+  header a.back:hover{background:#33518c}
+  .wrap{padding:18px 22px;max-width:920px;margin:0 auto}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  .card h2{font-size:14px;margin:0 0 12px;color:var(--brand)}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end}
+  .fld{display:flex;flex-direction:column;gap:4px}
+  .fld label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .fld input,.fld select{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;min-width:150px}
+  .fld input[type=number]{text-align:right}
+  input.entry{background:var(--entry)}
+  .pill{font-size:11px;padding:2px 8px;border-radius:20px;background:#eef3ff;color:var(--brand);font-weight:600}
+  .suffix{display:flex;align-items:center;gap:6px}
+  .suffix .u{font-size:12px;color:var(--muted)}
+  .actions{display:flex;gap:12px;align-items:center;margin-top:6px}
+  button.save{background:var(--brand);color:#fff;border:0;border-radius:9px;padding:11px 20px;font-size:14px;font-weight:600;cursor:pointer}
+  button.save:hover{background:var(--brand-2)}
+  button.save:disabled{opacity:.5;cursor:default}
+  .msg{font-size:13px;padding:8px 12px;border-radius:8px;display:none}
+  .msg.ok{background:var(--good-bg);color:var(--good);display:block}
+  .msg.err{background:var(--bad-bg);color:var(--bad);display:block}
+  .hint{font-size:12px;color:var(--muted);margin:2px 0 0}
+  .demo{background:#ffce44;color:#3a2f00;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
+  .note{background:#eef3ff;border:1px solid #d5e0f6;border-radius:9px;padding:10px 12px;font-size:12.5px;color:#33415c;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" id="logo">PC</div>
+  <h1 id="product">Project Console</h1>
+  <span class="co" id="company"></span>
+  <span class="demo" id="demoBadge" style="display:none">DEMO DATA</span>
+  <a class="back" href="/">← Dashboard</a>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Project Plan — Schedule &amp; Progress</h2>
+    <p class="hint">Enter this week's schedule for a project. Saving records it against the
+      current week; the dashboard's Schedule, % Done and run-out cells read the latest week.</p>
+    <div class="row" style="margin-top:10px">
+      <div class="fld"><label>Project</label><select id="proj"></select></div>
+      <div class="fld"><label>Entered by</label><input id="by" class="entry" placeholder="Your name / initials"></div>
+      <span class="pill" id="status"></span>
+    </div>
+  </div>
+
+  <div id="form" style="display:none">
+    <div class="card">
+      <h2>This Week</h2>
+      <div class="row">
+        <div class="fld"><label>Planned Ship Date</label><input type="date" id="planned_ship" class="entry"></div>
+        <div class="fld"><label>% Done</label>
+          <div class="suffix"><input type="number" step="1" min="0" max="100" id="percent_done" class="entry" style="width:110px"><span class="u">%</span></div>
+        </div>
+        <div class="fld"><label>Labour Run-out (% of budget)</label>
+          <div class="suffix"><input type="number" step="1" min="0" id="labour_runout" class="entry" style="width:110px"><span class="u">%</span></div>
+        </div>
+        <div class="fld"><label>Material Run-out (% of budget)</label>
+          <div class="suffix"><input type="number" step="1" min="0" id="material_runout" class="entry" style="width:110px"><span class="u">%</span></div>
+        </div>
+      </div>
+      <div class="note">Run-out is a forecast of where the project lands at completion, as a % of
+        budget (e.g. 125 = trending 25% over). It's a PM judgement for now; an objective run-out
+        and % Done will follow from the activity allocation model.</div>
+    </div>
+
+    <div class="card">
+      <div class="actions">
+        <button class="save" id="saveBtn">Save this week</button>
+        <div class="msg" id="msg"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const el=id=>document.getElementById(id);
+const state={};
+
+async function boot(){
+  try{ state.me=await (await fetch('/api/me'+location.search)).json(); }catch(e){ state.me={}; }
+  const role=(state.me&&state.me.role)||'viewer';
+  if(state.me&&state.me.user){ el('company').insertAdjacentHTML('afterend',
+    `<span style="color:#c7d4ee;font-size:13px;margin-left:8px">${state.me.user} · ${role} · <a href="/logout" style="color:#fff;text-decoration:underline">Sign out</a></span>`);
+    el('by').value=state.me.user; }
+  state.readonly = ({viewer:1,pm:2,admin:3}[role]||1) < 2;
+  try{ const b=await (await fetch('/api/branding')).json();
+    el('product').textContent=b.product||'Project Console'; el('company').textContent=b.company||'';
+    el('logo').textContent=(b.product||'PC').slice(0,2).toUpperCase();
+    if(b.demo) el('demoBadge').style.display='inline-block'; }catch(e){}
+  await loadProjects();
+  if(state.readonly){
+    el('by').closest('.card').insertAdjacentHTML('beforeend',
+      '<p class="hint" style="color:#b3261e;margin-top:10px">You have view-only access — the plan can be viewed but not saved. Ask an admin for PM access.</p>');
+    el('saveBtn').disabled=true; el('by').disabled=true;
+  }
+}
+
+async function loadProjects(sel){
+  const p=await (await fetch('/api/plan/projects')).json();
+  const planned=new Set(p.planned||[]);
+  const opt=el('proj'); opt.innerHTML='<option value="">— select a project —</option>';
+  const g1=document.createElement('optgroup'); g1.label='Projects';
+  (p.budgeted||[]).forEach(x=>{
+    const tag=planned.has(x.id)?'  ✓':'';
+    g1.appendChild(new Option(`${x.id}  ${x.name||''}${tag}`.trim(), x.id));
+  });
+  const g2=document.createElement('optgroup'); g2.label='Other projects';
+  (p.available||[]).forEach(x=>g2.appendChild(new Option(`${x.id}  ${x.name||''}`.trim(), x.id)));
+  if(g1.children.length) opt.appendChild(g1);
+  if(g2.children.length) opt.appendChild(g2);
+  if(sel){ opt.value=String(sel); }
+}
+
+el('proj').onchange=async()=>{
+  const pid=el('proj').value; hideMsg();
+  if(!pid){ el('form').style.display='none'; el('status').textContent=''; return; }
+  const b=await (await fetch('/api/plan/'+pid)).json();
+  el('status').textContent=b.exists?'Updating this week':'New — first entry for this project';
+  el('planned_ship').value=b.planned_ship||'';
+  el('percent_done').value=(b.percent_done!=null?b.percent_done:'');
+  el('labour_runout').value=(b.labour_runout!=null?b.labour_runout:'');
+  el('material_runout').value=(b.material_runout!=null?b.material_runout:'');
+  el('form').style.display='block';
+};
+
+el('saveBtn').onclick=async()=>{
+  const pid=el('proj').value; if(!pid) return;
+  const by=el('by').value.trim();
+  if(!by){ showMsg('err','Enter your name in “Entered by” before saving.'); return; }
+  const val=id=>{ const v=el(id).value; return v!==''?parseFloat(v):null; };
+  const payload={ project_id:Number(pid), entered_by:by,
+    planned_ship:el('planned_ship').value||null,
+    percent_done:val('percent_done'), labour_runout:val('labour_runout'),
+    material_runout:val('material_runout') };
+  el('saveBtn').disabled=true; showMsg('', 'Saving…');
+  try{
+    const r=await fetch('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json();
+    if(!r.ok){ showMsg('err', d.error||'Save failed'); }
+    else{ showMsg('ok', `Saved — project ${d.project_id}, week ${d.week}.`); await loadProjects(pid); }
+  }catch(e){ showMsg('err', String(e)); }
+  el('saveBtn').disabled=false;
+};
+
+function showMsg(cls,txt){ const m=el('msg'); m.className='msg '+(cls||''); m.textContent=txt; m.style.display='block'; }
+function hideMsg(){ const m=el('msg'); m.style.display='none'; }
+boot();
+</script>
+</body>
+</html>

@@ -27,6 +27,7 @@ import os
 from console_web.queries import make_service, catalogue, branding
 from console_web import exporters, auth
 from console_web.pm import make_pm_service
+from console_web.plan import make_plan_service
 
 app = Flask(__name__)
 app.config["DEMO"] = False
@@ -186,6 +187,60 @@ def api_pm_save_budget():
         return jsonify(_pm_call(lambda s: s.save_budget(payload)))
     except Exception as e:
         app.logger.exception("pm save_budget failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── PM controls: author/edit a project's plan (schedule & progress) ───────────
+@app.route("/plan")
+def plan_page():
+    return render_template("plan.html")
+
+
+def _plan_service():
+    return make_plan_service(demo=app.config["DEMO"])
+
+
+def _plan_call(fn):
+    svc = _plan_service()
+    try:
+        return fn(svc)
+    finally:
+        close = getattr(svc, "close", None)
+        if close:
+            close()
+
+
+@app.route("/api/plan/projects")
+def api_plan_projects():
+    try:
+        return jsonify(_plan_call(lambda s: s.list_projects()))
+    except Exception as e:
+        app.logger.exception("plan projects failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/plan/<int:pid>")
+def api_plan_get(pid):
+    try:
+        return jsonify(_plan_call(lambda s: s.get_plan(pid)))
+    except Exception as e:
+        app.logger.exception("plan get failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/plan", methods=["POST"])
+def api_plan_save():
+    denied = auth.gate("pm")           # only PM / Admin may write the plan
+    if denied:
+        return denied
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("project_id"):
+        return jsonify({"error": "project_id is required"}), 400
+    payload.setdefault("entered_by", g.get("user"))
+    try:
+        return jsonify(_plan_call(lambda s: s.save_plan(payload)))
+    except Exception as e:
+        app.logger.exception("plan save failed")
         return jsonify({"error": str(e)}), 500
 
 

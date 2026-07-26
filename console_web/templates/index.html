@@ -286,6 +286,9 @@ function renderNav(){
   if((rank[role]||1)>=2){
     const pm=document.createElement('a'); pm.className='navtop pmlink'; pm.href='/pm';
     pm.textContent='PM Budgets'; pm.title='Bring a project in / edit budgets'; nav.appendChild(pm);
+    const pl=document.createElement('a'); pl.className='navtop pmlink'; pl.href='/plan';
+    pl.style.marginLeft='8px'; pl.textContent='Project Plan';
+    pl.title='Enter schedule & progress (% done, ship date, run-outs)'; nav.appendChild(pl);
   }
   if((rank[role]||1)>=3){
     const ad=document.createElement('a'); ad.className='navtop pmlink'; ad.href='/admin';
