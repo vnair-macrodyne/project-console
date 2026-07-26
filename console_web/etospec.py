@@ -401,11 +401,23 @@ AGE_BUCKETS = [("<=30 days", 0, 30), ("31-90 days", 31, 90),
                ("91-365 days", 91, 365), (">365 days (stale)", 366, 10 ** 9)]
 
 
-def query_po_status_open(project_ids=None):
+def _po_date_window(date_from=None, date_to=None):
+    """Optional filter on the PO-placed date (poh.PurchaseDate). A missing bound = open-ended,
+    so 'From Project Start' (date_from=None) keeps the lower side open, like the labour reports."""
+    parts = []
+    if date_from:
+        parts.append(f"CAST(poh.PurchaseDate AS date) >= '{date_from}'")
+    if date_to:
+        parts.append(f"CAST(poh.PurchaseDate AS date) <= '{date_to}'")
+    return (" AND " + " AND ".join(parts)) if parts else ""
+
+
+def query_po_status_open(project_ids=None, date_from=None, date_to=None):
     proj = ""
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
         proj = f" AND pod.ProjectID IN ({ids})"
+    dt = _po_date_window(date_from, date_to)
     return f"""
     SELECT
         pod.ProjectID                 AS ProjectID,
@@ -416,6 +428,8 @@ def query_po_status_open(project_ids=None):
         pod.ItemDescription           AS Description,
         poh.PurchaseOrderID           AS PO,
         poh.CName                     AS Supplier,
+        COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName,
+                 CAST(poh.BuyerID AS varchar(20)))  AS Buyer,
         p.PStatus                     AS ProjStatus,
         pod.PurchaseQty               AS Qty,
         pod.Received                  AS Received,
@@ -427,8 +441,9 @@ def query_po_status_open(project_ids=None):
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
     LEFT JOIN tblProjects p     ON p.ProjectID  = pod.ProjectID
     LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
+    LEFT JOIN tblEmployee bu    ON bu.EmployeeID = poh.BuyerID
     WHERE poh.PurchaseActive = 1
-      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}
+      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}{dt}
     ORDER BY pod.ProjectID, pod.SpecID, poh.PurchaseOrderID, pod.ItemID
     """
 
@@ -568,7 +583,7 @@ _LLT_FLAG_COL = "PartCustom7"; _OVERSIZE_FLAG_COL = "PartCustom8"; _ENG_RELEASE_
 _LLT_CRITICAL_DAYS = 90
 
 
-def query_po_exceptions(include_leadtime=True, project_ids=None):
+def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None, date_to=None):
     buyer_sel = "COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, CAST(poh.BuyerID AS varchar(20)))"
     buyer_join = "LEFT JOIN tblEmployee bu ON bu.EmployeeID = poh.BuyerID"
     lead_sel = "eim.EstimatedLeadTime" if include_leadtime else "CAST(NULL AS int)"
@@ -605,7 +620,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None):
     {buyer_join}
     {lead_join}
     WHERE poh.PurchaseActive = 1
-      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}
+      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}{_po_date_window(date_from, date_to)}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
     """
 
@@ -763,11 +778,14 @@ def query_late_vendors(project_ids=None, date_from=None, date_to=None):
         ids = ",".join(str(int(p)) for p in project_ids)
         proj = f" AND pod.ProjectID IN ({ids})"
     need_by = "ISNULL(pod.DateRevised, pod.DateRequired)"
+    dt = _po_date_window(date_from, date_to)
     return f"""
     SELECT
         poh.CName                        AS Supplier,
         pod.ProjectID                    AS ProjectID,
         poh.PurchaseOrderID              AS PO,
+        COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName,
+                 CAST(poh.BuyerID AS varchar(20)))       AS Buyer,
         pod.ItemID                       AS Item,
         pod.ItemDescription              AS Description,
         pod.PurchaseQty                  AS Qty,
@@ -781,10 +799,44 @@ def query_late_vendors(project_ids=None, date_from=None, date_to=None):
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
+    LEFT JOIN tblEmployee bu ON bu.EmployeeID = poh.BuyerID
     WHERE poh.PurchaseActive = 1
       AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty)
-      AND {need_by} < CAST(GETDATE() AS date){proj}
+      AND {need_by} < CAST(GETDATE() AS date){proj}{dt}
     ORDER BY poh.CName, DaysLate DESC
+    """
+
+
+def query_po_by_buyer(project_ids=None, date_from=None, date_to=None):
+    """Per-buyer purchasing rollup over active PO lines (scoped by project + PO-placed window):
+    POs, lines, committed value (CAD), and the open / overdue subset. The buyer-centric view."""
+    proj = ""
+    if project_ids:
+        ids = ",".join(str(int(p)) for p in project_ids)
+        proj = f" AND pod.ProjectID IN ({ids})"
+    dt = _po_date_window(date_from, date_to)
+    buyer = ("COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, "
+             "CAST(poh.BuyerID AS varchar(20)))")
+    rate = "CASE WHEN poh.PurchaseCurrRate > 0 THEN poh.PurchaseCurrRate ELSE 1 END"
+    open_ = "(pod.Received IS NULL OR pod.Received < pod.PurchaseQty)"
+    needby = "ISNULL(pod.DateRevised, pod.DateRequired)"
+    overdue = f"({open_} AND {needby} < CAST(GETDATE() AS date))"
+    return f"""
+    SELECT
+        {buyer}                                             AS Buyer,
+        COUNT(DISTINCT poh.PurchaseOrderID)                 AS POs,
+        COUNT(*)                                            AS Lines,
+        CAST(SUM(pod.ExtendedPrice * {rate}) AS decimal(20,2)) AS ExtValue,
+        SUM(CASE WHEN {open_} THEN 1 ELSE 0 END)            AS OpenLines,
+        SUM(CASE WHEN {overdue} THEN 1 ELSE 0 END)          AS OverdueLines,
+        CAST(SUM(CASE WHEN {overdue} THEN pod.ExtendedPrice * {rate} ELSE 0 END)
+             AS decimal(20,2))                              AS OverdueValue
+    FROM vwPurchaseOrderHeader poh
+    JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
+    LEFT JOIN tblEmployee bu ON bu.EmployeeID = poh.BuyerID
+    WHERE poh.PurchaseActive = 1{proj}{dt}
+    GROUP BY {buyer}
+    ORDER BY OverdueValue DESC, ExtValue DESC
     """
 
 

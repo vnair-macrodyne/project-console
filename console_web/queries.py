@@ -71,13 +71,13 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
-              "po_status", "po_exceptions", "po_late", "po_delivered",
+              "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail"}
 
 # reports that read ETO live and honour the optional date range / view
 ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
-                  "po_status", "po_exceptions", "po_late", "po_delivered",
+                  "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
                   "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
                   "nc_supplier", "nc_detail"}
 
@@ -144,6 +144,11 @@ def catalogue():
          "desc": "Vendor delivery scorecard — items that arrived after their need-by date, "
                  "grouped by vendor, with how many days late. Choose the date range by when the "
                  "orders were placed.",
+         "needs_projects": True},
+        {"id": "po_buyer", "menu": "Purchasing", "label": "By Buyer",
+         "desc": "Purchasing workload by buyer — purchase orders, lines and committed value, "
+                 "with the open and overdue portion for each buyer. Scoped to orders placed in "
+                 "the selected date range.",
          "needs_projects": True},
         # ── Non-Conformance ───────────────────────────────────────────────
         {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
@@ -455,29 +460,39 @@ class LiveQueryService(QueryService):
     def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else None
-        raw = self._df(etospec.query_po_status_open(pids))
+        dfrom, dto = _as_date(date_from), _as_date(date_to)
+        raw = self._df(etospec.query_po_status_open(pids, dfrom, dto))
         as_of = _dt.date.today()
         pdf = etospec.po_prep(raw, today=as_of)
-        return _spec_po_status_result(pdf, f"As at {as_of:%b %d, %Y}")
+        return _spec_po_status_result(pdf, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}")
 
     def _q_po_exceptions(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else None
+        dfrom, dto = _as_date(date_from), _as_date(date_to)
         enriched = True
         try:
-            raw = self._df(etospec.query_po_exceptions(True, pids))
+            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto))
         except Exception:
             enriched = False
-            raw = self._df(etospec.query_po_exceptions(False, pids))
+            raw = self._df(etospec.query_po_exceptions(False, pids, dfrom, dto))
         as_of = _dt.date.today()
         items = etospec.exc_aggregate(etospec.exc_classify(raw, today=as_of))
-        return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}", enriched)
+        return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}", enriched)
 
     def _q_po_late(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else None
-        df = self._df(etospec.query_late_vendors(pids))
-        return _spec_late_result(df, f"As at {_dt.date.today():%b %d, %Y}")
+        dfrom, dto = _as_date(date_from), _as_date(date_to)
+        df = self._df(etospec.query_late_vendors(pids, dfrom, dto))
+        return _spec_late_result(df, f"As at {_dt.date.today():%b %d, %Y}{_po_window_label(dfrom, dto)}")
+
+    def _q_po_buyer(self, project_ids, date_from=None, date_to=None, **kw):
+        pids = [int(p) for p in project_ids] if project_ids else None
+        dfrom, dto = _as_date(date_from), _as_date(date_to)
+        df = self._df(etospec.query_po_by_buyer(pids, dfrom, dto))
+        rows = [] if df is None or df.empty else df.to_dict("records")
+        return _po_buyer_result(rows, _po_window_label(dfrom, dto))
 
     def _q_po_delivered(self, project_ids, date_from=None, date_to=None, **kw):
         pids = [int(p) for p in project_ids] if project_ids else None
@@ -962,6 +977,50 @@ def _spec_delivered_result(df, label):
                        {"kind": "delivered", "df": df, "label": label})
 
 
+# ---- Purchasing — By Buyer -----------------------------------------------
+def _po_window_label(dfrom, dto):
+    """Subtitle fragment naming the PO-placed window (blank when unbounded)."""
+    if not dfrom and not dto:
+        return ""
+    lo = dfrom.strftime("%b %d, %Y") if dfrom else "project start"
+    hi = dto.strftime("%b %d, %Y") if dto else "today"
+    return f"  ·  orders placed {lo} – {hi}"
+
+
+def _po_buyer_result(rows, window_label=""):
+    out = []
+    for r in rows:
+        out.append({
+            "Buyer": r.get("Buyer") or "(unassigned)",
+            "POs": _int(r.get("POs")),
+            "Lines": _int(r.get("Lines")),
+            "ExtValue": _num(r.get("ExtValue")),
+            "OpenLines": _int(r.get("OpenLines")),
+            "OverdueLines": _int(r.get("OverdueLines")),
+            "OverdueValue": _num(r.get("OverdueValue")),
+        })
+    out.sort(key=lambda d: (-(d["OverdueValue"] or 0), -(d["ExtValue"] or 0)))
+    cols = [
+        QueryColumn("Buyer", "Buyer", "text", "left", wrap=True),
+        QueryColumn("POs", "POs", "int", "right"),
+        QueryColumn("Lines", "Lines", "int", "right"),
+        QueryColumn("ExtValue", "Committed $", "money", "right"),
+        QueryColumn("OpenLines", "Open Lines", "int", "right"),
+        QueryColumn("OverdueLines", "Overdue Lines", "int", "right"),
+        QueryColumn("OverdueValue", "Overdue $", "money", "right"),
+    ]
+    committed = sum(x["ExtValue"] or 0 for x in out)
+    od_val = sum(x["OverdueValue"] or 0 for x in out)
+    od_lines = sum(x["OverdueLines"] or 0 for x in out)
+    cards = [Card("Buyers", str(len(out))),
+             Card("Committed", _fmt_money2(committed)),
+             Card("Overdue lines", "{:,}".format(od_lines), "bad" if od_lines else "good"),
+             Card("Overdue value", _fmt_money2(od_val), "bad" if od_val else "good")]
+    note = ("Purchasing workload by buyer — purchase orders, lines and committed value (CAD), "
+            "with the open and overdue portion for each buyer." + (window_label or ""))
+    return QueryResult("po_buyer", "Purchasing — By Buyer", cols, out, cards, note)
+
+
 # ---- Non-Conformance (costed + attributed) -------------------------------
 # One scoped source feeds every NC report: vwNonConformances LEFT JOIN
 # vwCostingSummed_ByNC (+ origin department) — a transcription of ETO's
@@ -1356,6 +1415,24 @@ class DemoQueryService(QueryService):
 
     def _nc_mat_actuals(self, project_ids):
         return {pid: _DEMO[pid]["ma"] for pid in self._sel(project_ids)}
+
+    def _q_po_buyer(self, project_ids, date_from=None, date_to=None, **kw):
+        sel = set(self._sel(project_ids))
+        agg = {}
+        for r in _DEMO_EXC:
+            if r["ProjectID"] not in sel:
+                continue
+            b = agg.setdefault(r["Buyer"], {"Buyer": r["Buyer"], "POs": 0, "Lines": 0,
+                               "ExtValue": 0.0, "OpenLines": 0, "OverdueLines": 0,
+                               "OverdueValue": 0.0})
+            b["POs"] += 1
+            b["Lines"] += 1
+            b["ExtValue"] += r["ExtValue"]
+            b["OpenLines"] += 1
+            if r.get("DelLate") == "LATE":
+                b["OverdueLines"] += 1
+                b["OverdueValue"] += r["ExtValue"]
+        return _po_buyer_result(list(agg.values()), " (demo)")
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids))

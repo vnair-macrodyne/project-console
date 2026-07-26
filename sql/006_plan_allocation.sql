@@ -19,6 +19,19 @@
   PercentComplete (manual for now) and the hooks (Discipline, SpecID, AllocatedHours)
   to compute the objective figure later.
 
+  ACTIVITY GRAIN — decided 2026-07-26 from probes:
+    * The ETO "activity list" a PM picks from is the SPEC list (dbo.tblSpec): every project
+      has specs, and both labour hours (vwTimecards) and PO material attach to ProjectID+SpecID,
+      so objective % is computable at spec grain. SpecID below is that ETO anchor.
+    * ETO's process schedule was evaluated as the finer/task source and REJECTED for planning:
+      it is a shop-floor parts/fabrication tracker (hours = 0, no durations, Sequence always 1,
+      required dates blank), populated for only some projects. Useful later as a physical
+      parts-completion signal, but it carries no plan (duration/priority/dependency).
+    * Therefore sub-spec "units of work" (with duration/priority/dependencies) are
+      CONSOLE-AUTHORED here (ActivityName + Priority + DependsOn + PlannedStart/Finish);
+      ETO provides no such structure. A spec-only allocation (ActivityName = the spec name)
+      is the simplest valid form.
+
   Idempotent. Run against the Console store (Macrodyne_Reporting), NOT ETO.
   ETO stays vendor-owned and read-only.
 ==============================================================================*/
@@ -27,9 +40,9 @@ IF OBJECT_ID('Reporting.tblProjectPlanAllocation', 'U') IS NULL
 CREATE TABLE Reporting.tblProjectPlanAllocation (
     AllocationID     INT IDENTITY(1,1) PRIMARY KEY,
     ProjectID        INT            NOT NULL,
-    ActivityName     NVARCHAR(200)  NOT NULL,
+    SpecID           FLOAT          NULL,   -- ETO anchor: the spec picked from tblSpec (objective % ties here)
+    ActivityName     NVARCHAR(200)  NOT NULL,  -- spec name (spec-only), or a console-authored sub-unit under the spec
     Discipline       NVARCHAR(40)   NULL,   -- one of the 6 disciplines (ties to the crosswalk)
-    SpecID           FLOAT          NULL,   -- optional ETO spec/machine link (for objective %)
     AllocatedHours   DECIMAL(12,2)  NULL,   -- budgeted hours allocated to this activity
     Priority         INT            NULL,   -- lower = higher priority (PM's ordering)
     DependsOn        NVARCHAR(400)  NULL,   -- predecessor AllocationIDs, comma-separated (simple for now)
