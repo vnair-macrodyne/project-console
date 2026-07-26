@@ -10,11 +10,29 @@ Run on the domain-joined box (same folder as the suite):
 Copy the WHOLE output back and the NCR views can be locked to real columns + real
 definitions in one pass instead of one 42S22 error at a time.
 
-Uses the suite's proven read-only ETO connector (console_engine._connect).
+Uses the suite's proven read-only ETO connector (console_store.eto_connection) —
+the same one console_diag_eto_views.py / console_diag_po_late.py use, which falls
+back to console_config.TENANT + ETO_USER/ETO_PWD when the eto_reports/eto_config
+modules aren't present in this repo.
 Every block is wrapped so one failure (missing column/object) never aborts the run —
 a failed block prints its error and the probe keeps going.
 """
-from console_engine import _connect
+
+
+def connect():
+    """Read-only ETO connection — identical idiom to the other diag probes."""
+    try:
+        from console_store import eto_connection
+        return eto_connection()
+    except Exception:
+        import os
+        import pyodbc
+        from console_config import TENANT
+        cs = (f"Driver={{ODBC Driver 17 for SQL Server}};Server={TENANT.eto_server};"
+              f"Database={TENANT.eto_database};")
+        cs += ("Trusted_Connection=yes;" if TENANT.use_windows_auth
+               else f"UID={os.environ.get('ETO_USER')};PWD={os.environ.get('ETO_PWD')};")
+        return pyodbc.connect(cs)
 
 # Canonical test project reused across the suite (Reg/OT + PO discovery used it too).
 TEST_PROJECT = 230219
@@ -65,7 +83,7 @@ def dump_columns(cur, obj):
 
 
 def main():
-    conn = _connect()
+    conn = connect()
     cur = conn.cursor()
     try:
         # 1. Which NCR-related objects even exist (tables, views, procs, functions)?
