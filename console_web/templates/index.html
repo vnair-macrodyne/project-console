@@ -17,6 +17,7 @@
   header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:14px}
   header .logo{width:28px;height:28px;border-radius:7px;background:rgba(255,255,255,.18);
     display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+  header .logoimg{height:42px;width:auto;border-radius:6px;display:block}
   header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
   header .co{opacity:.8;font-size:12.5px;margin-left:2px}
   header .badge{margin-left:auto;background:#ffd25e;color:#5c4300;font-weight:700;font-size:11px;
@@ -157,6 +158,7 @@
 <body>
 <header>
   <div class="logo" id="logo">PC</div>
+  <img class="logoimg" id="logoImg" alt="" style="display:none">
   <h1 id="product">Project Console</h1>
   <span class="co" id="company"></span>
   <span class="badge" id="envBadge" style="display:none;background:#8a5a00">STAGING</span>
@@ -240,6 +242,13 @@ async function boot(){
   el('product').textContent = b.product;
   el('company').textContent = b.company;
   el('logo').textContent = (b.product||'PC').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+  if(b.logo){
+    const _img = el('logoImg');
+    _img.alt = b.company || b.product || 'logo';
+    _img.onload  = ()=>{ _img.style.display='block'; el('logo').style.display='none'; el('company').style.display='none'; };
+    _img.onerror = ()=>{ _img.style.display='none';  el('logo').style.display='';     el('company').style.display=''; };
+    _img.src = b.logo;
+  }
   if(b.color){ document.documentElement.style.setProperty('--brand', '#'+(''+b.color).replace('#','')); }
   if(b.demo) el('demoBadge').style.display = 'inline-block';
   state.lexicon = b.lexicon || {};

@@ -35,6 +35,8 @@ class TenantProfile:
     environment: str = "prod"                 # prod | staging (set from $CONSOLE_ENV)
     company_name: str = "Macrodyne Technologies Inc."
     header_color: str = "1F3864"
+    logo_path: str = ""                        # optional header logo URL (served from /static);
+                                               # blank → the product-initials tile is shown instead
     confidential_footer: str = "CONFIDENTIAL — Internal Use Only"
 
     # ── ETO (vendor) source — READ ONLY ────────────────────────────────────

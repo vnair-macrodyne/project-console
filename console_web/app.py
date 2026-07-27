@@ -95,6 +95,7 @@ def login_page():
         err = err or "Invalid username or password."
     return render_template("login.html", error=err, product=TENANT.product_name,
                            company=TENANT.company_name,
+                           logo=getattr(TENANT, "logo_path", ""),
                            environment=getattr(TENANT, "environment", "prod"), next=nxt)
 
 

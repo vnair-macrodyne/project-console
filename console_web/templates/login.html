@@ -14,6 +14,7 @@
     width:360px;padding:28px 30px}
   .brand{display:flex;align-items:center;gap:11px;margin-bottom:4px}
   .logo{width:38px;height:38px;border-radius:9px;background:var(--brand);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .brand img.logoimg{height:48px;width:auto;border-radius:9px;display:block}
   .brand h1{font-size:17px;margin:0}
   .co{color:var(--muted);font-size:12.5px;margin:2px 0 18px}
   .env{display:inline-block;background:#8a5a00;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:6px}
@@ -30,10 +31,10 @@
   <form class="box" method="post" action="{{ url_for('login_page') }}">
     <input type="hidden" name="next" value="{{ next }}">
     <div class="brand">
-      <div class="logo">{{ product[:2]|upper }}</div>
+      {% if logo %}<img class="logoimg" src="{{ logo }}" alt="{{ company }}">{% else %}<div class="logo">{{ product[:2]|upper }}</div>{% endif %}
       <h1>{{ product }}{% if environment == 'staging' %}<span class="env">STAGING</span>{% endif %}</h1>
     </div>
-    <div class="co">{{ company }}</div>
+    {% if not logo %}<div class="co">{{ company }}</div>{% endif %}
     <label for="u">Domain username</label>
     <input id="u" name="username" autocomplete="username" autofocus placeholder="e.g. jsmith">
     <label for="p">Password</label>

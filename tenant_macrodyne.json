@@ -3,6 +3,7 @@
   "tenant_id": "macrodyne",
   "company_name": "Macrodyne Technologies Inc.",
   "header_color": "1F3864",
+  "logo_path": "/static/Macrodyne_Logo.jpg",
   "eto_server": "MACRO-ETO-SVR\\SQLEXPRESS",
   "eto_database": "Macrodyne_Production",
   "reporting_server": "MACRO-ETO-SVR\\SQLEXPRESS",
