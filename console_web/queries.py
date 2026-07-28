@@ -1859,3 +1859,49 @@ def branding():
             "fiscal_year_start_month": getattr(TENANT, "fiscal_year_start_month", 1),
             "pay_period_anchor": getattr(TENANT, "pay_period_anchor", None),
             "pay_period_days": getattr(TENANT, "pay_period_days", 14)}
+
+
+def data_watermark():
+    """Cheap "has the dashboard data moved?" probe for the warm cache (cache.py).
+
+    Combines the two ETO driver tables' max identity keys (insert-sensitive — a new
+    timecard or PO line advances them) with the Console store's max edit timestamps.
+    Every term is an indexed/scalar MAX, so the whole probe is a couple of fast
+    round-trips regardless of table size. The return is opaque: identical string
+    across two calls == nothing the dashboard depends on has changed, so the cache
+    can skip the expensive recompute. Read-only against ETO like everything else.
+
+    (In-place store edits that don't advance a max are still caught two other ways:
+    the PM budget / plan save handlers call cache.mark_dirty(), and the cache forces
+    a full rebuild at least every MAX_AGE seconds.)
+    """
+    parts = []
+    try:
+        from console.infra.connections import eto_connection
+        c = eto_connection()
+        try:
+            cur = c.cursor()
+            cur.execute("SELECT (SELECT MAX(TimeID) FROM dbo.tblTimecards), "
+                        "(SELECT MAX(PurchaseDetailID) FROM dbo.tblPurchaseOrderDetails)")
+            r = cur.fetchone()
+            parts.append("eto:%s/%s" % (r[0], r[1]))
+        finally:
+            c.close()
+    except Exception:
+        parts.append("eto:?")
+    try:
+        from console.infra.connections import console_connection
+        c = console_connection()
+        try:
+            cur = c.cursor()
+            cur.execute(
+                "SELECT (SELECT MAX(CapturedAt) FROM Reporting.tblProjectPMEntry), "
+                "(SELECT MAX(CreatedAt) FROM Reporting.tblProjectBudget), "
+                "(SELECT MAX(UpdatedAt) FROM Reporting.tlkpDisciplineCrosswalk)")
+            r = cur.fetchone()
+            parts.append("store:%s/%s/%s" % (r[0], r[1], r[2]))
+        finally:
+            c.close()
+    except Exception:
+        parts.append("store:?")
+    return "|".join(parts)

@@ -195,6 +195,7 @@
     <div class="err" id="err"></div>
     <div class="toolbar">
       <h2 id="rtitle">Project Console</h2>
+      <span id="asof" style="display:none;margin-left:10px;font-size:12px;color:#6b7280;font-weight:500;white-space:nowrap"></span>
       <div class="sp"></div>
       <button class="exp" id="expx" disabled>
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13l3 3m0-3l-3 3" stroke-linecap="round"/></svg>
@@ -222,6 +223,7 @@ const state = { queries:[], projects:[], selQuery:null, selProjects:new Set(),
                result:null, sort:{key:null,dir:1}, cfg:{}, datePreset:'start',
                page:1, pageSize:250, me:null };
 let refreshTimer=null;
+let dashTimer=null, asofTick=null;   // dashboard auto-refresh poll + "ago" ticker
 
 function el(id){ return document.getElementById(id); }
 function j(url,opts){ return fetch(url,opts).then(r=>r.json().then(d=>({ok:r.ok,d}))); }
@@ -399,18 +401,61 @@ function payload(){
 }
 function scheduleRefresh(){ clearTimeout(refreshTimer); refreshTimer=setTimeout(()=>{ if(state.selQuery) runQuery(); }, 450); }
 
-async function runQuery(){
+async function runQuery(silent){
   const q=currentQuery(); if(!q) return;
-  syncDateVisibility(); el('dsub').textContent = isEtoReport(q) ? dateLabel() : '';
+  if(!silent){ syncDateVisibility(); el('dsub').textContent = isEtoReport(q) ? dateLabel() : ''; }
   if(q.needs_projects && state.selProjects.size===0){
-    el('tscroll').innerHTML='<div class="empty"><div class="big">Select projects</div>Pick one or more projects on the left.</div>';
-    el('rtitle').textContent=q.label; el('cards').innerHTML=''; el('rnote').textContent=''; return;
+    stopDashPoll(); updateAsOf();
+    if(!silent){
+      el('tscroll').innerHTML='<div class="empty"><div class="big">Select projects</div>Pick one or more projects on the left.</div>';
+      el('rtitle').textContent=q.label; el('cards').innerHTML=''; el('rnote').textContent='';
+    }
+    return;
   }
-  hideErr();
-  el('tscroll').innerHTML='<div class="empty"><div class="big"><span class="spin"></span> Running…</div></div>';
+  if(!silent){
+    hideErr();
+    el('tscroll').innerHTML='<div class="empty"><div class="big"><span class="spin"></span> Running…</div></div>';
+  }
   const {ok,d} = await j('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});
-  if(!ok){ showErr(d.error||'Query failed'); el('tscroll').innerHTML='<div class="empty">Query failed.</div>'; return; }
-  state.result=d; state.sort={key:null,dir:1}; state.page=1; renderResult();
+  if(!ok){
+    if(!silent){ showErr(d.error||'Query failed'); el('tscroll').innerHTML='<div class="empty">Query failed.</div>'; }
+    return;   // a failed silent poll leaves the current view untouched
+  }
+  // A silent auto-refresh whose data hasn't changed: don't disturb the view
+  // (keep the user's sort, page and scroll) — just refresh the "ago" label.
+  if(silent && state.result && d.as_of && state.result.as_of && d.as_of===state.result.as_of){
+    updateAsOf(); return;
+  }
+  state.result=d;
+  if(!silent){ state.sort={key:null,dir:1}; state.page=1; }
+  renderResult();
+  updateAsOf();
+  if(!silent) armDashPoll();
+}
+
+// ── Dashboard live refresh: poll the warm cache every 30s while a dashboard is open ──
+function isDashboard(){ const q=currentQuery(); return !!(q && q.menu==='Dashboards'); }
+function armDashPoll(){
+  stopDashPoll();
+  if(isDashboard() && state.result){
+    dashTimer=setInterval(()=>{ isDashboard() ? runQuery(true) : stopDashPoll(); }, 30000);
+  }
+}
+function stopDashPoll(){ if(dashTimer){ clearInterval(dashTimer); dashTimer=null; } }
+function agoLabel(s){
+  const t=new Date(String(s).replace(' ','T'));
+  let d=Math.max(0,Math.round((Date.now()-t.getTime())/1000));
+  if(d<60) return d+'s ago'; d=Math.round(d/60);
+  if(d<60) return d+'m ago'; d=Math.round(d/60); return d+'h ago';
+}
+function updateAsOf(){
+  const a=el('asof'); if(!a) return;
+  if(isDashboard() && state.result && state.result.as_of){
+    const draw=()=>{ a.style.display=''; a.textContent='Updated '+agoLabel(state.result.as_of); };
+    draw(); clearInterval(asofTick); asofTick=setInterval(draw,15000);
+  } else {
+    a.style.display='none'; if(asofTick){ clearInterval(asofTick); asofTick=null; }
+  }
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────

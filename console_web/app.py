@@ -24,8 +24,8 @@ from flask import (Flask, jsonify, request, send_file, render_template, g,
 import io
 import os
 
-from console_web.queries import make_service, catalogue, branding
-from console_web import exporters, auth
+from console_web.queries import make_service, catalogue, branding, data_watermark
+from console_web import exporters, auth, cache as cache_mod
 from console_web.pm import make_pm_service
 from console_web.plan import make_plan_service
 
@@ -54,6 +54,64 @@ def _run_from_payload(payload):
         close = getattr(svc, "close", None)
         if close:
             close()
+
+
+# ── Dashboard warm cache ──────────────────────────────────────────────────────
+# The Executive board / scorecard re-ran the heavy live ETO aggregations on every
+# open. cache_mod keeps their computed payloads warm in memory and refreshes them
+# in the background only when the underlying data actually moves, so requests serve
+# instantly. See console_web/cache.py for the full design.
+def _warm_dashboard(watermark):
+    """Recompute the hot dashboard payloads under `watermark`. Runs in the cache's
+    background thread with its own short-lived service (fresh crosswalk/overlay)."""
+    keys = cache_mod.cache.hot_keys()
+    svc = make_service(demo=False)
+    try:
+        if not keys:
+            # nothing observed yet — prime the default board (all active projects),
+            # which is exactly what the UI requests on load (it pre-selects all).
+            ids = [p["id"] for p in svc.list_projects()]
+            keys = [cache_mod.cache.key(qid, ids) for qid in cache_mod.HOT_QUERIES]
+            for k in keys:
+                cache_mod.cache.remember(k)
+        for query_id, pids in keys:
+            res = svc.run(query_id, list(pids))
+            cache_mod.cache.put(cache_mod.cache.key(query_id, pids), res.to_dict(), watermark)
+    finally:
+        close = getattr(svc, "close", None)
+        if close:
+            close()
+
+
+def _ensure_cache():
+    if not app.config["DEMO"]:
+        cache_mod.cache.start(_warm_dashboard, data_watermark)
+
+
+def _serve_dashboard(payload):
+    """Serve a Dashboard query from the warm cache; compute+cache live on a miss."""
+    _ensure_cache()
+    query_id = payload.get("query_id")
+    ids = payload.get("project_ids") or []
+    if not ids:
+        # nothing selected -> run live (empty board); don't cache an empty scope
+        return jsonify(_run_from_payload(payload).to_dict())
+    key = cache_mod.cache.key(query_id, ids)
+    wm = cache_mod.cache.current_watermark()
+    entry = cache_mod.cache.get(key)
+    if entry and wm is not None and entry["watermark"] == wm:
+        out = dict(entry["result"])
+        out["as_of"] = entry["as_of"]
+        out["cached"] = True
+        return jsonify(out)
+    # miss or stale: compute once, cache it, register the scope as hot
+    result = _run_from_payload(payload).to_dict()
+    as_of = cache_mod.cache.put(key, result, wm)
+    cache_mod.cache.remember(key)
+    out = dict(result)
+    out["as_of"] = as_of
+    out["cached"] = False
+    return jsonify(out)
 
 
 # ── Auth: AD login form → session identity; unauth pages go to /login ─────────
@@ -185,7 +243,9 @@ def api_pm_save_budget():
         return jsonify({"error": "project_id is required"}), 400
     payload.setdefault("entered_by", g.get("user"))   # stamp the signed-in user
     try:
-        return jsonify(_pm_call(lambda s: s.save_budget(payload)))
+        out = _pm_call(lambda s: s.save_budget(payload))
+        cache_mod.cache.mark_dirty()   # a budget change -> refresh the dashboard now
+        return jsonify(out)
     except Exception as e:
         app.logger.exception("pm save_budget failed")
         return jsonify({"error": str(e)}), 500
@@ -239,7 +299,9 @@ def api_plan_save():
         return jsonify({"error": "project_id is required"}), 400
     payload.setdefault("entered_by", g.get("user"))
     try:
-        return jsonify(_plan_call(lambda s: s.save_plan(payload)))
+        out = _plan_call(lambda s: s.save_plan(payload))
+        cache_mod.cache.mark_dirty()   # a plan change -> refresh the dashboard now
+        return jsonify(out)
     except Exception as e:
         app.logger.exception("plan save failed")
         return jsonify({"error": str(e)}), 500
@@ -320,8 +382,13 @@ def api_projects():
 
 @app.route("/api/query", methods=["POST"])
 def api_query():
+    payload = request.get_json(silent=True) or {}
     try:
-        result = _run_from_payload(request.get_json(silent=True))
+        # Dashboard queries (exec/scorecard) go through the warm cache; everything
+        # else runs live per request as before.
+        if (not app.config["DEMO"]) and payload.get("query_id") in cache_mod.HOT_QUERIES:
+            return _serve_dashboard(payload)
+        result = _run_from_payload(payload)
         return jsonify(result.to_dict())
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -365,6 +432,17 @@ def main():
     if args.demo:
         print("Project Console web — DEMO mode (no database)")
     app.run(host=args.host, port=args.port, debug=args.debug)
+
+
+if __name__ != "__main__":
+    # Served under waitress/gunicorn (imported as a module, not run directly) — warm
+    # the dashboard cache eagerly at boot so the first viewer after a restart gets an
+    # instant board. The `python -m console_web.app --demo` path takes the __main__
+    # branch below instead, so demo mode never starts a live cache thread.
+    try:
+        _ensure_cache()
+    except Exception:
+        app.logger.exception("dashboard cache failed to start at boot")
 
 
 if __name__ == "__main__":
