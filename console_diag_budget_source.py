@@ -1,48 +1,27 @@
 """
-console_diag_budget_source.py — read-only DISCOVERY to pin the ETO BUDGET source
-before we switch the dashboard's budget denominators from the manual store to ETO.
+console_diag_budget_source.py (v2) — confirm tblSpecHours as the ETO BUDGET-HOURS
+source and reconcile the 6-discipline crosswalk before we wire budgets from ETO.
 
-Decision it unblocks (owner, 2026-07-27): pull budgets from ETO, 6-discipline HOURS
-via the existing Asset Re-Code crosswalk. The one unknown is the exact ETO view/table
-that holds ESTIMATE HOURS by HourType (the discovery log flagged
-`vwSpecLaborEstimateByHourType` / `tblSpecHours` as candidates — "confirm at build").
-This script confirms it against live data. Nothing is written — pure SELECT.
+v1 found the source: dbo.tblSpecHours (ProjectID, SpecID, HourDescription, Hours,
+HourType, ChangeOrderID, ...). The estimate-hours column is `Hours` (v1 guessed
+`BudgetHours` and errored). This version:
+  1. Sums tblSpecHours.Hours for the project — all rows, and split by change-order,
+     so we can see how COs affect the total.
+  2. Rolls Hours up to the 6 disciplines via the store crosswalk (HourDescription).
+  3. Reconciles that total against ETO's 3-bucket estimate (vwProjectActualsVSEstimates
+     = 8,523 for 230219) and the current manual store budget (8,429).
+  4. Reconciles the $ side: labour budget $ and material budget $ from ETO.
 
-What it prints:
-  1. Existence + full column list of every candidate est-hours-by-HourType object,
-     plus a DB-wide search for any column that looks like estimate/budget HOURS.
-  2. For the best candidate, a sample for the validation project, crosswalked to the
-     6 Project Console disciplines (using the SAME store crosswalk as the actuals),
-     so we see the 6-discipline budget-hours vector the dashboard would use.
-  3. Reconciliation: that vector's TOTAL vs ETO's 3-bucket estimate hours
-     (EstAdminHours+EstEngHours+EstMfgHours on vwProjectActualsVSEstimates) — they
-     should agree if the by-HourType source is complete.
-  4. The CURRENT manual store budget (vw_Console_BudgetCurrent) for the same project,
-     so we can see the ETO-vs-manual divergence we're correcting.
-
-Run on a machine that can reach the ETO SQL Server (same creds as console_sync):
+Read-only. Run on MACRO-ETO-SVR:
     python console_diag_budget_source.py
-    python console_diag_budget_source.py --project 230219
-
-Then paste the WHOLE output back.
+    python console_diag_budget_source.py --project 230219,240033,220154
+Then paste the whole output back.
 """
 import argparse
 import sys
 
-# Candidate objects that may hold ESTIMATE HOURS by HourType (per project or per spec).
-CANDIDATES = [
-    "vwSpecLaborEstimateByHourType",
-    "tblSpecHours",
-    "vwSpecHours",
-    "vwProjectLaborEstimateByHourType",
-    "vwProjectLaborActualsVSEstimatesByHourType",   # known — but holds $ (EstLabor); check for hours cols
-    "vwProjectActualsVSEstimates",                  # 3-bucket hours (Admin/Eng/Mfg) — the reconciliation base
-]
-
-# Column-name shapes that would be an ESTIMATE/BUDGET HOURS measure.
-HOURS_EST_HINTS = ["budgethours", "esthours", "estimatehours", "estimatedhours",
-                   "totalbudgethours", "budgetlaborhours", "estlaborhours",
-                   "plannedhours", "budgethrs", "esthrs"]
+DISC_ORDER = ["Project Management", "Mechanical Engineering", "Hydraulic Engineering",
+              "Electrical Engineering", "Manufacturing", "Other"]
 
 
 def eto_connect():
@@ -64,7 +43,6 @@ def eto_connect():
 
 
 def store_connect():
-    """Console Reporting store — only needed to load the crosswalk. Best-effort."""
     for how in ("console_store.console_connection",
                 "console.infra.connections.console_connection"):
         try:
@@ -80,14 +58,7 @@ def rule(t):
     print("\n" + "=" * 78); print(t); print("=" * 78)
 
 
-def columns(cur, name):
-    cur.execute("SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION", name)
-    return [(r[0], r[1]) for r in cur.fetchall()]
-
-
 def load_crosswalk(store):
-    """{HourDescription: Discipline} from the store; {} if unavailable."""
     if store is None:
         return {}
     try:
@@ -95,151 +66,126 @@ def load_crosswalk(store):
         cur.execute("SELECT HourDescription, Discipline FROM Reporting.tlkpDisciplineCrosswalk")
         return {str(r[0]): str(r[1]) for r in cur.fetchall()}
     except Exception as e:
-        print("  (could not load crosswalk from store:", e, ")")
+        print("  (could not load crosswalk:", e, ")")
         return {}
+
+
+def one(cur, sql):
+    cur.execute(sql)
+    r = cur.fetchone()
+    return r[0] if r else None
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--project", default="230219", help="validation ProjectID")
+    ap.add_argument("--project", default="230219")
     args = ap.parse_args()
-    pid = int(str(args.project).split(",")[0])
+    pids = [int(p) for p in str(args.project).split(",") if p.strip()]
 
-    eto = eto_connect()
-    cur = eto.cursor()
-    store = store_connect()
-    xwalk = load_crosswalk(store)
+    eto = eto_connect(); cur = eto.cursor()
+    store = store_connect(); xwalk = load_crosswalk(store)
+    print(f"crosswalk: {len(xwalk)} HourDescription->Discipline rows"
+          + ("" if xwalk else "  (EMPTY — store unreachable; roll-up will fall to Other)"))
 
-    # 1) Candidate objects — existence + columns, flagging likely hours-estimate cols
-    rule("1. CANDIDATE est-hours-by-HourType OBJECTS (columns)")
-    present = {}
-    for name in CANDIDATES:
-        cols = columns(cur, name)
-        if not cols:
-            print(f"\n  {name}: (not found)")
-            continue
-        present[name] = [c[0] for c in cols]
-        hint = [c for c, _ in cols if any(h in c.lower() for h in HOURS_EST_HINTS)]
-        print(f"\n  {name}:")
-        for c, dt in cols:
-            star = "  <== looks like EST HOURS" if c in hint else ""
-            print(f"      {c:<42} {dt}{star}")
+    for pid in pids:
+        rule(f"PROJECT {pid}")
 
-    # 2) DB-wide search for any estimate/budget HOURS column (catches a different name)
-    rule("2. DB-WIDE: columns that look like ESTIMATE/BUDGET HOURS")
-    cur.execute("""
-        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE COLUMN_NAME LIKE '%Hour%'
-          AND (COLUMN_NAME LIKE '%Budget%' OR COLUMN_NAME LIKE '%Est%' OR COLUMN_NAME LIKE '%Plan%')
-        ORDER BY TABLE_NAME, COLUMN_NAME""")
-    rows = cur.fetchall()
-    for t, c, dt in rows:
-        print(f"      {t:<48} {c:<32} {dt}")
-    if not rows:
-        print("      (none found)")
-
-    # 3) tblSpecHours (per spec) — the most likely true source; sample + crosswalk
-    rule(f"3. SAMPLE + 6-DISCIPLINE CROSSWALK for project {pid}")
-    print(f"  crosswalk loaded: {len(xwalk)} HourDescription->Discipline rows"
-          + ("" if xwalk else "  (EMPTY — store unreachable; discipline roll-up skipped)"))
-
-    # Try the strongest candidate shapes in order. Each block is defensive.
-    def try_sample(sql, label):
+        # --- change-order breakdown of tblSpecHours -----------------------------
         try:
-            cur.execute(sql)
-            hdr = [d[0] for d in cur.description]
-            data = cur.fetchall()
-            print(f"\n  [{label}] {len(data)} rows; columns: {', '.join(hdr)}")
-            for r in data[:15]:
-                print("      " + " | ".join("" if v is None else str(v) for v in r))
-            return hdr, data
+            cur.execute(f"""
+                SELECT
+                  COUNT(*) AS rows_all,
+                  SUM(Hours) AS hours_all,
+                  SUM(CASE WHEN ISNULL(ChangeOrderID,0)=0 THEN Hours ELSE 0 END) AS hours_base,
+                  SUM(CASE WHEN ISNULL(ChangeOrderID,0)>0 THEN Hours ELSE 0 END) AS hours_co,
+                  COUNT(DISTINCT NULLIF(ChangeOrderID,0)) AS distinct_cos
+                FROM dbo.tblSpecHours WHERE ProjectID = {pid}""")
+            r = cur.fetchone()
+            print(f"  tblSpecHours: rows={r[0]}  Hours(all)={_n(r[1])}  "
+                  f"Hours(base CO=0)={_n(r[2])}  Hours(change-orders)={_n(r[3])}  "
+                  f"distinct COs={r[4]}")
         except Exception as e:
-            print(f"\n  [{label}] not usable: {e}")
-            return None, None
+            print("  tblSpecHours CO breakdown failed:", e)
 
-    # 3a) tblSpecHours joined to hour types (est hours by HourType per project)
-    hdr, data = try_sample(
-        "SELECT TOP 40 sh.ProjectID, sh.SpecID, sh.HourType, ht.HourDescription, "
-        "  sh.BudgetHours AS EstHours "
-        "FROM dbo.tblSpecHours sh "
-        "LEFT JOIN dbo.tlkpHourTypes ht ON ht.HourType = sh.HourType "
-        f"WHERE sh.ProjectID = {pid}", "tblSpecHours.BudgetHours")
-
-    # 3b) fallback: vwSpecLaborEstimateByHourType if it exists
-    if data is None and "vwSpecLaborEstimateByHourType" in present:
-        cset = present["vwSpecLaborEstimateByHourType"]
-        hrs_col = next((c for c in cset if any(h in c.lower() for h in HOURS_EST_HINTS)), None)
-        hd_col = "HourDescription" if "HourDescription" in cset else None
-        ht_col = "HourType" if "HourType" in cset else None
-        sel = ", ".join([c for c in ("ProjectID", ht_col, hd_col, hrs_col) if c])
-        if hrs_col:
-            hdr, data = try_sample(
-                f"SELECT TOP 40 {sel} FROM dbo.vwSpecLaborEstimateByHourType "
-                f"WHERE ProjectID = {pid}", "vwSpecLaborEstimateByHourType")
-
-    # Roll the sample up to 6 disciplines via the crosswalk (whichever sample worked)
-    if data and xwalk and hdr:
-        try:
-            hd_i = next(i for i, h in enumerate(hdr) if h.lower() == "hourdescription")
-            hr_i = next(i for i, h in enumerate(hdr) if "hour" in h.lower()
-                        and any(x in h.lower() for x in ("est", "budget")))
-            # re-pull ALL rows (not just 15) for the roll-up
-            by_disc = {}
-            for r in data:
-                hd = r[hd_i]; hrs = r[hr_i]
-                disc = xwalk.get(str(hd), "Other")
-                try:
+        # --- Hours by HourDescription -> crosswalk -> 6 disciplines --------------
+        for label, where in (("ALL rows", ""),
+                             ("BASE only (ChangeOrderID=0/NULL)", "AND ISNULL(ChangeOrderID,0)=0")):
+            try:
+                cur.execute(f"""
+                    SELECT HourDescription, SUM(Hours) AS Hrs
+                    FROM dbo.tblSpecHours
+                    WHERE ProjectID = {pid} {where}
+                    GROUP BY HourDescription ORDER BY SUM(Hours) DESC""")
+                rows = cur.fetchall()
+                by_disc, unmapped = {}, []
+                for hd, hrs in rows:
+                    disc = xwalk.get(str(hd))
+                    if disc is None:
+                        unmapped.append((str(hd), float(hrs or 0))); disc = "Other"
                     by_disc[disc] = by_disc.get(disc, 0.0) + float(hrs or 0)
-                except (TypeError, ValueError):
-                    pass
-            print("\n  --> 6-discipline EST HOURS (crosswalked) for this sample:")
-            total = 0.0
-            for d in ["Project Management", "Mechanical Engineering", "Hydraulic Engineering",
-                      "Electrical Engineering", "Manufacturing", "Other"]:
-                v = by_disc.get(d, 0.0); total += v
-                print(f"      {d:<26} {v:>12,.1f}")
-            print(f"      {'TOTAL':<26} {total:>12,.1f}")
-            print("  (NOTE: sample capped at 40 rows above — totals here are indicative, "
-                  "not the project's full estimate.)")
-        except StopIteration:
-            print("  (could not locate HourDescription / est-hours columns in the sample header)")
+                total = sum(by_disc.values())
+                print(f"\n  6-discipline EST HOURS — {label}:")
+                for d in DISC_ORDER:
+                    print(f"      {d:<26} {by_disc.get(d,0.0):>12,.1f}")
+                print(f"      {'TOTAL':<26} {total:>12,.1f}")
+                if unmapped:
+                    print("      unmapped HourDescriptions (fell to Other): "
+                          + ", ".join(f"{h}={v:,.0f}" for h, v in unmapped[:12]))
+            except Exception as e:
+                print(f"  roll-up ({label}) failed:", e)
 
-    # 4) Reconciliation base: ETO 3-bucket estimate hours for the project
-    rule(f"4. ETO 3-BUCKET estimate hours (reconciliation base) — project {pid}")
-    try_sample(
-        "SELECT ProjectID, EstAdminHours, EstEngHours, EstMfgHours, "
-        "(ISNULL(EstAdminHours,0)+ISNULL(EstEngHours,0)+ISNULL(EstMfgHours,0)) AS EstTotalHours "
-        f"FROM dbo.vwProjectActualsVSEstimates WHERE ProjectID = {pid}",
-        "vwProjectActualsVSEstimates")
-
-    # 5) Current MANUAL store budget for the same project (the divergence we're fixing)
-    rule(f"5. CURRENT MANUAL store budget — project {pid} (for divergence comparison)")
-    if store is not None:
+        # --- ETO reconciliation bases ------------------------------------------
         try:
-            scur = store.cursor()
-            scur.execute("SELECT ProjectID, LabourBudgetHours, PMHours, MechanicalHours, "
-                         "ElectricalHours, HydraulicHours, ManufacturingHours, OtherHours, "
-                         "MaterialBudget, Source, EffectiveFrom "
-                         "FROM Reporting.vw_Console_BudgetCurrent WHERE ProjectID = ?", pid)
-            hdr = [d[0] for d in scur.description]
-            rows = scur.fetchall()
-            if not rows:
-                print("      (no manual budget on record for this project)")
-            for r in rows:
-                print("      " + " | ".join(f"{h}={('' if v is None else v)}" for h, v in zip(hdr, r)))
+            cur.execute(f"""SELECT EstAdminHours, EstEngHours, EstMfgHours,
+                            (ISNULL(EstAdminHours,0)+ISNULL(EstEngHours,0)+ISNULL(EstMfgHours,0)),
+                            EstTotalMaterials, ExtendedEstimate,
+                            (ISNULL(AdminEstimateExtended,0)+ISNULL(EngEstimateExtended,0)+ISNULL(MfgEstimateExtended,0))
+                            FROM dbo.vwProjectActualsVSEstimates WHERE ProjectID = {pid}""")
+            r = cur.fetchone()
+            if r:
+                print(f"\n  ETO vwProjectActualsVSEstimates: Admin/Eng/Mfg hrs = "
+                      f"{_n(r[0])}/{_n(r[1])}/{_n(r[2])}  TOTAL={_n(r[3])}")
+                print(f"      EstTotalMaterials=${_n(r[4])}  ExtendedEstimate=${_n(r[5])}  "
+                      f"LabourEstimate$(Admin+Eng+Mfg extended)=${_n(r[6])}")
         except Exception as e:
-            print("      (store read failed:", e, ")")
-    else:
-        print("      (store unreachable from here)")
+            print("  vwProjectActualsVSEstimates read failed:", e)
+
+        try:
+            lab = one(cur, f"SELECT SUM(Extended) FROM dbo.vwSpecLaborEstimateByHourType "
+                           f"WHERE ProjectID = {pid}")
+            print(f"      vwSpecLaborEstimateByHourType SUM(Extended) labour$ = ${_n(lab)}")
+        except Exception as e:
+            print("  vwSpecLaborEstimateByHourType read failed:", e)
+
+        # --- current manual store budget (divergence) --------------------------
+        if store is not None:
+            try:
+                sc = store.cursor()
+                sc.execute("SELECT LabourBudgetHours, PMHours, MechanicalHours, ElectricalHours, "
+                           "HydraulicHours, ManufacturingHours, OtherHours, MaterialBudget "
+                           "FROM Reporting.vw_Console_BudgetCurrent WHERE ProjectID = ?", pid)
+                r = sc.fetchone()
+                if r:
+                    print(f"\n  MANUAL store budget: total={_n(r[0])}  PM={_n(r[1])} Mech={_n(r[2])} "
+                          f"Elec={_n(r[3])} Hyd={_n(r[4])} Mfg={_n(r[5])} Other={_n(r[6])}  "
+                          f"Material=${_n(r[7])}")
+                else:
+                    print("\n  MANUAL store budget: (none on record)")
+            except Exception as e:
+                print("  store budget read failed:", e)
 
     eto.close()
     if store is not None:
-        try:
-            store.close()
-        except Exception:
-            pass
+        try: store.close()
+        except Exception: pass
     print("\nDONE. Paste the whole output back.")
+
+
+def _n(v):
+    try:
+        return f"{float(v):,.1f}"
+    except (TypeError, ValueError):
+        return "None"
 
 
 if __name__ == "__main__":
