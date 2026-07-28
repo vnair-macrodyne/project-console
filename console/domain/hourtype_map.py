@@ -93,3 +93,13 @@ class HourTypeDisciplineDAO:
         cur.execute("SELECT HourType, HourDescription, ISNULL(HourDepartment,'') "
                     "FROM dbo.tlkpHourTypes")
         return {int(ht): discipline_for(dept, desc) for ht, desc, dept in cur.fetchall()}
+
+    @staticmethod
+    def derive_description_map_from_eto(eto_conn) -> dict:
+        """{HourDescription: discipline} for ETO's controlled hour types — the SAME rule
+        as the HourType map, so ACTUALS (classified off vwTimecards.HourDescription, which
+        is the controlled description) share one definition with the budget. Replaces the
+        incomplete 39-row spreadsheet crosswalk for the discipline blocks."""
+        cur = eto_conn.cursor()
+        cur.execute("SELECT HourDescription, ISNULL(HourDepartment,'') FROM dbo.tlkpHourTypes")
+        return {str(desc): discipline_for(dept, desc) for desc, dept in cur.fetchall()}

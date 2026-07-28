@@ -219,6 +219,8 @@ class LiveQueryService(QueryService):
         self._eto = None
         self._xwalk = None
         self._overlay = None       # {project_id(str): dict of overlay keys}
+        self._htmap = None         # {HourType: discipline} — budget (tblSpecHours)
+        self._hdmap = None         # {HourDescription: discipline} — actuals (vwTimecards)
 
     # -- connection / shared reference data ------------------------------------
     def _console_conn(self):
@@ -267,12 +269,32 @@ class LiveQueryService(QueryService):
         except Exception:
             return {}
 
+    def _hourtype_map(self):
+        """{HourType: discipline} for the BUDGET — from the store table if seeded, else
+        derived from ETO's tlkpHourTypes + the rule. Cached for the request."""
+        if self._htmap is None:
+            from console.domain.hourtype_map import HourTypeDisciplineDAO
+            dao = HourTypeDisciplineDAO(self._console_conn())
+            self._htmap = dao.load_map() or HourTypeDisciplineDAO.derive_from_eto(self._eto_conn())
+        return self._htmap
+
+    def _hourdesc_map(self):
+        """{HourDescription: discipline} for ACTUALS — same rule as the budget, so the
+        per-discipline blocks compare like-for-like. Cached for the request."""
+        if self._hdmap is None:
+            from console.domain.hourtype_map import HourTypeDisciplineDAO
+            self._hdmap = HourTypeDisciplineDAO.derive_description_map_from_eto(self._eto_conn())
+        return self._hdmap
+
     def _financials(self, project_ids):
-        from console.domain.budget import BudgetDAO
         from console.domain.discipline_actuals import DisciplineActualsDAO
         from console.domain.project_financials import ProjectFinancialsService
-        bdao = BudgetDAO(self._console_conn())
-        adao = DisciplineActualsDAO(self._eto_conn(), self._crosswalk())
+        from console.domain.eto_budget import EtoBudgetDAO
+        # BUDGET now comes from ETO's estimate (was the manual store); ACTUALS are
+        # classified with the SAME rule (58 controlled hour types) so the per-discipline
+        # blocks compare like-for-like. See PROJECT_CONSOLE_ETO_BUDGET_SOURCE_2026-07-27.md.
+        bdao = EtoBudgetDAO(self._eto_conn(), self._hourtype_map())
+        adao = DisciplineActualsDAO(self._eto_conn(), self._hourdesc_map())
         svc = ProjectFinancialsService(bdao, adao)
         mats = self._material_actuals(project_ids)     # committed PO value, live from ETO
         pids = [int(p) for p in project_ids]
