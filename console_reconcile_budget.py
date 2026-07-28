@@ -1,15 +1,16 @@
 """
 console_reconcile_budget.py — BREADTH GATE before cutting the dashboard's budget over
-to ETO. Read-only. Exercises the real production DAO (console.domain.eto_budget) across
-every project and checks two things per project:
+to ETO. Read-only. Exercises the real production DAO (console.domain.eto_budget, which
+anchors 3-bucket totals to vwProjectActualsVSEstimates and uses tblSpecHours only to
+split Eng into Mech/Elec/Hyd) across every project and checks:
 
-  1. Does the HourType-mapped 6-discipline estimate reconcile to ETO's 3-bucket
-     (PM==Admin, Mech+Elec+Hyd==Eng, Mfg==Mfg)?
-  2. Is there any free-text residue (hours on lines whose HourType isn't in the map /
-     is 0)? That's the only thing that can make a project's budget under-count.
-
-If all projects reconcile and residue is ~0, the ETO budget source is safe to go live.
-Prints the worst offenders so we can fix a HourType mapping (or handle a project) first.
+  1. Does the DAO's 6-discipline budget reconcile to ETO's 3-bucket
+     (PM==Admin, Mech+Elec+Hyd==Eng, Mfg==Mfg)?  With view-anchoring this passes by
+     construction — a failure means a data surprise worth seeing.
+  2. Which projects were CORRECTED by view-anchoring (their tblSpecHours line-detail did
+     not sum to the rolled-up estimate) — informational, so nothing is hidden.
+  3. Which projects hit the Eng-split FALLBACK (Eng hours but no Eng line-detail -> whole
+     Eng defaulted to Mechanical).
 
 Run on MACRO-ETO-SVR:
     python console_reconcile_budget.py            # capital projects (190000-499999)
@@ -22,7 +23,7 @@ import sys
 from console.domain.hourtype_map import HourTypeDisciplineDAO
 from console.domain.eto_budget import EtoBudgetDAO
 
-TOL = 1.0   # hours; deltas within this are "reconciled" (rounding)
+TOL = 1.0   # hours
 
 
 def eto_connect():
@@ -59,7 +60,6 @@ def main():
     eto = eto_connect()
     store = store_connect()
 
-    # map: prefer the seeded store table; fall back to deriving from ETO.
     mp = {}
     if store is not None:
         mp = HourTypeDisciplineDAO(store).load_map()
@@ -70,85 +70,95 @@ def main():
         print(f"HourType map: {len(mp)} rows derived from ETO tlkpHourTypes (store table empty)")
 
     cur = eto.cursor()
-
-    # projects with an estimate
     band = "" if args.all else "WHERE ProjectID >= 190000 AND ProjectID < 500000"
     cur.execute(f"SELECT DISTINCT ProjectID FROM dbo.tblSpecHours {band} ORDER BY ProjectID")
     pids = [int(r[0]) for r in cur.fetchall()]
     print(f"projects with an estimate: {len(pids)}  ({'all' if args.all else 'capital band'})")
 
-    # ETO 3-bucket for all
     cur.execute("SELECT ProjectID, ISNULL(EstAdminHours,0), ISNULL(EstEngHours,0), "
                 "ISNULL(EstMfgHours,0) FROM dbo.vwProjectActualsVSEstimates")
     eto3 = {int(r[0]): (float(r[1]), float(r[2]), float(r[3])) for r in cur.fetchall()}
 
-    # residue (hours on HourTypes not in the map, or 0) per project — one pass
+    # raw tblSpecHours mapped 3-bucket (to detect which projects view-anchoring corrects)
+    raw = {}   # pid -> [pm, eng, mfg, residue]
     cur.execute("SELECT ProjectID, ISNULL(HourType,0), SUM(Hours) FROM dbo.tblSpecHours "
                 "GROUP BY ProjectID, HourType")
-    residue = {}
     for pid, ht, hrs in cur.fetchall():
-        if int(ht) not in mp:
-            residue[int(pid)] = residue.get(int(pid), 0.0) + float(hrs or 0)
+        pid = int(pid); h = float(hrs or 0)
+        slot = raw.setdefault(pid, [0.0, 0.0, 0.0, 0.0])
+        d = mp.get(int(ht))
+        if d == "Project Management":
+            slot[0] += h
+        elif d in ("Mechanical Engineering", "Hydraulic Engineering", "Electrical Engineering"):
+            slot[1] += h
+        elif d == "Manufacturing":
+            slot[2] += h
+        elif d == "Other":
+            pass                      # NC — sits inside a view bucket; ignore for the raw compare
+        else:
+            slot[3] += h              # residue (unmapped / HourType 0)
 
     dao = EtoBudgetDAO(eto, mp)
 
-    ok = 0
-    mism = []          # (pid, dPM, dEng, dMfg, residue)
-    no_eto = 0
-    total_residue = 0.0
-    projects_with_residue = 0
-
-    # batch through the DAO (the real production path)
+    reconciled = 0
+    failed = []          # (pid, dPM, dEng, dMfg) — should be empty with view-anchoring
+    corrected = []       # (pid, raw_total, view_total, delta) — line-detail != rolled-up estimate
+    fallback = []        # (pid, eng) — Eng hours but no Eng line-detail
     for i in range(0, len(pids), 200):
         chunk = pids[i:i + 200]
         budgets = dao.get_current_many(chunk)
         for pid in chunk:
             b = budgets.get(pid)
             dh = (b.discipline_hours if b else {}) or {}
-            my_pm = dh.get("Project Management", 0.0)
-            my_eng = (dh.get("Mechanical Engineering", 0.0) + dh.get("Hydraulic Engineering", 0.0)
-                      + dh.get("Electrical Engineering", 0.0))
-            my_mfg = dh.get("Manufacturing", 0.0)
-            res = residue.get(pid, 0.0)
-            total_residue += res
-            if res > TOL:
-                projects_with_residue += 1
-            if pid not in eto3:
-                no_eto += 1
-                continue
-            a, e, m = eto3[pid]
-            d = (my_pm - a, my_eng - e, my_mfg - m)
-            if max(abs(x) for x in d) <= TOL:
-                ok += 1
+            pm = dh.get("Project Management", 0.0)
+            eng = (dh.get("Mechanical Engineering", 0.0) + dh.get("Hydraulic Engineering", 0.0)
+                   + dh.get("Electrical Engineering", 0.0))
+            mfg = dh.get("Manufacturing", 0.0)
+            a, e, m = eto3.get(pid, (0.0, 0.0, 0.0))
+            if max(abs(pm - a), abs(eng - e), abs(mfg - m)) <= TOL:
+                reconciled += 1
             else:
-                mism.append((pid, d[0], d[1], d[2], res))
+                failed.append((pid, pm - a, eng - e, mfg - m))
+            # correction reporting (raw line-detail vs rolled-up estimate)
+            r = raw.get(pid, [0.0, 0.0, 0.0, 0.0])
+            raw_tot = r[0] + r[1] + r[2] + r[3]
+            view_tot = a + e + m
+            if abs(raw_tot - view_tot) > TOL:
+                corrected.append((pid, raw_tot, view_tot, raw_tot - view_tot))
+            if e > TOL and r[1] <= TOL:
+                fallback.append((pid, e))
 
     print("\n" + "=" * 72)
-    print("RECONCILIATION SUMMARY")
+    print("RECONCILIATION SUMMARY (view-anchored)")
     print("=" * 72)
-    print(f"  projects checked        : {len(pids)}")
-    print(f"  reconciled to 3-bucket  : {ok}")
-    print(f"  mismatched              : {len(mism)}")
-    print(f"  no ETO estimate row     : {no_eto}")
-    print(f"  projects with residue   : {projects_with_residue}")
-    print(f"  TOTAL residue hours     : {total_residue:,.1f}  (free-text / HourType not in map)")
+    print(f"  projects checked          : {len(pids)}")
+    print(f"  reconciled to 3-bucket    : {reconciled}")
+    print(f"  FAILED reconciliation     : {len(failed)}   (expect 0)")
+    print(f"  view-anchor CORRECTED     : {len(corrected)}   (line-detail didn't sum to estimate)")
+    print(f"  Eng-split FALLBACK        : {len(fallback)}   (Eng hours, no Eng line-detail)")
 
-    if mism:
-        mism.sort(key=lambda r: -max(abs(r[1]), abs(r[2]), abs(r[3])))
-        print("\n  worst mismatches (ProjectID: dPM / dEng / dMfg | residue):")
-        for pid, dpm, deng, dmfg, res in mism[:20]:
-            print(f"      {pid}:  {dpm:+.0f} / {deng:+.0f} / {dmfg:+.0f}   | residue {res:,.0f}")
+    if failed:
+        print("\n  FAILURES (ProjectID: dPM / dEng / dMfg):")
+        for pid, dpm, deng, dmfg in sorted(failed, key=lambda r: -max(abs(r[1]), abs(r[2]), abs(r[3])))[:20]:
+            print(f"      {pid}:  {dpm:+.0f} / {deng:+.0f} / {dmfg:+.0f}")
+    if corrected:
+        print("\n  corrected by view-anchoring (ProjectID: line-detail -> estimate, delta):")
+        for pid, rt, vt, d in sorted(corrected, key=lambda r: -abs(r[3]))[:20]:
+            print(f"      {pid}:  {rt:,.0f} -> {vt:,.0f}   ({d:+,.0f})")
+    if fallback:
+        print("\n  Eng-split fallback (ProjectID: Eng hrs defaulted to Mechanical):")
+        for pid, e in sorted(fallback, key=lambda r: -r[1])[:20]:
+            print(f"      {pid}:  {e:,.0f}")
 
     eto.close()
     if store is not None:
         try: store.close()
         except Exception: pass
 
-    clean = (len(mism) == 0 and total_residue <= TOL)
-    print("\n" + ("PASS — ETO budget reconciles across all projects; safe to cut over."
-                  if clean else
-                  "REVIEW — see mismatches/residue above before cutover."))
-    sys.exit(0 if clean else 1)
+    print("\n" + ("PASS — every project reconciles to ETO's estimate; safe to cut over."
+                  if not failed else
+                  "REVIEW — unexpected reconciliation failures above."))
+    sys.exit(0 if not failed else 1)
 
 
 if __name__ == "__main__":
