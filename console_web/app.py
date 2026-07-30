@@ -24,6 +24,8 @@ from flask import (Flask, jsonify, request, send_file, render_template, g,
 import io
 import os
 
+from werkzeug.middleware.proxy_fix import ProxyFix
+
 from console_web.queries import make_service, catalogue, branding, data_watermark
 from console_web import exporters, auth, cache as cache_mod
 from console_web.pm import make_pm_service
@@ -33,7 +35,26 @@ app = Flask(__name__)
 app.config["DEMO"] = False
 # Session signing key — set CONSOLE_SECRET_KEY in prod so sessions survive restarts.
 app.secret_key = os.environ.get("CONSOLE_SECRET_KEY") or os.urandom(32)
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
+
+# HTTPS hardening. Set CONSOLE_HTTPS=1 once the app is served behind the TLS reverse
+# proxy (Caddy/nginx on the same host). Then the session cookie is only sent over TLS,
+# and HSTS is emitted. Leave unset while still on plain HTTP so nothing locks you out
+# mid-migration.
+_HTTPS = os.environ.get("CONSOLE_HTTPS", "").strip().lower() in ("1", "true", "yes", "on")
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=_HTTPS)
+# Behind the local TLS terminator, trust its X-Forwarded-* so url_for/redirects, the
+# secure-cookie decision and request.is_secure see the real https scheme + host.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+
+@app.after_request
+def _security_headers(resp):
+    # nosniff also stops browsers second-guessing the export MIME type on download.
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    if _HTTPS:
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return resp
 
 
 def _service():
@@ -248,6 +269,25 @@ def api_pm_save_budget():
         return jsonify(out)
     except Exception as e:
         app.logger.exception("pm save_budget failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pm/add", methods=["POST"])
+def api_pm_add():
+    denied = auth.gate("pm")           # only PM / Admin may bring a project in
+    if denied:
+        return denied
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("project_id"):
+        return jsonify({"error": "project_id is required"}), 400
+    try:
+        out = _pm_call(lambda s: s.add_project(payload["project_id"], g.get("user")))
+        cache_mod.cache.mark_dirty()   # new tracked project -> refresh the dashboard
+        return jsonify(out)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("pm add_project failed")
         return jsonify({"error": str(e)}), 500
 
 

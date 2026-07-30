@@ -77,6 +77,9 @@ class PMService:
     def get_budget(self, project_id) -> dict:
         raise NotImplementedError
 
+    def add_project(self, project_id, entered_by=None) -> dict:
+        raise NotImplementedError
+
     def save_budget(self, payload) -> dict:
         raise NotImplementedError
 
@@ -146,21 +149,45 @@ class LivePMService(PMService):
                      if pid not in budgeted_ids]
         return {"budgeted": budgeted, "available": available}
 
+    def _hourtype_map(self):
+        """{HourType: discipline} — store table if seeded, else derived from ETO."""
+        from console.domain.hourtype_map import HourTypeDisciplineDAO
+        dao = HourTypeDisciplineDAO(self._cc())
+        return dao.load_map() or HourTypeDisciplineDAO.derive_from_eto(self._ec())
+
     def get_budget(self, project_id):
+        """Read-only budget straight from ETO — per-discipline hours + material + total.
+        (Budgets are ETO-sourced; the manual store is no longer authored here.)"""
+        from console.domain.eto_budget import EtoBudgetDAO
+        pid = int(project_id)
+        name = self._eto_names([pid]).get(pid, "")
+        tracked = pid in set(self._budgeted_ids())
+        b = EtoBudgetDAO(self._ec(), self._hourtype_map()).get_current(pid)
+        if b is None or not b.discipline_hours:
+            return {"project_id": pid, "name": name, "exists": False, "tracked": tracked,
+                    "source": "ETO", "disciplines": [], "material_total": None,
+                    "labour_hours": None}
+        dh = b.discipline_hours
+        disciplines = [{"discipline": d, "hours": dh[d]} for d in DISCIPLINE_ORDER if dh.get(d)]
+        disciplines += [{"discipline": d, "hours": h} for d, h in dh.items()
+                        if d not in DISCIPLINE_ORDER and h]
+        return {"project_id": pid, "name": name, "exists": True, "tracked": tracked,
+                "source": "ETO", "read_only": True, "material_total": b.material_budget,
+                "labour_hours": b.labour_budget_hours, "disciplines": disciplines}
+
+    def add_project(self, project_id, entered_by=None):
+        """Bring an ETO project into the Console: bank its ETO budget as a versioned row
+        (source='ETO'), which makes it tracked (dashboard-visible) and starts its history."""
+        from console.domain.eto_budget import EtoBudgetDAO
         from console.domain.budget import BudgetDAO
         pid = int(project_id)
-        b = BudgetDAO(self._cc()).get_current(pid)
-        name = self._eto_names([pid]).get(pid, "")
-        if b is None:
-            return {"project_id": pid, "name": name, "exists": False, "lines": {},
-                    "po_ship": None, "cust_agreed_ship": None, "late_penalty": None,
-                    "material_total": None}
-        return {
-            "project_id": pid, "name": name, "exists": True,
-            "po_ship": _iso(b.po_ship_date), "cust_agreed_ship": _iso(b.cust_agreed_ship_date),
-            "late_penalty": b.late_penalty, "material_total": b.material_budget,
-            "lines": {ln.hour_description: ln.budget_hours for ln in b.detail},
-        }
+        b = EtoBudgetDAO(self._ec(), self._hourtype_map()).get_current(pid)
+        if b is None or not b.discipline_hours:
+            raise ValueError(f"Project {pid} has no ETO budget to bring in.")
+        vid = BudgetDAO(self._cc()).upsert_version(
+            b, effective=_dt.date.today(), source="ETO", created_by=(entered_by or "console"))
+        return {"ok": True, "project_id": pid, "tracked": True, "version": int(vid),
+                "labour_hours": b.labour_budget_hours}
 
     def save_budget(self, payload):
         from console.domain.budget import Budget, BudgetDAO, BudgetLine
@@ -226,12 +253,31 @@ class DemoPMService(PMService):
     def get_budget(self, project_id):
         pid = int(project_id)
         rec = DemoPMService._store.get(pid)
-        base = {"project_id": pid, "name": _DEMO_NAMES.get(pid, ""), "exists": rec is not None,
-                "po_ship": None, "cust_agreed_ship": None, "late_penalty": None,
-                "material_total": None, "lines": {}}
+        name = _DEMO_NAMES.get(pid, "")
+        tracked = pid in DemoPMService._store
         if rec:
-            base.update(rec)
-        return base
+            _, disc = _build_detail(rec.get("lines", {}), _DEMO_XWALK)
+            mat = rec.get("material_total")
+        else:
+            # a not-yet-added ETO project: show a placeholder ETO budget so "Add" is exercisable
+            disc = {"Project Management": 200, "Mechanical Engineering": 1200,
+                    "Electrical Engineering": 1000, "Hydraulic Engineering": 400,
+                    "Manufacturing": 3000}
+            mat = 1500000.0
+        disciplines = [{"discipline": d, "hours": disc[d]} for d in DISCIPLINE_ORDER if disc.get(d)]
+        return {"project_id": pid, "name": name, "exists": bool(disc), "tracked": tracked,
+                "source": "ETO", "read_only": True, "material_total": mat,
+                "labour_hours": round(sum(disc.values()), 2) if disc else None,
+                "disciplines": disciplines}
+
+    def add_project(self, project_id, entered_by=None):
+        pid = int(project_id)
+        DemoPMService._store.setdefault(pid, {
+            "material_total": 1500000.0,
+            "lines": {"Project Coordination": 200, "Mechanical Engineering": 1200,
+                      "Electrical Engineering": 1000, "Hydraulic Engineering": 400,
+                      "Mechanical Assembly": 3000}})
+        return {"ok": True, "project_id": pid, "tracked": True, "version": 1, "labour_hours": 4800}
 
     def save_budget(self, payload):
         pid = int(payload["project_id"])
