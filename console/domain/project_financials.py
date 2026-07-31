@@ -41,7 +41,10 @@ class ProjectFinancials:
     labour_budget_hours: float | None = None
     labour_actual_hours: float | None = None
     material_budget: float | None = None
-    material_actual: float | None = None
+    material_actual: float | None = None        # Resource Consumption (headline) = ETO ActTotalMaterials
+    material_committed: float | None = None      # Committed Spend = ETO purchased (costed) materials
+    material_inventory: float | None = None      # material issued from stock
+    material_payables: float | None = None       # other booked costs (AP / extra)
 
     @property
     def labour_consumed_pct(self):
@@ -51,8 +54,16 @@ class ProjectFinancials:
 
     @property
     def material_consumed_pct(self):
+        """Resource Consumption ÷ budget — the headline material %, ties to ETO's report."""
         if self.material_budget:
             return round((self.material_actual or 0.0) / self.material_budget, 4)
+        return None
+
+    @property
+    def material_committed_pct(self):
+        """Committed Spend (purchased material) ÷ budget — the cash-committed lens."""
+        if self.material_budget:
+            return round((self.material_committed or 0.0) / self.material_budget, 4)
         return None
 
     def discipline(self, name: str):

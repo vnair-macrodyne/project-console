@@ -296,9 +296,21 @@ class LiveQueryService(QueryService):
         bdao = EtoBudgetDAO(self._eto_conn(), self._hourtype_map())
         adao = DisciplineActualsDAO(self._eto_conn(), self._hourdesc_map())
         svc = ProjectFinancialsService(bdao, adao)
-        mats = self._material_actuals(project_ids)     # committed PO value, live from ETO
+        # MATERIAL: the headline actual is Resource Consumption (ETO ActTotalMaterials =
+        # purchased + inventory + payables), so the dashboard ties to ETO's "Material Costs
+        # Compared" report. Committed Spend (the purchased/costed component) rides alongside
+        # as the cash lens. See PROJECT_CONSOLE_MATERIAL_CONSUMPTION_2026-07-31.md.
+        mat = self._material_consumption(project_ids)
+        cons = {pid: v.get("consumption") for pid, v in mat.items()}
         pids = [int(p) for p in project_ids]
-        return svc.for_projects(pids, material_actuals=mats)
+        fin = svc.for_projects(pids, material_actuals=cons)
+        for pid, f in fin.items():
+            b = mat.get(pid)
+            if b:
+                f.material_committed = b.get("committed")
+                f.material_inventory = b.get("inventory")
+                f.material_payables = b.get("payables")
+        return fin
 
     def close(self):
         for c in (self._console, self._eto):
@@ -604,6 +616,45 @@ class LiveQueryService(QueryService):
                     for pid, rec in self._overlay_map().items()
                     if str(pid).isdigit() and int(pid) in keep}
 
+    def _material_consumption(self, project_ids):
+        """{pid: {'consumption','committed','inventory','payables'}} live from ETO's project
+        costing rollup — dbo.vwCostingSummed_ByProjectID.
+
+        Resource Consumption = TotalMaterials = TotalPurchasedMaterials + TotalInventoryPulls
+        + TotalExtraCosts. This equals vwProjectActualsVSEstimates.ActTotalMaterials and ties to
+        ETO's "Material Costs Compared" report to the penny (verified project 240154:
+        2,870,408.22 + 32,996.87 + 54.00 = 2,903,459.09). Committed Spend = the purchased
+        (costed) component only — the cash-out-the-door lens. Where a project has no costing row
+        (or the view can't be read) we fall back to the committed PO value so a tile never blanks.
+        """
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return {}
+        ids = ",".join(str(p) for p in pids)
+        out = {}
+        try:
+            df = self._df(
+                "SELECT ProjectID, TotalPurchasedMaterials AS Committed, "
+                "TotalInventoryPulls AS Inventory, TotalExtraCosts AS Payables, "
+                "TotalMaterials AS Consumption "
+                f"FROM dbo.vwCostingSummed_ByProjectID WHERE ProjectID IN ({ids})")
+            for _, r in df.iterrows():
+                out[int(r["ProjectID"])] = {
+                    "committed": round(float(r["Committed"] or 0), 2),
+                    "inventory": round(float(r["Inventory"] or 0), 2),
+                    "payables": round(float(r["Payables"] or 0), 2),
+                    "consumption": round(float(r["Consumption"] or 0), 2),
+                }
+        except Exception:
+            out = {}
+        missing = [p for p in pids if p not in out]     # fall back to committed PO value
+        if missing:
+            po = self._material_actuals(missing)
+            for p in missing:
+                v = po.get(p)
+                out[p] = {"committed": v, "inventory": None, "payables": None, "consumption": v}
+        return out
+
     def _nc_by_project(self, project_ids):
         """{pid: {'open': n, 'cost': $}} for the dashboard NC-actuals columns."""
         if not project_ids:
@@ -648,7 +699,10 @@ def _scorecard_result(rows):
         QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right", calc=True),
         QueryColumn("LabourPct", f"{labour} %", "pct", "right"),
         QueryColumn("MaterialBudget", f"{material} Budget", "money", "right"),
-        QueryColumn("MaterialActual", f"{material} Actual", "money", "right", calc=True),
+        QueryColumn("MaterialCommitted", "Committed Spend", "money", "right", calc=True),
+        QueryColumn("MaterialInventory", "Inventory", "money", "right", calc=True),
+        QueryColumn("MaterialPayables", "Payables", "money", "right", calc=True),
+        QueryColumn("MaterialActual", "Resource Consumption", "money", "right", calc=True),
         QueryColumn("MaterialPct", f"{material} %", "pct", "right"),
         QueryColumn("NCOpen", "Open NCRs", "int", "right", calc=True),
         QueryColumn("NCCost", "Cost of NC", "money", "right", calc=True),
@@ -664,9 +718,12 @@ def _scorecard_result(rows):
         Card(f"Total {material.lower()} budget",
              _fmt_money(sum(r.get("MaterialBudget") or 0 for r in rows))),
     ]
-    note = (f"Italic figures are live actuals: {labour.lower()} from timecards, {material.lower()} "
-            f"is the committed (ordered) purchase value in Canadian dollars, and NCR figures from "
-            f"the costing data. Budgets and % Done are the PM plan.")
+    note = (f"Italic figures are live from ETO. {material} now shows Resource Consumption — the "
+            f"total resources drawn to the {proj.lower()}: Committed Spend (purchased material) + "
+            f"Inventory (issued from stock) + Payables (other booked costs) — footing to ETO's "
+            f"“Material Costs Compared” report. {material} % = Resource Consumption ÷ budget. "
+            f"{labour} is hours from timecards; NCR figures from the costing data. Budgets and "
+            f"% Done are the PM plan.")
     return QueryResult("scorecard", f"{proj} {L('scorecard')}", cols, rows, cards, note)
 
 
@@ -703,8 +760,8 @@ def _budget_actual_result(rows):
     ]
     cards = [Card(L("projects"), str(len(rows)))]
     note = (f"Italic Actual columns are live from ETO — {labour.lower()} hours from timecards and "
-            f"{material.lower()} as the committed (ordered) purchase value in Canadian dollars. "
-            "Budgets are the PM plan; variance = budget − actual.")
+            f"{material.lower()} as Resource Consumption (purchased + inventory + payables, ties "
+            f"to ETO's material report). Budgets are the PM plan; variance = budget − actual.")
     return QueryResult("budget_actual", "Budget vs Actual", cols, rows, cards, note)
 
 
@@ -725,6 +782,9 @@ def _scorecard_row(pid, f, rec):
         "LabourActual": f.labour_actual_hours,
         "LabourPct": f.labour_consumed_pct,
         "MaterialBudget": f.material_budget,
+        "MaterialCommitted": getattr(f, "material_committed", None),
+        "MaterialInventory": getattr(f, "material_inventory", None),
+        "MaterialPayables": getattr(f, "material_payables", None),
         "MaterialActual": f.material_actual,
         "MaterialPct": f.material_consumed_pct,
         "NCOpen": _int(rec.get("NCOpen")),
@@ -1789,7 +1849,13 @@ class _DemoFin:
         self.labour_budget_hours = d["lb"]
         self.labour_actual_hours = d["la"]
         self.material_budget = d["mb"]
-        self.material_actual = d["ma"]
+        self.material_actual = d["ma"]            # Resource Consumption (headline)
+        # split the consumption into the three ETO lenses so the scorecard tile renders
+        inv = round(d["ma"] * 0.02, 2)
+        pay = round(d["ma"] * 0.005, 2)
+        self.material_inventory = inv
+        self.material_payables = pay
+        self.material_committed = round(d["ma"] - inv - pay, 2)   # purchased (costed) portion
         self.labour_consumed_pct = round(d["la"] / d["lb"], 4) if d["lb"] else None
         self.material_consumed_pct = round(d["ma"] / d["mb"], 4) if d["mb"] else None
 
