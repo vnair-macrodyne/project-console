@@ -72,7 +72,7 @@ class QueryResult:
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
-              "po_delivered", "po_buyer",
+              "po_delivered", "po_buyer", "item_location",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail"}
 
@@ -161,6 +161,11 @@ def catalogue():
          "desc": "Purchasing workload by buyer — purchase orders, lines and committed value, "
                  "with the open and overdue portion for each buyer. Scoped to orders placed in "
                  "the selected date range.",
+         "needs_projects": True},
+        # ── Inventory ─────────────────────────────────────────────────────
+        {"id": "item_location", "menu": "Inventory", "label": "Item Location",
+         "desc": f"Current on-hand inventory for the items purchased on the selected "
+                 f"{proj.lower()}s — by item and location (shared stock, live from ETO).",
          "needs_projects": True},
         # ── Non-Conformance ───────────────────────────────────────────────
         {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
@@ -597,6 +602,29 @@ class LiveQueryService(QueryService):
         df = self._df(etospec.query_po_by_buyer(pids, dfrom, dto))
         rows = [] if df is None or df.empty else df.to_dict("records")
         return _po_buyer_result(rows, _po_window_label(dfrom, dto))
+
+    def _q_item_location(self, project_ids, **kw):
+        """On-hand inventory (item + location) for the items purchased on the selected projects.
+        Inventory is a SHARED stock pool in ETO — no ProjectID — so we scope by the items on the
+        projects' PO lines and read current on-hand from vwInventory (location + bin + qty already
+        resolved). Verified 2026-08-03. See PROJECT_CONSOLE_ITEM_LOCATION_2026-08-03.md."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return _item_location_result(None)
+        ids = _ids_sql(pids)
+        sql = f"""
+        SELECT pi.ProjectID AS ProjectID, p.DisplayName AS JobName,
+               inv.ItemCompanyID AS ItemNo, inv.ItemDescription AS Description,
+               inv.LocationName AS Location, inv.BinLabel AS Bin,
+               inv.QtyOnHand AS OnHand, inv.QtyMinRequired AS MinReq
+        FROM (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails
+              WHERE ProjectID IN ({ids}) AND ItemID IS NOT NULL) pi
+        JOIN dbo.vwInventory inv ON inv.ItemID = pi.ItemID
+        LEFT JOIN dbo.tblProjects p ON p.ProjectID = pi.ProjectID
+        WHERE inv.QtyOnHand > 0
+        ORDER BY pi.ProjectID, inv.ItemCompanyID, inv.LocationName
+        """
+        return _item_location_result(self._df(sql))
 
     def _q_po_delivered(self, project_ids, date_from=None, date_to=None, **kw):
         pids = [int(p) for p in project_ids] if project_ids else None
@@ -1292,6 +1320,58 @@ def _po_to_order_result(df, window_label=""):
                        _po_to_order_rows(df), cards, note)
 
 
+# ---- Inventory — Item Location (on-hand by item & location, project-scoped) ----
+def _item_location_rows(df):
+    """Grouped rows (project → stocked line) with a per-project count band. No numeric
+    subtotal — on-hand quantities are mixed units of measure, so summing is meaningless."""
+    if df is None or df.empty:
+        return []
+    rows, total = [], 0
+    for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
+        psub = df[df["ProjectID"] == pid]
+        job = psub["JobName"].iloc[0] if "JobName" in psub.columns else ""
+        head = f"Project: {int(pid)} — {job or ''}".rstrip(" —")
+        rows.append({"_kind": "l3_sub", "ItemNo": head})
+        for _, r in psub.iterrows():
+            rows.append({
+                "_kind": "detail",
+                "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
+                "Location": r.get("Location"), "Bin": r.get("Bin"),
+                "OnHand": _num(r.get("OnHand")), "MinReq": _num(r.get("MinReq")),
+            })
+        total += len(psub)
+        rows.append({"_kind": "l1_sub", "Description":
+                     f"Project {int(pid)} — {len(psub)} stocked line(s), "
+                     f"{psub['ItemNo'].nunique()} item(s) across {psub['Location'].nunique()} location(s)"})
+    rows.append({"_kind": "grand", "ItemNo": f"GRAND TOTAL — {total} stocked line(s)"})
+    return rows
+
+
+def _item_location_result(df):
+    proj = L("project")
+    cols = [
+        QueryColumn("ItemNo", "Item", "id", "left"),
+        QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("Location", "Location", "text", "left"),
+        QueryColumn("Bin", "Bin", "text", "left"),
+        QueryColumn("OnHand", "On Hand", "num", "right"),
+        QueryColumn("MinReq", "Min Req", "num", "right"),
+    ]
+    empty = df is None or df.empty
+    lines = 0 if empty else int(len(df))
+    items = 0 if empty else int(df["ItemNo"].nunique())
+    locs = 0 if empty else int(df["Location"].nunique())
+    cards = [Card("Stocked lines", "{:,}".format(lines)),
+             Card("Distinct items", "{:,}".format(items)),
+             Card("Locations", "{:,}".format(locs))]
+    note = (f"Current on-hand inventory for the items purchased on the selected {proj.lower()}s, "
+            "by item and location (live from ETO). On-hand is SHARED stock — not reserved to a "
+            f"{proj.lower()}, so an item used on more than one {proj.lower()} appears under each. "
+            "Only items with on-hand > 0 are listed; Bin is the sub-location where recorded.")
+    return QueryResult("item_location", "Inventory — Item Location", cols,
+                       _item_location_rows(df), cards, note)
+
+
 # ---- Non-Conformance (costed + attributed) -------------------------------
 # One scoped source feeds every NC report: vwNonConformances LEFT JOIN
 # vwCostingSummed_ByNC (+ origin department) — a transcription of ETO's
@@ -1732,6 +1812,12 @@ class DemoQueryService(QueryService):
         recs = [r for r in _DEMO_TOORDER if r["ProjectID"] in sel]
         return _po_to_order_result(pd.DataFrame(recs, columns=_DEMO_TOORDER_COLS), " (demo)")
 
+    def _q_item_location(self, project_ids, **kw):
+        import pandas as pd
+        sel = set(self._sel(project_ids))
+        recs = [r for r in _DEMO_ITEMLOC if r["ProjectID"] in sel]
+        return _item_location_result(pd.DataFrame(recs, columns=_DEMO_ITEMLOC_COLS))
+
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids))
 
@@ -1929,6 +2015,30 @@ _DEMO_TOORDER = [
      "Description": "Servo cable, 15m", "PO": 48305, "Supplier": "Nachi",
      "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 2, "Price": 210.0, "ExtValueCAD": 550.20,
      "Required": "2026-09-01", "Entered": "2026-07-18", "AgeDays": 7},
+]
+
+# Item Location — _q_item_location output shape (on-hand by item & location, shared stock)
+_DEMO_ITEMLOC_COLS = ["ProjectID", "JobName", "ItemNo", "Description", "Location", "Bin",
+                      "OnHand", "MinReq"]
+_DEMO_ITEMLOC = [
+    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E05416",
+     "Description": "Cable tie, Black, 11.4\" (bags of 1000)", "Location": "Macrodyne 1",
+     "Bin": "", "OnHand": 4000, "MinReq": 500},
+    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E05416",
+     "Description": "Cable tie, Black, 11.4\" (bags of 1000)", "Location": "Macrodyne 2 (Racco)",
+     "Bin": "FW3", "OnHand": 4, "MinReq": 0},
+    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E04919",
+     "Description": "Lugs, (2@350MCM), box of 3", "Location": "Macrodyne 2 (Racco)",
+     "Bin": "E4B4", "OnHand": 1, "MinReq": 2},
+    {"ProjectID": 230312, "JobName": _D12[0], "ItemNo": "E05413",
+     "Description": "Cable tie, Black, 5\" (bags of 1000)", "Location": "Macrodyne 1",
+     "Bin": "", "OnHand": 2000, "MinReq": 0},
+    {"ProjectID": 240087, "JobName": _D87[0], "ItemNo": "E05442",
+     "Description": "Heat Shrink, Clear, 1/16\" dia", "Location": "Macrodyne 1",
+     "Bin": "", "OnHand": 20, "MinReq": 5},
+    {"ProjectID": 240087, "JobName": _D87[0], "ItemNo": "E00216",
+     "Description": "Mounting bracket for SL-C light curtain", "Location": "TOC",
+     "Bin": "", "OnHand": 3, "MinReq": 1},
 ]
 
 # Procurement Exceptions — query_po_exceptions output shape
