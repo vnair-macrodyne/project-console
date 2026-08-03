@@ -219,13 +219,17 @@ class QueryService:
         return getattr(self, f"_q_{query_id}")(project_ids or [], **kw)
 
 
-# NC-by-project is FIXED-COST regardless of scope — the vwCostingSummed_ByNC rollup costs the
-# whole portfolio then filters, so one project ≈ all projects (~3.5s, verified 2026-08-03). It
-# runs on both exec and scorecard, so it dominated single-project dashboards. We compute the
-# WHOLE portfolio once, cache it here keyed by a cheap change-probe, and filter per request; the
-# background daemon (which warms the dashboards) keeps it fresh, so it's never paid on a click.
-# Module-level so it's shared across request-scoped service instances (one waitress process).
-_NC_CACHE = {"key": None, "data": None}
+# ── Cross-request perf caches (module-level → shared across request-scoped services) ──────────
+# The dashboards are dominated by two things that are FIXED-COST regardless of project scope
+# (verified 2026-08-03): the financials build off two ETO rollup views, and the NC-cost rollup
+# (vwCostingSummed_ByNC, ~3.5s, one project ≈ all projects). We cache both here on a simple TTL
+# — deliberately NOT the data watermark, which moves on every new timecard/PO and would defeat
+# the cache in an active shop. The background daemon (which warms the dashboards) keeps these
+# warm, so a user click almost never pays the live cost. Staleness is bounded by the TTL and the
+# UI already shows an "Updated Xs ago" stamp.
+_PERF_TTL = 120                          # seconds a computed result stays fresh
+_FIN_CACHE = {}                          # {sorted-pid-tuple: {"at": monotonic, "data": {pid: PF}}}
+_NC_CACHE = {"at": 0.0, "data": None}    # whole-portfolio {pid: {"open","cost"}}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,8 +246,6 @@ class LiveQueryService(QueryService):
         self._overlay = None       # {project_id(str): dict of overlay keys}
         self._htmap = None         # {HourType: discipline} — budget (tblSpecHours)
         self._hdmap = None         # {HourDescription: discipline} — actuals (vwTimecards)
-        self._fin = {}             # memo: {sorted-pid-tuple: {pid: ProjectFinancials}} —
-                                   # exec/scorecard/discipline/budget_actual share ONE build
 
     # -- connection / shared reference data ------------------------------------
     def _console_conn(self):
@@ -310,14 +312,19 @@ class LiveQueryService(QueryService):
         return self._hdmap
 
     def _financials(self, project_ids):
-        # Memoised per project-set for this service instance. The Executive board, Scorecard,
-        # Discipline Financials and Budget-vs-Actual all net the SAME financials off two heavy
-        # ETO views (vwProjectActualsVSEstimates ~2s + vwCostingSummed ~3s, neither of which
-        # pushes the project filter down — a fixed ~5s tax). Building once and sharing it means
-        # a cache refresh (one service, all four boards) pays that tax once, not four times.
+        # Cross-request TTL cache (module-level _FIN_CACHE), keyed by project-set. The Executive
+        # board, Scorecard, Discipline Financials and Budget-vs-Actual all net the SAME financials
+        # off two heavy ETO rollup views. Caching here (not just per-instance) means repeat views
+        # of a scope — and all four boards for a scope — serve from memory instead of paying the
+        # ~2–5s build every request, even when the data watermark churns.
+        import time
         key = tuple(sorted(int(p) for p in (project_ids or [])))
-        if key in self._fin:
-            return self._fin[key]
+        if not key:
+            return {}
+        now = time.monotonic()
+        ent = _FIN_CACHE.get(key)
+        if ent and (now - ent["at"]) <= _PERF_TTL:
+            return ent["data"]
         from console.domain.discipline_actuals import DisciplineActualsDAO
         from console.domain.project_financials import ProjectFinancialsService
         from console.domain.eto_budget import EtoBudgetDAO
@@ -341,7 +348,9 @@ class LiveQueryService(QueryService):
                 f.material_committed = b.get("committed")
                 f.material_inventory = b.get("inventory")
                 f.material_payables = b.get("payables")
-        self._fin[key] = fin
+        _FIN_CACHE[key] = {"at": now, "data": fin}
+        if len(_FIN_CACHE) > 64:                       # bound the cache — evict the oldest
+            _FIN_CACHE.pop(min(_FIN_CACHE, key=lambda k: _FIN_CACHE[k]["at"]), None)
         return fin
 
     def close(self):
@@ -745,34 +754,25 @@ class LiveQueryService(QueryService):
                 out[p] = {"committed": v, "inventory": None, "payables": None, "consumption": v}
         return out
 
-    def _nc_change_key(self):
-        """Cheap probe — advances when an NCR is raised or a PO line (the dominant NC cost,
-        remedy material) is added. Two scalar MAXes; used to gate the whole-portfolio NC cache."""
-        cur = self._eto_conn().cursor()
-        cur.execute("SELECT (SELECT MAX(NonConformanceID) FROM dbo.tblNonConformance), "
-                    "(SELECT MAX(PurchaseDetailID) FROM dbo.tblPurchaseOrderDetails)")
-        r = cur.fetchone()
-        return (r[0], r[1])
-
     def _nc_by_project(self, project_ids):
         """{pid: {'open': n, 'cost': $}} for the dashboard NC-actuals columns.
 
-        Served from the module-level whole-portfolio cache (fixed-cost query, so scope-free):
-        compute all projects once per change-key, filter to the requested scope instantly."""
+        The NC-cost rollup is fixed-cost regardless of scope, so compute the WHOLE portfolio once,
+        cache it on the module TTL, and filter to the requested scope instantly. On a refresh
+        failure we keep serving the last good copy rather than blanking the columns."""
+        import time
         if not project_ids:
             return {}
         keep = {int(p) for p in project_ids}
         global _NC_CACHE
-        try:
-            key = self._nc_change_key()
-        except Exception:
-            key = None
-        if key is None or _NC_CACHE.get("key") != key or _NC_CACHE.get("data") is None:
+        now = time.monotonic()
+        if _NC_CACHE.get("data") is None or (now - _NC_CACHE.get("at", 0.0)) > _PERF_TTL:
             try:
                 rows = _live_nc_cost_rows(self._eto_conn().cursor(), None, None, None)  # whole portfolio
-                _NC_CACHE = {"key": key, "data": ncspec.by_project_totals(rows)}
+                _NC_CACHE = {"at": now, "data": ncspec.by_project_totals(rows)}
             except Exception:
-                return {}
+                if _NC_CACHE.get("data") is None:
+                    return {}
         return {int(pid): g for pid, g in _NC_CACHE["data"].items() if int(pid) in keep}
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
