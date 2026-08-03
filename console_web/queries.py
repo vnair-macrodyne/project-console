@@ -233,6 +233,8 @@ class LiveQueryService(QueryService):
         self._overlay = None       # {project_id(str): dict of overlay keys}
         self._htmap = None         # {HourType: discipline} — budget (tblSpecHours)
         self._hdmap = None         # {HourDescription: discipline} — actuals (vwTimecards)
+        self._fin = {}             # memo: {sorted-pid-tuple: {pid: ProjectFinancials}} —
+                                   # exec/scorecard/discipline/budget_actual share ONE build
 
     # -- connection / shared reference data ------------------------------------
     def _console_conn(self):
@@ -299,6 +301,14 @@ class LiveQueryService(QueryService):
         return self._hdmap
 
     def _financials(self, project_ids):
+        # Memoised per project-set for this service instance. The Executive board, Scorecard,
+        # Discipline Financials and Budget-vs-Actual all net the SAME financials off two heavy
+        # ETO views (vwProjectActualsVSEstimates ~2s + vwCostingSummed ~3s, neither of which
+        # pushes the project filter down — a fixed ~5s tax). Building once and sharing it means
+        # a cache refresh (one service, all four boards) pays that tax once, not four times.
+        key = tuple(sorted(int(p) for p in (project_ids or [])))
+        if key in self._fin:
+            return self._fin[key]
         from console.domain.discipline_actuals import DisciplineActualsDAO
         from console.domain.project_financials import ProjectFinancialsService
         from console.domain.eto_budget import EtoBudgetDAO
@@ -322,6 +332,7 @@ class LiveQueryService(QueryService):
                 f.material_committed = b.get("committed")
                 f.material_inventory = b.get("inventory")
                 f.material_payables = b.get("payables")
+        self._fin[key] = fin
         return fin
 
     def close(self):

@@ -32,7 +32,10 @@ import datetime as _dt
 import threading
 
 # Dashboard query ids that are cached/kept warm (they ignore date window + view).
-HOT_QUERIES = ("exec", "scorecard")
+# All four net the SAME financials (see LiveQueryService._financials memo), so one warm
+# refresh — one service instance running all four — builds the heavy ETO views once and
+# serves every board instantly.
+HOT_QUERIES = ("exec", "scorecard", "discipline", "budget_actual")
 
 INTERVAL = 30      # seconds between cheap change-probes
 MAX_AGE = 300      # force a rebuild at least this often (safety net for silent edits)
