@@ -71,13 +71,15 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
-              "po_all", "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
+              "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
+              "po_delivered", "po_buyer",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail"}
 
 # reports that read ETO live and honour the optional date range / view
 ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
-                  "po_all", "po_status", "po_exceptions", "po_late", "po_delivered", "po_buyer",
+                  "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
+                  "po_delivered", "po_buyer",
                   "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
                   "nc_supplier", "nc_detail"}
 
@@ -136,6 +138,11 @@ def catalogue():
         {"id": "po_status", "menu": "Purchasing", "label": "PO Status",
          "desc": f"Open purchase-order lines — On Order and Overdue — grouped by {proj.lower()} "
                  "and machine, with an overdue-aging summary and total-purchases context.",
+         "needs_projects": True},
+        {"id": "po_to_order", "menu": "Purchasing", "label": "Lines to Order",
+         "desc": f"Purchase-order lines entered in ETO but not yet issued (not printed or "
+                 f"emailed to the vendor) — the still-to-place backlog, grouped by {proj.lower()} "
+                 "and machine, with the age of each draft.",
          "needs_projects": True},
         {"id": "po_exceptions", "menu": "Purchasing", "label": "Procurement Exceptions",
          "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
@@ -527,6 +534,41 @@ class LiveQueryService(QueryService):
             result.cards.append(Card("Total purchases", _fmt_money2(t["TotalPurchases"])))
             result.cards.append(Card("Received (closed)", _fmt_money2(t["ReceivedValue"])))
         return result
+
+    def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
+        """Draft PO lines — entered in ETO but not yet issued (not printed AND not emailed
+        to the vendor). Verified 2026-08-03: PurchasePrinted/PurchaseEmailed are the send
+        flags; neither PurchaseDate nor PurchaseActive distinguishes drafts. See
+        PROJECT_CONSOLE_PO_TO_ORDER_2026-08-03.md."""
+        pids = [int(p) for p in project_ids] if project_ids else None
+        dfrom, dto = _as_date(date_from), _as_date(date_to)
+        proj = f" AND pod.ProjectID IN ({_ids_sql(pids)})" if pids else ""
+        dtc = ""
+        if dfrom:
+            dtc += f" AND CAST(poh.PurchaseDate AS date) >= '{dfrom}'"
+        if dto:
+            dtc += f" AND CAST(poh.PurchaseDate AS date) <= '{dto}'"
+        rate = "CASE WHEN poh.PurchaseCurrRate > 0 THEN poh.PurchaseCurrRate ELSE 1 END"
+        sql = f"""
+        SELECT pod.ProjectID AS ProjectID, p.DisplayName AS JobName, pcust.CName AS Customer,
+               pod.SpecID AS MachineCode, pod.ItemID AS Item, pod.ItemDescription AS Description,
+               poh.PurchaseOrderID AS PO, poh.CName AS Supplier,
+               COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName,
+                        CAST(poh.BuyerID AS varchar(20))) AS Buyer,
+               poh.PurchaseCurr AS Curr, pod.PurchaseQty AS Qty, pod.PurchasePrice AS Price,
+               CAST(pod.ExtendedPrice * {rate} AS decimal(20,2)) AS ExtValueCAD,
+               CAST(pod.DateRequired AS date) AS Required, CAST(poh.PurchaseDate AS date) AS Entered,
+               DATEDIFF(day, poh.PurchaseDate, GETDATE()) AS AgeDays
+        FROM vwPurchaseOrderHeader poh
+        JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
+        LEFT JOIN tblProjects p     ON p.ProjectID = pod.ProjectID
+        LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
+        LEFT JOIN tblEmployee bu    ON bu.EmployeeID = poh.BuyerID
+        WHERE poh.PurchaseActive = 1 AND poh.PurchasePrinted = 0 AND poh.PurchaseEmailed = 0
+          AND ISNULL(pod.Archived, 0) = 0{proj}{dtc}
+        ORDER BY pod.ProjectID, pod.SpecID, poh.PurchaseOrderID, pod.ItemID
+        """
+        return _po_to_order_result(self._df(sql), _po_window_label(dfrom, dto))
 
     def _q_po_exceptions(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
@@ -1170,6 +1212,86 @@ def _po_buyer_result(rows, window_label=""):
     return QueryResult("po_buyer", "Purchasing — By Buyer", cols, out, cards, note)
 
 
+# ---- Purchasing — Lines to Order (draft POs not yet issued) ---------------
+def _mc_label(mc):
+    """SpecID (float) → a clean machine label, matching the PO Status grouping."""
+    try:
+        f = float(mc)
+        return str(int(f)) if f.is_integer() else str(f)
+    except (TypeError, ValueError):
+        return str(mc)
+
+
+def _po_to_order_rows(df):
+    """Grouped rows (project → machine → line) with subtotal bands, as _kind-tagged dicts
+    (the same band convention the other grouped reports use)."""
+    if df is None or df.empty:
+        return []
+    rows, total = [], 0.0
+    for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
+        psub = df[df["ProjectID"] == pid]
+        job = psub["JobName"].iloc[0] if "JobName" in psub.columns else ""
+        cust = psub["Customer"].iloc[0] if "Customer" in psub.columns else ""
+        head = f"Project: {int(pid)} — {job or ''}".rstrip(" —")
+        if cust:
+            head += f"   ·   {cust}"
+        rows.append({"_kind": "l3_sub", "Item": head})
+        for mc in sorted(psub["MachineCode"].dropna().unique(), key=str):
+            msub = psub[psub["MachineCode"] == mc]
+            rows.append({"_kind": "l2_sub", "Item": f"Machine {_mc_label(mc)}"})
+            for _, r in msub.iterrows():
+                rows.append({
+                    "_kind": "detail",
+                    "Item": _int(r.get("Item")), "Description": r.get("Description"),
+                    "PO": _int(r.get("PO")), "Supplier": r.get("Supplier"),
+                    "Buyer": r.get("Buyer"), "Curr": r.get("Curr"),
+                    "Qty": _num(r.get("Qty")), "Price": _num(r.get("Price")),
+                    "ExtValueCAD": _num(r.get("ExtValueCAD")),
+                    "Required": (str(r.get("Required")) if r.get("Required") not in (None, "") else None),
+                    "Entered": (str(r.get("Entered")) if r.get("Entered") not in (None, "") else None),
+                    "AgeDays": _int(r.get("AgeDays")),
+                })
+        psum = float(psub["ExtValueCAD"].fillna(0).sum())
+        total += psum
+        rows.append({"_kind": "l1_sub", "Description": f"Project {int(pid)} — To-Order Value",
+                     "ExtValueCAD": round(psum, 2)})
+    rows.append({"_kind": "grand", "Item": "GRAND TOTAL — To-Order Value",
+                 "ExtValueCAD": round(total, 2)})
+    return rows
+
+
+def _po_to_order_result(df, window_label=""):
+    proj = L("project")
+    cols = [
+        QueryColumn("Item", "Item", "id", "left"),
+        QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("PO", "PO #", "id", "left"),
+        QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
+        QueryColumn("Buyer", "Buyer", "text", "left"),
+        QueryColumn("Curr", "Curr", "text", "left"),
+        QueryColumn("Qty", "Qty", "num", "right"),
+        QueryColumn("Price", "Unit Price", "num", "right"),
+        QueryColumn("ExtValueCAD", "Ext. Value (CAD)", "money", "right"),
+        QueryColumn("Required", "Need-by", "date", "left"),
+        QueryColumn("Entered", "PO Entered", "date", "left"),
+        QueryColumn("AgeDays", "Age (days)", "days", "right"),
+    ]
+    empty = df is None or df.empty
+    n = 0 if empty else int(len(df))
+    val = 0.0 if empty else float(df["ExtValueCAD"].fillna(0).sum())
+    stale = 0 if empty else int((df["AgeDays"].fillna(0) > 90).sum())
+    cards = [Card("Lines to order", "{:,}".format(n)),
+             Card("To-order value", _fmt_money2(val)),
+             Card("Stale (>90d)", "{:,}".format(stale), "warn" if stale else "good")]
+    note = ("Purchase-order lines entered in ETO but not yet issued to the vendor — the PO "
+            "has not been printed or emailed, so it is still to be placed. Grouped by "
+            f"{proj.lower()} then machine/spec (ETO SpecID). Ext. Value is in Canadian dollars; "
+            "Age is days since the PO was entered — a large age flags a draft to review or "
+            "cancel." + (window_label or ""))
+    return QueryResult("po_to_order", "Purchasing — Lines to Order", cols,
+                       _po_to_order_rows(df), cards, note)
+
+
 # ---- Non-Conformance (costed + attributed) -------------------------------
 # One scoped source feeds every NC report: vwNonConformances LEFT JOIN
 # vwCostingSummed_ByNC (+ origin department) — a transcription of ETO's
@@ -1604,6 +1726,12 @@ class DemoQueryService(QueryService):
                 b["OverdueValue"] += r["ExtValue"]
         return _po_buyer_result(list(agg.values()), " (demo)")
 
+    def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
+        import pandas as pd
+        sel = set(self._sel(project_ids))
+        recs = [r for r in _DEMO_TOORDER if r["ProjectID"] in sel]
+        return _po_to_order_result(pd.DataFrame(recs, columns=_DEMO_TOORDER_COLS), " (demo)")
+
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids))
 
@@ -1774,6 +1902,33 @@ _DEMO_PO_STATUS = [
      "Item": "48301", "Description": "Servo motors (pair)", "PO": "48301",
      "Supplier": "Nachi", "ProjStatus": "Sold", "Qty": 2, "Received": 0,
      "Price": 16700.0, "ExtValue": 33400.0, "Required": "2026-08-01", "Revised": None},
+]
+
+# Lines to Order — _q_po_to_order output shape (draft POs: not printed, not emailed)
+_DEMO_TOORDER_COLS = ["ProjectID", "JobName", "Customer", "MachineCode", "Item", "Description",
+                      "PO", "Supplier", "Buyer", "Curr", "Qty", "Price", "ExtValueCAD",
+                      "Required", "Entered", "AgeDays"]
+_DEMO_TOORDER = [
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10, "Item": 28041,
+     "Description": "Cylinder gland seals (spare set)", "PO": 48310, "Supplier": "Bosch Rexroth",
+     "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 4, "Price": 180.0, "ExtValueCAD": 943.20,
+     "Required": "2026-08-20", "Entered": "2026-07-22", "AgeDays": 3},
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10, "Item": 28115,
+     "Description": "Proximity sensors, M18", "PO": 48310, "Supplier": "Bosch Rexroth",
+     "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 12, "Price": 46.0, "ExtValueCAD": 723.12,
+     "Required": "2026-08-20", "Entered": "2026-07-22", "AgeDays": 3},
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 20, "Item": 30880,
+     "Description": "Guarding mesh panels", "PO": 48291, "Supplier": "Axelent",
+     "Buyer": "Ferreira, Sam", "Curr": "CA", "Qty": 8, "Price": 240.0, "ExtValueCAD": 1920.00,
+     "Required": "2026-09-04", "Entered": "2026-04-02", "AgeDays": 116},
+    {"ProjectID": 230312, "JobName": _D12[0], "Customer": _D12[1], "MachineCode": 10, "Item": 20142,
+     "Description": "S7-1500 spare IO card", "PO": 48277, "Supplier": "Siemens",
+     "Buyer": "Ferreira, Sam", "Curr": "US", "Qty": 2, "Price": 590.0, "ExtValueCAD": 1546.40,
+     "Required": "2026-08-15", "Entered": "2026-07-25", "AgeDays": 0},
+    {"ProjectID": 240087, "JobName": _D87[0], "Customer": _D87[1], "MachineCode": 20, "Item": 51002,
+     "Description": "Servo cable, 15m", "PO": 48305, "Supplier": "Nachi",
+     "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 2, "Price": 210.0, "ExtValueCAD": 550.20,
+     "Required": "2026-09-01", "Entered": "2026-07-18", "AgeDays": 7},
 ]
 
 # Procurement Exceptions — query_po_exceptions output shape
