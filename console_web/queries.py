@@ -45,6 +45,27 @@ class Card:
     tone: str = "neutral"     # neutral | good | warn | bad
 
 
+def _json_clean(rows):
+    """Replace NaN / Inf / NaT (which leak from live pandas DataFrames — e.g. a blank text cell
+    becomes a float NaN) with None, so every payload is valid JSON. Invalid floats make the
+    browser's JSON.parse throw and the screen never renders, so this runs centrally for ALL
+    reports rather than per-builder."""
+    out = []
+    for r in rows:
+        d = {}
+        for k, v in r.items():
+            try:
+                if v != v:                                   # True only for NaN / NaT
+                    v = None
+                elif v in (float("inf"), float("-inf")):     # +/- Infinity
+                    v = None
+            except (TypeError, ValueError):
+                pass
+            d[k] = v
+        out.append(d)
+    return out
+
+
 @dataclass
 class QueryResult:
     query_id: str
@@ -60,7 +81,7 @@ class QueryResult:
             "query_id": self.query_id,
             "title": self.title,
             "columns": [asdict(c) for c in self.columns],
-            "rows": self.rows,
+            "rows": _json_clean(self.rows),
             "cards": [asdict(c) for c in self.cards],
             "note": self.note,
         }
