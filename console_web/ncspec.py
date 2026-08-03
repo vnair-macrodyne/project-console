@@ -43,7 +43,11 @@ def sql_nc_costs(ids_csv):
 
     LEFT JOIN to the costing rollup (COALESCE handled in normalize) and to the origin
     lookup for the ETO-maintained responsible department. SActive = 1 mirrors the proc.
+    An empty ids_csv means WHOLE PORTFOLIO (the vwCostingSummed_ByNC rollup is fixed-cost
+    regardless of the ProjectID filter, so the dashboard caches the whole-portfolio result
+    once and filters per request — see LiveQueryService._nc_by_project).
     """
+    scope = f" AND NC.ProjectID IN ({ids_csv})" if ids_csv else ""
     return f"""
     SELECT NC.NonConformanceID, NC.NonConformanceBarcode, NC.ProjectID, NC.Title,
            NC.Resolved, NC.CreationDate, NC.Released, NC.PurchaseOrderID,
@@ -58,16 +62,17 @@ def sql_nc_costs(ids_csv):
     LEFT JOIN dbo.vwCostingSummed_ByNC C ON NC.NonConformanceID = C.NonConformanceID
     LEFT JOIN dbo.tlkpNonConformanceOrigin O
            ON NC.NonConformanceOriginID = O.NonConformanceOriginID
-    WHERE NC.SActive = 1 AND NC.ProjectID IN ({ids_csv})
+    WHERE NC.SActive = 1{scope}
     """
 
 
 def sql_nc_outstanding(ids_csv):
-    """Per-NCR open corrective-action count (precomputed by ETO on vwNonConformanceList)."""
+    """Per-NCR open corrective-action count (precomputed by ETO on vwNonConformanceList).
+    Empty ids_csv = whole portfolio (see sql_nc_costs)."""
+    scope = f" WHERE ProjectID IN ({ids_csv})" if ids_csv else ""
     return f"""
     SELECT NonConformanceID, Tasks, Outstanding
-    FROM dbo.vwNonConformanceList
-    WHERE ProjectID IN ({ids_csv})
+    FROM dbo.vwNonConformanceList{scope}
     """
 
 

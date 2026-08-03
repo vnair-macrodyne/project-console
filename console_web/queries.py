@@ -219,6 +219,15 @@ class QueryService:
         return getattr(self, f"_q_{query_id}")(project_ids or [], **kw)
 
 
+# NC-by-project is FIXED-COST regardless of scope — the vwCostingSummed_ByNC rollup costs the
+# whole portfolio then filters, so one project ≈ all projects (~3.5s, verified 2026-08-03). It
+# runs on both exec and scorecard, so it dominated single-project dashboards. We compute the
+# WHOLE portfolio once, cache it here keyed by a cheap change-probe, and filter per request; the
+# background daemon (which warms the dashboards) keeps it fresh, so it's never paid on a click.
+# Module-level so it's shared across request-scoped service instances (one waitress process).
+_NC_CACHE = {"key": None, "data": None}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Live backend — composes the domain layer
 # ─────────────────────────────────────────────────────────────────────────────
@@ -736,15 +745,35 @@ class LiveQueryService(QueryService):
                 out[p] = {"committed": v, "inventory": None, "payables": None, "consumption": v}
         return out
 
+    def _nc_change_key(self):
+        """Cheap probe — advances when an NCR is raised or a PO line (the dominant NC cost,
+        remedy material) is added. Two scalar MAXes; used to gate the whole-portfolio NC cache."""
+        cur = self._eto_conn().cursor()
+        cur.execute("SELECT (SELECT MAX(NonConformanceID) FROM dbo.tblNonConformance), "
+                    "(SELECT MAX(PurchaseDetailID) FROM dbo.tblPurchaseOrderDetails)")
+        r = cur.fetchone()
+        return (r[0], r[1])
+
     def _nc_by_project(self, project_ids):
-        """{pid: {'open': n, 'cost': $}} for the dashboard NC-actuals columns."""
+        """{pid: {'open': n, 'cost': $}} for the dashboard NC-actuals columns.
+
+        Served from the module-level whole-portfolio cache (fixed-cost query, so scope-free):
+        compute all projects once per change-key, filter to the requested scope instantly."""
         if not project_ids:
             return {}
+        keep = {int(p) for p in project_ids}
+        global _NC_CACHE
         try:
-            rows = _live_nc_cost_rows(self._eto_conn().cursor(), project_ids, None, None)
-            return ncspec.by_project_totals(rows)
+            key = self._nc_change_key()
         except Exception:
-            return {}
+            key = None
+        if key is None or _NC_CACHE.get("key") != key or _NC_CACHE.get("data") is None:
+            try:
+                rows = _live_nc_cost_rows(self._eto_conn().cursor(), None, None, None)  # whole portfolio
+                _NC_CACHE = {"key": key, "data": ncspec.by_project_totals(rows)}
+            except Exception:
+                return {}
+        return {int(pid): g for pid, g in _NC_CACHE["data"].items() if int(pid) in keep}
 
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids, date_from, date_to))
@@ -1016,7 +1045,7 @@ def _finalize_exec(rows):
 
 
 def _ids_sql(project_ids):
-    return ",".join(str(int(p)) for p in project_ids)
+    return ",".join(str(int(p)) for p in (project_ids or []))
 
 
 def _date_clause(col, dfrom, dto):
