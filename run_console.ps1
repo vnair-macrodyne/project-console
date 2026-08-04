@@ -26,17 +26,23 @@ $env:CONSOLE_AD_DOMAIN = "macrodynepress.com"   # UPN suffix — users log in as
 $env:CONSOLE_AUTH      = "windows"
 if (-not $env:CONSOLE_HTTPS) { $env:CONSOLE_HTTPS = "1" }   # 1 = behind Caddy TLS; 0 = plain HTTP
 
-# ---- secrets ----
+# ---- secrets / DB auth ----
 $secrets = Join-Path $PSScriptRoot "console_secrets.ps1"
 if (Test-Path $secrets) { . $secrets }
 
-$required = @("CONSOLE_SECRET_KEY","CONSOLE_STORE_USER","CONSOLE_STORE_PWD","ETO_USER","ETO_PWD")
-$missing  = $required | Where-Object { -not (Test-Path "Env:$_") }
-if ($missing) {
-    Write-Host "Missing required env vars: $($missing -join ', ')" -ForegroundColor Yellow
-    Write-Host "Create console_secrets.ps1 (untracked) that sets them, then re-run." -ForegroundColor Yellow
+# Database auth: default to WINDOWS auth (CONSOLE_STORE_TRUSTED=1) — the app connects to both
+# Macrodyne_Reporting and Macrodyne_Production as the account it runs under (no SQL passwords).
+# That account must have access to both DBs. To use SQL logins instead, set CONSOLE_STORE_USER/PWD
+# and ETO_USER/PWD (in console_secrets.ps1) — then this leaves trusted off.
+if (-not $env:CONSOLE_STORE_USER) { $env:CONSOLE_STORE_TRUSTED = "1" }
+
+if (-not $env:CONSOLE_SECRET_KEY) {
+    Write-Host "CONSOLE_SECRET_KEY is not set. Put a fixed random string in console_secrets.ps1:" -ForegroundColor Yellow
+    Write-Host '    $env:CONSOLE_SECRET_KEY = "…"   (generate: python -c ""import secrets;print(secrets.token_hex(32))"")' -ForegroundColor Yellow
     exit 1
 }
+$dbmode = if ($env:CONSOLE_STORE_TRUSTED -eq "1") { "Windows auth (Trusted)" } else { "SQL auth ($($env:CONSOLE_STORE_USER))" }
+Write-Host "Database auth: $dbmode" -ForegroundColor Green
 
 # ---- launch ----
 # serve_console.py reads the env we just set (CONSOLE_HTTPS picks 127.0.0.1 vs 0.0.0.0) and starts
