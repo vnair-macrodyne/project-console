@@ -15,6 +15,7 @@ Two backends implement the same `QueryService` interface:
 from dataclasses import dataclass, field, asdict
 
 from console.config import TENANT
+from console.domain import earned_value as _ev
 from console_web import etospec
 from console_web import ncspec
 
@@ -839,7 +840,8 @@ def _scorecard_result(rows):
         QueryColumn("NCCost", "Cost of NC", "money", "right", calc=True),
         QueryColumn("PctDone", "% Done", "pct", "right"),
         QueryColumn("CustAgreedDate", "Cust Agreed Ship", "date", "left"),
-        QueryColumn("RunoutLabour", f"{labour} Runout", "hours", "right"),
+        QueryColumn("RunoutLabour", f"{labour} Run-out (hrs)", "hours", "right", calc=True),
+        QueryColumn("RunoutPct", "Run-out %", "pct", "right", calc=True),
         QueryColumn("Rank", "Rank", "int", "right"),
     ]
     over = [r for r in rows if (r.get("LabourPct") or 0) > 1.0]
@@ -854,7 +856,9 @@ def _scorecard_result(rows):
             f"Inventory (issued from stock) + Payables (other booked costs) — footing to ETO's "
             f"“Material Costs Compared” report. {material} % = Resource Consumption ÷ budget. "
             f"{labour} is hours from timecards; NCR figures from the costing data. Budgets and "
-            f"% Done are the PM plan.")
+            f"% Done are the PM plan. Run-out is the computed Estimate at Completion "
+            f"(actual ÷ % complete) — green ≤95% of budget, amber 95–105%, red >105%; it falls "
+            f"back to the PM's entered run-out only when % Done is blank.")
     return QueryResult("scorecard", f"{proj} {L('scorecard')}", cols, rows, cards, note)
 
 
@@ -907,6 +911,9 @@ def _crosswalk_result(rows):
 
 
 def _scorecard_row(pid, f, rec):
+    # Run-out = computed EAC from budget/actual hours + PM %complete (earned_value engine),
+    # falling back to the PM's typed run-out only when there's no % complete yet.
+    _ro = _ev.compute(f.labour_budget_hours, f.labour_actual_hours, _num(rec.get("PctDone")))
     return {
         "ProjectID": pid,
         "LabourBudget": f.labour_budget_hours,
@@ -922,7 +929,8 @@ def _scorecard_row(pid, f, rec):
         "NCCost": _num(rec.get("NCCost")),
         "PctDone": _num(rec.get("PctDone")),
         "CustAgreedDate": _iso(rec.get("CustAgreedDate") or rec.get("POShipDate")),
-        "RunoutLabour": _num(rec.get("RunoutLabour")),
+        "RunoutLabour": (_ro.eac if _ro.eac is not None else _num(rec.get("RunoutLabour"))),
+        "RunoutPct": _ro.runout_pct,
         "Rank": _int(rec.get("Rank")),
     }
 
@@ -965,7 +973,7 @@ def _exec_columns():
         QueryColumn("PctDone", "% Done", "pct", "right", "Schedule"),
         # Budget
         QueryColumn("LabPctHrs", f"{labour} % (hrs)", "pct", "right", "Budget"),
-        QueryColumn("RunoutLabour", f"Run-out {labour}", "pct", "right", "Budget"),
+        QueryColumn("RunoutLabour", f"Run-out {labour}", "pct", "right", "Budget", calc=True),
         QueryColumn("MatPct", f"{material} %", "pct", "right", "Budget"),
         QueryColumn("RunoutMaterial", f"Run-out {material}", "pct", "right", "Budget"),
         # 2-Week Delta
@@ -1001,9 +1009,10 @@ def _exec_result(rows):
     note = (f"Italicised figures are calculated live from the system: {L('labour').lower()} & "
             f"{L('material').lower()} %, the 2-week {L('labour').lower()}-hours and "
             f"{L('material').lower()}-$ deltas, Line Items, LLTP Del. Late, and the "
-            "Non-Conformance figures. Schedule, % Done (incl. its 2-week delta), run-outs and the "
-            f"remaining procurement counts are PM entries. Ranked by {L('labour').lower()} % of "
-            "budget (hours).")
+            f"Non-Conformance figures, and the {L('labour').lower()} Run-out (computed Estimate at "
+            f"Completion = actual ÷ % complete). Schedule, % Done (incl. its 2-week delta), "
+            f"{L('material').lower()} run-out and the remaining procurement counts are PM entries. "
+            f"Ranked by {L('labour').lower()} % of budget (hours).")
     return QueryResult("exec", "Executive Dashboard", cols, rows, cards, note)
 
 
@@ -1011,6 +1020,8 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
     """Assemble one ranked row from financials (ETO) + overlay (manual)."""
     planned = rec.get("PlannedShipDate")
     agreed = rec.get("CustAgreedDate")
+    _ro = _ev.compute(f.labour_budget_hours if f else None,
+                      f.labour_actual_hours if f else None, _frac(rec.get("PctDone")))
     row = {
         "Rank": _int(rec.get("Rank")),
         "ProjectID": pid,
@@ -1022,7 +1033,7 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
         "SlippageDays": _slip(planned, agreed),
         "PctDone": _frac(rec.get("PctDone")),
         "LabPctHrs": f.labour_consumed_pct if f else None,
-        "RunoutLabour": _num(rec.get("RunoutLabour")),
+        "RunoutLabour": (_ro.runout_pct if _ro.runout_pct is not None else _num(rec.get("RunoutLabour"))),
         "MatPct": f.material_consumed_pct if f else None,
         "RunoutMaterial": _num(rec.get("RunoutMaterial")),
         "PctDoneDelta": _frac(rec.get("PctDoneDelta")),
