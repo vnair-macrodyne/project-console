@@ -370,6 +370,9 @@ class LiveQueryService(QueryService):
                 f.material_committed = b.get("committed")
                 f.material_inventory = b.get("inventory")
                 f.material_payables = b.get("payables")
+                f.labour_actual_cost = b.get("labour_cost")
+                f.sales_price = b.get("sales_price")
+                f.sold_margin = b.get("sold_margin")
         _FIN_CACHE[key] = {"at": now, "data": fin}
         if len(_FIN_CACHE) > 64:                       # bound the cache — evict the oldest
             _FIN_CACHE.pop(min(_FIN_CACHE, key=lambda k: _FIN_CACHE[k]["at"]), None)
@@ -738,15 +741,18 @@ class LiveQueryService(QueryService):
                     if str(pid).isdigit() and int(pid) in keep}
 
     def _material_consumption(self, project_ids):
-        """{pid: {'consumption','committed','inventory','payables'}} live from ETO's project
-        costing rollup — dbo.vwCostingSummed_ByProjectID.
+        """{pid: {'consumption','committed','inventory','payables','labour_cost','sales_price',
+        'sold_margin'}} live from ETO's project costing rollup — dbo.vwCostingSummed_ByProjectID.
 
         Resource Consumption = TotalMaterials = TotalPurchasedMaterials + TotalInventoryPulls
         + TotalExtraCosts. This equals vwProjectActualsVSEstimates.ActTotalMaterials and ties to
         ETO's "Material Costs Compared" report to the penny (verified project 240154:
         2,870,408.22 + 32,996.87 + 54.00 = 2,903,459.09). Committed Spend = the purchased
-        (costed) component only — the cash-out-the-door lens. Where a project has no costing row
-        (or the view can't be read) we fall back to the committed PO value so a tile never blanks.
+        (costed) component only — the cash-out-the-door lens. The same rollup carries the priced
+        labour actual (TotalLabor), the sold price (SalesPrice) and the margin booked at sale
+        (ProjectMargin) — the pieces the earning-at-completion view nets. Where a project has no
+        costing row (or the view can't be read) we fall back to the committed PO value so a tile
+        never blanks (the earning fields stay None → the earning columns simply don't render).
         """
         pids = [int(p) for p in project_ids] if project_ids else []
         if not pids:
@@ -757,7 +763,8 @@ class LiveQueryService(QueryService):
             df = self._df(
                 "SELECT ProjectID, TotalPurchasedMaterials AS Committed, "
                 "TotalInventoryPulls AS Inventory, TotalExtraCosts AS Payables, "
-                "TotalMaterials AS Consumption "
+                "TotalMaterials AS Consumption, TotalLabor AS LabourCost, "
+                "SalesPrice, ProjectMargin AS SoldMargin "
                 f"FROM dbo.vwCostingSummed_ByProjectID WHERE ProjectID IN ({ids})")
             for _, r in df.iterrows():
                 out[int(r["ProjectID"])] = {
@@ -765,6 +772,9 @@ class LiveQueryService(QueryService):
                     "inventory": round(float(r["Inventory"] or 0), 2),
                     "payables": round(float(r["Payables"] or 0), 2),
                     "consumption": round(float(r["Consumption"] or 0), 2),
+                    "labour_cost": _opt_money(r["LabourCost"]),
+                    "sales_price": _opt_money(r["SalesPrice"]),
+                    "sold_margin": _opt_frac(r["SoldMargin"]),
                 }
         except Exception:
             out = {}
@@ -773,7 +783,8 @@ class LiveQueryService(QueryService):
             po = self._material_actuals(missing)
             for p in missing:
                 v = po.get(p)
-                out[p] = {"committed": v, "inventory": None, "payables": None, "consumption": v}
+                out[p] = {"committed": v, "inventory": None, "payables": None, "consumption": v,
+                          "labour_cost": None, "sales_price": None, "sold_margin": None}
         return out
 
     def _nc_by_project(self, project_ids):
@@ -842,23 +853,36 @@ def _scorecard_result(rows):
         QueryColumn("CustAgreedDate", "Cust Agreed Ship", "date", "left"),
         QueryColumn("RunoutLabour", f"{labour} Run-out (hrs)", "hours", "right", calc=True),
         QueryColumn("RunoutPct", "Run-out %", "pct", "right", calc=True),
+        QueryColumn("CPI", "CPI", "num", "right", "Earning at Completion", calc=True),
+        QueryColumn("EarningEAC", "Earning $", "money", "right", "Earning at Completion", calc=True),
+        QueryColumn("SoldMargin", "Sold Margin", "pct", "right", "Earning at Completion"),
+        QueryColumn("MarginEAC", "Margin @ Compl.", "pct", "right", "Earning at Completion", calc=True),
         QueryColumn("Rank", "Rank", "int", "right"),
     ]
     over = [r for r in rows if (r.get("LabourPct") or 0) > 1.0]
+    earn = [r.get("EarningEAC") for r in rows if r.get("EarningEAC") is not None]
     cards = [
         Card(L("projects"), str(len(rows))),
         Card(f"Over {labour.lower()} budget", str(len(over)), "bad" if over else "good"),
         Card(f"Total {material.lower()} budget",
              _fmt_money(sum(r.get("MaterialBudget") or 0 for r in rows))),
     ]
-    note = (f"Italic figures are live from ETO. {material} now shows Resource Consumption — the "
+    if earn:                                            # projected earning across the scope
+        tot = sum(earn)
+        cards.append(Card("Projected earning @ completion", _fmt_money(tot),
+                          "good" if tot >= 0 else "bad"))
+    note = (f"Italic figures are live from ETO. {material} shows Resource Consumption — the "
             f"total resources drawn to the {proj.lower()}: Committed Spend (purchased material) + "
             f"Inventory (issued from stock) + Payables (other booked costs) — footing to ETO's "
             f"“Material Costs Compared” report. {material} % = Resource Consumption ÷ budget. "
             f"{labour} is hours from timecards; NCR figures from the costing data. Budgets and "
             f"% Done are the PM plan. Run-out is the computed Estimate at Completion "
             f"(actual ÷ % complete) — green ≤95% of budget, amber 95–105%, red >105%; it falls "
-            f"back to the PM's entered run-out only when % Done is blank.")
+            f"back to the PM's entered run-out only when % Done is blank. Earning at Completion "
+            f"projects what the job will actually return: CPI (earned ÷ actual — under 1.0 = "
+            f"trending over), Earning $ = sold price − cost at completion (labour run-out priced "
+            f"at the applied rate + material EAC), and Margin @ Completion vs the margin sold. "
+            f"These render only where ETO carries the sold price and a % complete to run out.")
     return QueryResult("scorecard", f"{proj} {L('scorecard')}", cols, rows, cards, note)
 
 
@@ -914,6 +938,7 @@ def _scorecard_row(pid, f, rec):
     # Run-out = computed EAC from budget/actual hours + PM %complete (earned_value engine),
     # falling back to the PM's typed run-out only when there's no % complete yet.
     _ro = _ev.compute(f.labour_budget_hours, f.labour_actual_hours, _num(rec.get("PctDone")))
+    earning, margin = _earning_block(f, _ro)
     return {
         "ProjectID": pid,
         "LabourBudget": f.labour_budget_hours,
@@ -931,8 +956,34 @@ def _scorecard_row(pid, f, rec):
         "CustAgreedDate": _iso(rec.get("CustAgreedDate") or rec.get("POShipDate")),
         "RunoutLabour": (_ro.eac if _ro.eac is not None else _num(rec.get("RunoutLabour"))),
         "RunoutPct": _ro.runout_pct,
+        "CPI": (round(_ro.cpi, 3) if _ro.cpi is not None else None),
+        "EarningEAC": earning,
+        "SoldMargin": getattr(f, "sold_margin", None),
+        "MarginEAC": margin,
         "Rank": _int(rec.get("Rank")),
     }
+
+
+def _earning_block(f, ro):
+    """Leadership earning lens → (earning_at_completion $, margin_at_completion fraction).
+
+    Cost EAC = labour run-out priced at the applied rate + material EAC, netted against the sold
+    price. Labour cost EAC = hours run-out (ro.eac) × applied $/hr (ETO cost ÷ hours). Material
+    EAC = the max of Committed Spend, Resource Consumption and budget — you'll spend at least what
+    you've committed, at least what you've consumed, and at least what you budgeted. Returns
+    (None, None) unless there's a computable hours run-out, an applied rate and a sold price — so
+    the columns stay blank rather than showing a half-built projection."""
+    if ro is None or ro.eac is None:
+        return None, None
+    rate = getattr(f, "labour_rate", None)
+    if rate is None:
+        return None, None
+    lab_cost_eac = round(ro.eac * rate, 2)
+    mat_vals = [x for x in (getattr(f, "material_committed", None), f.material_actual,
+                            f.material_budget) if x is not None]
+    if not mat_vals:
+        return None, None
+    return _ev.earning_at_completion(getattr(f, "sales_price", None), lab_cost_eac, max(mat_vals))
 
 
 def _budget_actual_row(pid, f):
@@ -1653,6 +1704,7 @@ def _clean_client(s):
 # ─────────────────────────────────────────────────────────────────────────────
 _DEMO = {
     230219: {"lb": 8429.0, "la": 10528.0, "mb": 2596000.0, "ma": 2393609.47,
+             "lc": 1000160.0, "sp": 4320000.0, "sm": 0.22,
              "done": 0.93, "runout": 1.25, "rank": 1, "ship": "2026-09-18",
              "disc": {"Project Management": (642.0, 588.0),
                       "Mechanical Engineering": (2140.0, 2760.0),
@@ -1661,6 +1713,7 @@ _DEMO = {
                       "Manufacturing": (3200.0, 4471.0),
                       "Other": (307.0, 310.0)}},
     230312: {"lb": 6120.0, "la": 5488.0, "mb": 1840000.0, "ma": 1502233.10,
+             "lc": 504896.0, "sp": 2900000.0, "sm": 0.20,
              "done": 0.78, "runout": 0.91, "rank": 3, "ship": "2026-11-06",
              "disc": {"Project Management": (410.0, 366.0),
                       "Mechanical Engineering": (1680.0, 1512.0),
@@ -1669,6 +1722,7 @@ _DEMO = {
                       "Manufacturing": (2210.0, 1876.0),
                       "Other": (200.0, 196.0)}},
     240087: {"lb": 4980.0, "la": 2210.0, "mb": 1310000.0, "ma": 402881.55,
+             "lc": 198900.0, "sp": 2200000.0, "sm": 0.25,
              "done": 0.41, "runout": 0.88, "rank": 5, "ship": "2027-02-19",
              "disc": {"Project Management": (330.0, 150.0),
                       "Mechanical Engineering": (1400.0, 640.0),
@@ -2195,6 +2249,12 @@ class _DemoFin:
         self.material_committed = round(d["ma"] - inv - pay, 2)   # purchased (costed) portion
         self.labour_consumed_pct = round(d["la"] / d["lb"], 4) if d["lb"] else None
         self.material_consumed_pct = round(d["ma"] / d["mb"], 4) if d["mb"] else None
+        # earning-at-completion inputs (ETO costing rollup in live mode)
+        self.labour_actual_cost = d.get("lc")
+        self.sales_price = d.get("sp")
+        self.sold_margin = d.get("sm")
+        self.labour_rate = (round(d["lc"] / d["la"], 4)
+                            if d.get("lc") is not None and d.get("la") else None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2212,6 +2272,22 @@ def _int(x):
         return None if x is None else int(float(x))
     except (TypeError, ValueError):
         return None
+
+
+def _opt_money(x):
+    """Money read that treats a genuine 0/blank as 'no value' (None) — so the earning columns
+    stay empty rather than projecting a $0 sold price or a zero labour rate."""
+    v = _num(x)
+    return round(v, 2) if v else None
+
+
+def _opt_frac(x):
+    """A margin from ETO that may arrive as a fraction (0.28) or a percent (28.4) → 0–1 fraction.
+    Signed (overruns can be negative), so normalise on magnitude, not a >1 test."""
+    v = _num(x)
+    if v is None:
+        return None
+    return round(v / 100.0, 4) if abs(v) > 1.0 else round(v, 4)
 
 
 def _frac(x):

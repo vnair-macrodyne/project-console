@@ -45,6 +45,17 @@ class ProjectFinancials:
     material_committed: float | None = None      # Committed Spend = ETO purchased (costed) materials
     material_inventory: float | None = None      # material issued from stock
     material_payables: float | None = None       # other booked costs (AP / extra)
+    labour_actual_cost: float | None = None      # ETO TotalLabor ($) — priced actual labour, for applied-rate EAC
+    sales_price: float | None = None             # ETO SalesPrice — the sold value of the job
+    sold_margin: float | None = None             # ETO ProjectMargin — margin booked at sale (fraction)
+
+    @property
+    def labour_rate(self):
+        """Applied labour rate ($/hr) from ETO actuals — priced cost ÷ hours charged. This is the
+        rate we carry forward to price the labour run-out (hours EAC) into a labour cost EAC."""
+        if self.labour_actual_hours:
+            return round((self.labour_actual_cost or 0.0) / self.labour_actual_hours, 4)
+        return None
 
     @property
     def labour_consumed_pct(self):
