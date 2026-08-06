@@ -94,7 +94,7 @@ class QueryResult:
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
-              "po_delivered", "po_buyer", "item_location",
+              "po_delivered", "po_buyer", "item_location", "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail"}
 
@@ -188,6 +188,11 @@ def catalogue():
         {"id": "item_location", "menu": "Inventory", "label": "Item Location",
          "desc": f"Current on-hand inventory for the items purchased on the selected "
                  f"{proj.lower()}s — by item and location (shared stock, live from ETO).",
+         "needs_projects": True},
+        # ── Shipping ──────────────────────────────────────────────────────
+        {"id": "packing_slip", "menu": "Shipping", "label": "Packing Slips",
+         "desc": f"Packing slips for the selected {proj.lower()}s — slip number, type, ship "
+                 "date, shipper and ship-to, with the lines shipped (live from ETO).",
          "needs_projects": True},
         # ── Non-Conformance ───────────────────────────────────────────────
         {"id": "nc_summary", "menu": "Non-Conformance", "label": "Summary",
@@ -679,6 +684,33 @@ class LiveQueryService(QueryService):
         ORDER BY pi.ProjectID, inv.ItemCompanyID, inv.LocationName
         """
         return _item_location_result(self._df(sql))
+
+    def _q_packing_slip(self, project_ids, **kw):
+        """Packing slips for the selected projects — header (number, type, dates, shipper, ship-to,
+        shipped/packed status) plus the lines shipped. ETO's own fully-joined shipping view
+        vwPackingSlips_SearchResults is directly project-scoped (ProjectID on each detail line), so
+        no manual header⋈detail join is needed. Verified 2026-08-06 — see
+        PROJECT_CONSOLE_INVENTORY_VALUE_2026-08-06.md."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return _packing_slip_result(None)
+        ids = _ids_sql(pids)
+        sql = f"""
+        SELECT ps.ProjectID AS ProjectID, p.DisplayName AS JobName,
+               ps.PackingSlipID AS PackingSlipID, ps.PackingSlipNumber AS SlipNo,
+               ps.PackingSlipTypeName AS SlipType, ps.CreatedDate AS CreatedDate,
+               ps.ShippedDate AS ShippedDate, ps.ShipperName AS Shipper,
+               ps.ShipToCompany AS ShipTo, ps.Shipped AS Shipped, ps.Packed AS Packed,
+               ps.SpecID AS Machine, ps.ItemCompanyID AS ItemNo,
+               ps.ItemDescription AS Description, ps.CategoryDescription AS Category,
+               ps.Quantity AS Qty
+        FROM dbo.vwPackingSlips_SearchResults ps
+        LEFT JOIN dbo.tblProjects p ON p.ProjectID = ps.ProjectID
+        WHERE ps.ProjectID IN ({ids})
+        ORDER BY ps.ProjectID, ps.ShippedDate DESC, ps.CreatedDate DESC,
+                 ps.PackingSlipID DESC, ps.ItemCompanyID
+        """
+        return _packing_slip_result(self._df(sql))
 
     def _q_po_delivered(self, project_ids, date_from=None, date_to=None, **kw):
         pids = [int(p) for p in project_ids] if project_ids else None
@@ -1495,6 +1527,100 @@ def _item_location_result(df):
                        _item_location_rows(df), cards, note)
 
 
+# ---- Shipping — Packing Slips (shipped lines by slip, project-scoped) ----
+def _spec_label(v):
+    """SpecID reads as a float (e.g. 10.0); show the whole-number machine code."""
+    try:
+        f = float(v)
+        return str(int(f)) if f == int(f) else str(f)
+    except (TypeError, ValueError):
+        return "" if v is None else str(v)
+
+
+def _packslip_band(r):
+    """One-line header band for a packing slip: number · type · status+date · shipper · ship-to."""
+    no = r.get("SlipNo") or ""
+    typ = r.get("SlipType") or ""
+    shipped = r.get("Shipped") is True or r.get("Shipped") == 1
+    packed = r.get("Packed") is True or r.get("Packed") == 1
+    status = "Shipped" if shipped else ("Packed" if packed else "Open")
+    d = r.get("ShippedDate") or r.get("CreatedDate")
+    dstr = str(d)[:10] if d not in (None, "") else ""
+    parts = [f"Slip {no}".rstrip()]
+    if typ:
+        parts.append(typ)
+    parts.append(status + (f" {dstr}" if dstr else ""))
+    if r.get("Shipper"):
+        parts.append(f"via {r.get('Shipper')}")
+    if r.get("ShipTo"):
+        parts.append(f"→ {r.get('ShipTo')}")
+    return "   ·   ".join(parts)
+
+
+def _packing_slip_rows(df):
+    """Grouped rows (project → packing slip → shipped line) with bands. Line counts only —
+    shipped quantities are mixed units of measure, so no numeric total (as with Item Location)."""
+    if df is None or df.empty:
+        return []
+    rows, total = [], 0
+    for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
+        psub = df[df["ProjectID"] == pid]
+        job = psub["JobName"].iloc[0] if "JobName" in psub.columns else ""
+        head = f"Project: {int(pid)} — {job or ''}".rstrip(" —")
+        rows.append({"_kind": "l3_sub", "Item": head})
+        seen = []
+        for sid in psub["PackingSlipID"]:
+            if sid not in seen:
+                seen.append(sid)
+        for sid in seen:
+            ssub = psub[psub["PackingSlipID"] == sid]
+            rows.append({"_kind": "l2_sub", "Item": _packslip_band(ssub.iloc[0])})
+            for _, r in ssub.iterrows():
+                rows.append({
+                    "_kind": "detail",
+                    "Item": r.get("ItemNo"), "Description": r.get("Description"),
+                    "Machine": _spec_label(r.get("Machine")), "Category": r.get("Category"),
+                    "Qty": _num(r.get("Qty")),
+                })
+        total += len(psub)
+        rows.append({"_kind": "l1_sub", "Description":
+                     f"Project {int(pid)} — {psub['PackingSlipID'].nunique()} packing slip(s), "
+                     f"{len(psub)} line(s), {psub['ItemNo'].nunique()} item(s)"})
+    rows.append({"_kind": "grand", "Item": f"GRAND TOTAL — {total} shipped line(s)"})
+    return rows
+
+
+def _packing_slip_result(df):
+    proj = L("project")
+    cols = [
+        QueryColumn("Item", "Item", "id", "left"),
+        QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("Machine", "Machine", "id", "left"),
+        QueryColumn("Category", "Category", "text", "left"),
+        QueryColumn("Qty", "Qty", "num", "right"),
+    ]
+    empty = df is None or df.empty
+    slips = 0 if empty else int(df["PackingSlipID"].nunique())
+    lines = 0 if empty else int(len(df))
+    items = 0 if empty else int(df["ItemNo"].nunique())
+    if empty:
+        shipped = 0
+    else:
+        mask = df["Shipped"].map(lambda v: v is True or v == 1)
+        shipped = int(df.loc[mask, "PackingSlipID"].nunique())
+    cards = [Card("Packing slips", "{:,}".format(slips)),
+             Card("Shipped lines", "{:,}".format(lines)),
+             Card("Distinct items", "{:,}".format(items)),
+             Card("Slips shipped", "{:,}".format(shipped),
+                  "good" if slips and shipped == slips else "neutral")]
+    note = (f"Packing slips for the selected {proj.lower()}s — one band per slip (number, type, "
+            "status, ship date, shipper and ship-to) with the lines shipped, live from ETO "
+            f"(vwPackingSlips_SearchResults). Grouped by {proj.lower()} then slip. Quantities are "
+            "per slip line and are not summed (mixed units of measure). Machine is the ETO SpecID.")
+    return QueryResult("packing_slip", "Shipping — Packing Slips", cols,
+                       _packing_slip_rows(df), cards, note)
+
+
 # ---- Non-Conformance (costed + attributed) -------------------------------
 # One scoped source feeds every NC report: vwNonConformances LEFT JOIN
 # vwCostingSummed_ByNC (+ origin department) — a transcription of ETO's
@@ -1944,6 +2070,12 @@ class DemoQueryService(QueryService):
         recs = [r for r in _DEMO_ITEMLOC if r["ProjectID"] in sel]
         return _item_location_result(pd.DataFrame(recs, columns=_DEMO_ITEMLOC_COLS))
 
+    def _q_packing_slip(self, project_ids, **kw):
+        import pandas as pd
+        sel = set(self._sel(project_ids))
+        recs = [r for r in _DEMO_PACKSLIP if r["ProjectID"] in sel]
+        return _packing_slip_result(pd.DataFrame(recs, columns=_DEMO_PACKSLIP_COLS))
+
     def _q_nc_summary(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_summary_result(self._nc_rows(project_ids))
 
@@ -2165,6 +2297,29 @@ _DEMO_ITEMLOC = [
     {"ProjectID": 240087, "JobName": _D87[0], "ItemNo": "E00216",
      "Description": "Mounting bracket for SL-C light curtain", "Location": "TOC",
      "Bin": "", "OnHand": 3, "MinReq": 1},
+]
+
+# Packing Slips — _q_packing_slip output shape (shipped lines by slip, project-scoped)
+_DEMO_PACKSLIP_COLS = ["ProjectID", "JobName", "PackingSlipID", "SlipNo", "SlipType",
+                       "CreatedDate", "ShippedDate", "Shipper", "ShipTo", "Shipped", "Packed",
+                       "Machine", "ItemNo", "Description", "Category", "Qty"]
+_DEMO_PACKSLIP = [
+    {"ProjectID": 230219, "JobName": _D19[0], "PackingSlipID": 9001, "SlipNo": "900004009336",
+     "SlipType": "Default", "CreatedDate": "2026-06-24", "ShippedDate": "2026-06-25",
+     "Shipper": "Purolator", "ShipTo": "Honeywell Electronic Materials", "Shipped": True,
+     "Packed": True, "Machine": 10.0, "ItemNo": "7077H0.0.0.0-05",
+     "Description": "2.5\" SCH 40 WELD NECK FLAT FACE FLANGE 150 LBS CARBON STEEL",
+     "Category": "FLANGES", "Qty": 2},
+    {"ProjectID": 230219, "JobName": _D19[0], "PackingSlipID": 9001, "SlipNo": "900004009336",
+     "SlipType": "Default", "CreatedDate": "2026-06-24", "ShippedDate": "2026-06-25",
+     "Shipper": "Purolator", "ShipTo": "Honeywell Electronic Materials", "Shipped": True,
+     "Packed": True, "Machine": 10.0, "ItemNo": "7086H0.0.0.0-12",
+     "Description": "2\" LONG RADIUS BUTTWELD SCH.40 ELBOW-90", "Category": "PIPE", "Qty": 4},
+    {"ProjectID": 230312, "JobName": _D12[0], "PackingSlipID": 9002, "SlipNo": "230127-11",
+     "SlipType": "Default", "CreatedDate": "2026-08-05", "ShippedDate": None,
+     "Shipper": "", "ShipTo": "Macrodyne Technologies Inc", "Shipped": False, "Packed": True,
+     "Machine": 20.0, "ItemNo": "8900M0.0.0.0-66", "Description": "CONNECTING TUBE 33.750 LG",
+     "Category": "MACHINED", "Qty": 7},
 ]
 
 # Procurement Exceptions — query_po_exceptions output shape
