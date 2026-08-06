@@ -94,7 +94,8 @@ class QueryResult:
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
-              "po_delivered", "po_buyer", "item_location", "inventory_value", "packing_slip",
+              "po_delivered", "po_buyer", "item_location", "inventory_value",
+              "inventory_by_site", "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail"}
 
@@ -194,6 +195,11 @@ def catalogue():
                  "— extended value by item and location, from ETO's receipt-layer cost (reconciles "
                  "with material costs), summarised by location.",
          "needs_projects": True},
+        {"id": "inventory_by_site", "menu": "Inventory", "label": "Inventory by Site",
+         "desc": "Where inventory sits across the sites (Macrodyne 1, Racco, TOC, PS1, Quinton, and "
+                 "In-Transit) — on-hand value by location for the whole shared stock pool. "
+                 "In-transit stock appears here whenever a site-to-site move is under way.",
+         "needs_projects": False},
         # ── Shipping ──────────────────────────────────────────────────────
         {"id": "packing_slip", "menu": "Shipping", "label": "Packing Slips",
          "desc": f"Packing slips for the selected {proj.lower()}s — slip number, type, ship "
@@ -721,6 +727,28 @@ class LiveQueryService(QueryService):
         ORDER BY pi.ProjectID, inv.LocationName, inv.ItemCompanyID
         """
         return _inventory_value_result(self._df(sql))
+
+    def _q_inventory_by_site(self, project_ids, **kw):
+        """Portfolio-wide on-hand VALUE by location/site — the whole shared stock pool, NOT scoped
+        to projects (inventory is shared; this answers 'where does our stock sit and what's it
+        worth'). Value = tblInventoryDetails layer cost (same basis as Inventory Value). In-transit
+        locations appear as their own rows when a site-to-site move is under way. Verified
+        2026-08-06; see PROJECT_CONSOLE_SHIPPING_INVENTORY_BUILD_2026-08-06.md."""
+        sql = """
+        SELECT inv.LocationName AS Location,
+               COUNT(*) AS Lines, COUNT(DISTINCT inv.ItemID) AS Items,
+               SUM(lay.ExtValue) AS Value,
+               SUM(CASE WHEN lay.ExtValue IS NULL THEN 1 ELSE 0 END) AS Uncosted
+        FROM dbo.vwInventory inv
+        LEFT JOIN (SELECT ItemID, InventoryLocation,
+                          SUM(CAST(InventoryDetailQty AS float) * CAST(PurchasePrice AS float)) AS ExtValue
+                   FROM dbo.tblInventoryDetails GROUP BY ItemID, InventoryLocation) lay
+          ON lay.ItemID = inv.ItemID AND lay.InventoryLocation = inv.InventoryLocation
+        WHERE inv.QtyOnHand > 0
+        GROUP BY inv.LocationName
+        ORDER BY SUM(lay.ExtValue) DESC
+        """
+        return _inventory_by_site_result(self._df(sql))
 
     def _q_packing_slip(self, project_ids, **kw):
         """Packing slips for the selected projects — header (number, type, dates, shipper, ship-to,
@@ -1632,6 +1660,54 @@ def _inventory_value_result(df):
                        _inventory_value_rows(df), cards, note)
 
 
+# ---- Inventory — By Site (portfolio-wide on-hand value by location) ----
+def _inventory_by_site_rows(df):
+    """One row per site (location) with lines, items and on-hand value, plus a grand total.
+    Portfolio-wide — the whole shared stock pool, not project-scoped."""
+    if df is None or df.empty:
+        return []
+    rows, tot_val, tot_lines = [], 0.0, 0
+    for _, r in df.iterrows():
+        rows.append({
+            "_kind": "detail",
+            "Location": r.get("Location"), "Lines": _int(r.get("Lines")),
+            "Items": _int(r.get("Items")), "Value": _num(r.get("Value")),
+        })
+        tot_val += float(r.get("Value") or 0)
+        tot_lines += int(r.get("Lines") or 0)
+    rows.append({"_kind": "grand", "Location": "GRAND TOTAL — all sites",
+                 "Lines": tot_lines, "Value": round(tot_val, 2)})
+    return rows
+
+
+def _inventory_by_site_result(df):
+    cols = [
+        QueryColumn("Location", "Site", "text", "left"),
+        QueryColumn("Lines", "Stocked Lines", "num", "right"),
+        QueryColumn("Items", "Distinct Items", "num", "right"),
+        QueryColumn("Value", "On-Hand Value", "money", "right"),
+    ]
+    empty = df is None or df.empty
+    sites = 0 if empty else int(len(df))
+    lines = 0 if empty else int(df["Lines"].fillna(0).sum())
+    val = 0.0 if empty else float(df["Value"].fillna(0).sum())
+    uncosted = 0 if empty else int(df["Uncosted"].fillna(0).sum()) if "Uncosted" in df.columns else 0
+    cards = [Card("Total on-hand value", _fmt_money2(val)),
+             Card("Sites", "{:,}".format(sites)),
+             Card("Stocked lines", "{:,}".format(lines))]
+    note = ("On-hand inventory value across all sites — the whole SHARED stock pool (not scoped to "
+            "a project). Extended value is ETO's purchased-material carrying cost from receipt "
+            "layers (tblInventoryDetails: quantity × purchase price), the same basis as material "
+            "costs. In-transit locations appear as their own rows whenever stock is mid-move "
+            "between sites. "
+            + (f"{uncosted:,} stocked line(s) across all sites are made-to-project or adjusted "
+               "stock without a purchase-price layer, so their quantity is on hand but not valued "
+               "as purchased material. " if uncosted else "")
+            + "Only items with on-hand > 0 are counted.")
+    return QueryResult("inventory_by_site", "Inventory — By Site", cols,
+                       _inventory_by_site_rows(df), cards, note)
+
+
 # ---- Shipping — Packing Slips (shipped lines by slip, project-scoped) ----
 def _spec_label(v):
     """SpecID reads as a float (e.g. 10.0); show the whole-number machine code."""
@@ -2181,6 +2257,10 @@ class DemoQueryService(QueryService):
         recs = [r for r in _DEMO_INVVAL if r["ProjectID"] in sel]
         return _inventory_value_result(pd.DataFrame(recs, columns=_DEMO_INVVAL_COLS))
 
+    def _q_inventory_by_site(self, project_ids, **kw):
+        import pandas as pd
+        return _inventory_by_site_result(pd.DataFrame(_DEMO_BYSITE, columns=_DEMO_BYSITE_COLS))
+
     def _q_packing_slip(self, project_ids, **kw):
         import pandas as pd
         sel = set(self._sel(project_ids))
@@ -2430,6 +2510,17 @@ _DEMO_INVVAL = [
     {"ProjectID": 230312, "JobName": _D12[0], "ItemNo": "E05413",
      "Description": "Cable tie, Black, 5\" (bags of 1000)", "Location": "Macrodyne 1",
      "Bin": "", "OnHand": 2000, "ExtValue": 100.0, "LayerQty": 2000},
+]
+
+# Inventory by Site — _q_inventory_by_site output shape (portfolio value by location)
+_DEMO_BYSITE_COLS = ["Location", "Lines", "Items", "Value", "Uncosted"]
+_DEMO_BYSITE = [
+    {"Location": "Macrodyne 2 (Racco)", "Lines": 2478, "Items": 2461, "Value": 4318220.55,
+     "Uncosted": 220},
+    {"Location": "Macrodyne 1", "Lines": 512, "Items": 508, "Value": 986431.20, "Uncosted": 61},
+    {"Location": "TOC", "Lines": 34, "Items": 34, "Value": 118764.00, "Uncosted": 3},
+    {"Location": "PS1", "Lines": 8, "Items": 8, "Value": 22110.40, "Uncosted": 0},
+    {"Location": "In Transit to Racco", "Lines": 0, "Items": 0, "Value": 0.0, "Uncosted": 0},
 ]
 
 # Packing Slips — _q_packing_slip output shape (shipped lines by slip, project-scoped)
