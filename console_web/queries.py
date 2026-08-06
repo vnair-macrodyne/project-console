@@ -1478,7 +1478,7 @@ def _po_to_order_rows(df):
     rows, total = [], 0.0
     for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
         psub = df[df["ProjectID"] == pid]
-        job = psub["JobName"].iloc[0] if "JobName" in psub.columns else ""
+        job = _s(psub["JobName"].iloc[0]) if "JobName" in psub.columns else ""
         cust = psub["Customer"].iloc[0] if "Customer" in psub.columns else ""
         head = f"Project: {int(pid)} — {job or ''}".rstrip(" —")
         if cust:
@@ -1549,7 +1549,7 @@ def _item_location_rows(df):
     rows, total = [], 0
     for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
         psub = df[df["ProjectID"] == pid]
-        job = psub["JobName"].iloc[0] if "JobName" in psub.columns else ""
+        job = _s(psub["JobName"].iloc[0]) if "JobName" in psub.columns else ""
         head = f"Project: {int(pid)} — {job or ''}".rstrip(" —")
         rows.append({"_kind": "l3_sub", "ItemNo": head})
         for _, r in psub.iterrows():
@@ -1601,7 +1601,7 @@ def _inventory_value_rows(df):
     rows, gtot = [], 0.0
     for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
         psub = df[df["ProjectID"] == pid]
-        job = psub["JobName"].iloc[0] if "JobName" in psub.columns else ""
+        job = _s(psub["JobName"].iloc[0]) if "JobName" in psub.columns else ""
         rows.append({"_kind": "l3_sub",
                      "ItemNo": f"Project: {int(pid)} — {job or ''}".rstrip(" —")})
         pval = 0.0
@@ -1709,32 +1709,50 @@ def _inventory_by_site_result(df):
 
 
 # ---- Shipping — Packing Slips (shipped lines by slip, project-scoped) ----
-def _spec_label(v):
-    """SpecID reads as a float (e.g. 10.0); show the whole-number machine code."""
+def _s(v):
+    """Safe display string: blank for None / NaN / NaT. A pandas NULL is a truthy float NaN, which
+    otherwise defeats `x or ''` / `if x:` guards and leaks the literal 'nan' into composed text."""
+    if v is None:
+        return ""
     try:
-        f = float(v)
+        if v != v:                      # NaN / NaT — the only values not equal to themselves
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v).strip()
+
+
+def _spec_label(v):
+    """SpecID reads as a float (e.g. 10.0); show the whole-number machine code ('' if blank)."""
+    s = _s(v)
+    if not s:
+        return ""
+    try:
+        f = float(s)
         return str(int(f)) if f == int(f) else str(f)
     except (TypeError, ValueError):
-        return "" if v is None else str(v)
+        return s
 
 
 def _packslip_band(r):
-    """One-line header band for a packing slip: number · type · status+date · shipper · ship-to."""
-    no = r.get("SlipNo") or ""
-    typ = r.get("SlipType") or ""
+    """One-line header band for a packing slip: number · type · status+date · shipper · ship-to.
+    Every field goes through _s() so a NULL (pandas NaN) never renders as 'nan'."""
+    no = _s(r.get("SlipNo"))
+    typ = _s(r.get("SlipType"))
     shipped = r.get("Shipped") is True or r.get("Shipped") == 1
     packed = r.get("Packed") is True or r.get("Packed") == 1
     status = "Shipped" if shipped else ("Packed" if packed else "Open")
-    d = r.get("ShippedDate") or r.get("CreatedDate")
-    dstr = str(d)[:10] if d not in (None, "") else ""
-    parts = [f"Slip {no}".rstrip()]
+    dstr = (_s(r.get("ShippedDate")) or _s(r.get("CreatedDate")))[:10]
+    parts = [f"Slip {no}" if no else "Slip"]
     if typ:
         parts.append(typ)
     parts.append(status + (f" {dstr}" if dstr else ""))
-    if r.get("Shipper"):
-        parts.append(f"via {r.get('Shipper')}")
-    if r.get("ShipTo"):
-        parts.append(f"→ {r.get('ShipTo')}")
+    shipper = _s(r.get("Shipper"))
+    if shipper:
+        parts.append(f"via {shipper}")
+    shipto = _s(r.get("ShipTo"))
+    if shipto:
+        parts.append(f"→ {shipto}")
     return "   ·   ".join(parts)
 
 
@@ -1746,7 +1764,7 @@ def _packing_slip_rows(df):
     rows, total = [], 0
     for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
         psub = df[df["ProjectID"] == pid]
-        job = psub["JobName"].iloc[0] if "JobName" in psub.columns else ""
+        job = _s(psub["JobName"].iloc[0]) if "JobName" in psub.columns else ""
         head = f"Project: {int(pid)} — {job or ''}".rstrip(" —")
         rows.append({"_kind": "l3_sub", "Item": head})
         seen = []
