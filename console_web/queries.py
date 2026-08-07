@@ -765,7 +765,9 @@ class LiveQueryService(QueryService):
                ps.PackingSlipID AS PackingSlipID, ps.PackingSlipNumber AS SlipNo,
                ps.PackingSlipTypeName AS SlipType, ps.CreatedDate AS CreatedDate,
                ps.ShippedDate AS ShippedDate, ps.ShipperName AS Shipper,
-               ps.ShipToCompany AS ShipTo, ps.Shipped AS Shipped, ps.Packed AS Packed,
+               ps.ShipFromCompany AS ShipFrom, ps.ShipFromSCity AS FromCity,
+               ps.ShipToCompany AS ShipTo, ps.ShipToSCity AS ToCity,
+               ps.Shipped AS Shipped, ps.Packed AS Packed,
                ps.SpecID AS Machine, ps.ItemCompanyID AS ItemNo,
                ps.ItemDescription AS Description, ps.CategoryDescription AS Category,
                ps.Quantity AS Qty
@@ -1737,8 +1739,24 @@ def _spec_label(v):
         return s
 
 
+def _place(company, city):
+    """Concise 'place' label: shorten the (many) Macrodyne legal names to 'Macrodyne', append the
+    city when present. Blank if both are null."""
+    c, ct = _s(company), _s(city)
+    if not c and not ct:
+        return ""
+    if "macrodyne" in c.lower():
+        c = "Macrodyne"
+    return f"{c} ({ct})" if (c and ct) else (c or ct)
+
+
+def _is_internal(r):
+    """Macrodyne → Macrodyne = an internal site-to-site transfer (vs a customer shipment)."""
+    return "macrodyne" in _s(r.get("ShipTo")).lower()
+
+
 def _packslip_band(r):
-    """One-line header band for a packing slip: number · type · status+date · shipper · ship-to.
+    """One-line header band for a packing slip: number · type · status+date · From → To · route type.
     Every field goes through _s() so a NULL (pandas NaN) never renders as 'nan'."""
     no = _s(r.get("SlipNo"))
     typ = _s(r.get("SlipType"))
@@ -1750,12 +1768,14 @@ def _packslip_band(r):
     if typ:
         parts.append(typ)
     parts.append(status + (f" {dstr}" if dstr else ""))
+    frm = _place(r.get("ShipFrom"), r.get("FromCity"))
+    to = _place(r.get("ShipTo"), r.get("ToCity"))
+    if frm or to:
+        parts.append(f"{frm or '?'} → {to or '?'}")
+    parts.append("internal transfer" if _is_internal(r) else "customer shipment")
     shipper = _s(r.get("Shipper"))
     if shipper:
         parts.append(f"via {shipper}")
-    shipto = _s(r.get("ShipTo"))
-    if shipto:
-        parts.append(f"→ {shipto}")
     return "   ·   ".join(parts)
 
 
@@ -1806,18 +1826,25 @@ def _packing_slip_result(df):
     lines = 0 if empty else int(len(df))
     items = 0 if empty else int(df["ItemNo"].nunique())
     if empty:
-        shipped = 0
+        shipped = internal = 0
     else:
         mask = df["Shipped"].map(lambda v: v is True or v == 1)
         shipped = int(df.loc[mask, "PackingSlipID"].nunique())
+        imask = df["ShipTo"].map(lambda v: "macrodyne" in _s(v).lower()) \
+            if "ShipTo" in df.columns else df["PackingSlipID"].map(lambda v: False)
+        internal = int(df.loc[imask, "PackingSlipID"].nunique())
     cards = [Card("Packing slips", "{:,}".format(slips)),
-             Card("Shipped lines", "{:,}".format(lines)),
+             Card("Internal transfers", "{:,}".format(internal),
+                  "neutral"),
              Card("Distinct items", "{:,}".format(items)),
              Card("Slips shipped", "{:,}".format(shipped),
                   "good" if slips and shipped == slips else "neutral")]
     note = (f"Packing slips for the selected {proj.lower()}s — one band per slip (number, type, "
-            "status, ship date, shipper and ship-to) with the lines shipped, live from ETO "
-            f"(vwPackingSlips_SearchResults). Grouped by {proj.lower()} then slip. Quantities are "
+            "status, ship date, From → To and route type) with the lines shipped, live from ETO "
+            f"(vwPackingSlips_SearchResults). Grouped by {proj.lower()} then slip. From → To is the "
+            "physical ship-from and ship-to on the slip; a Macrodyne → Macrodyne route is an "
+            "INTERNAL site-to-site transfer, anything else is a customer shipment (that split is "
+            "the inventory-transfer view ETO's StockTransfer flag couldn't provide). Quantities are "
             "per slip line and are not summed (mixed units of measure). Machine is the ETO SpecID.")
     return QueryResult("packing_slip", "Shipping — Packing Slips", cols,
                        _packing_slip_rows(df), cards, note)
@@ -2546,23 +2573,29 @@ _DEMO_BYSITE = [
 
 # Packing Slips — _q_packing_slip output shape (shipped lines by slip, project-scoped)
 _DEMO_PACKSLIP_COLS = ["ProjectID", "JobName", "PackingSlipID", "SlipNo", "SlipType",
-                       "CreatedDate", "ShippedDate", "Shipper", "ShipTo", "Shipped", "Packed",
-                       "Machine", "ItemNo", "Description", "Category", "Qty"]
+                       "CreatedDate", "ShippedDate", "Shipper", "ShipFrom", "FromCity", "ShipTo",
+                       "ToCity", "Shipped", "Packed", "Machine", "ItemNo", "Description",
+                       "Category", "Qty"]
 _DEMO_PACKSLIP = [
+    # customer shipment: Racco → Honeywell
     {"ProjectID": 230219, "JobName": _D19[0], "PackingSlipID": 9001, "SlipNo": "900004009336",
      "SlipType": "Default", "CreatedDate": "2026-06-24", "ShippedDate": "2026-06-25",
-     "Shipper": "Purolator", "ShipTo": "Honeywell Electronic Materials", "Shipped": True,
+     "Shipper": "Purolator", "ShipFrom": "Macrodyne Technologies Inc", "FromCity": "Thornhill",
+     "ShipTo": "Honeywell Electronic Materials", "ToCity": "Spokane Valley", "Shipped": True,
      "Packed": True, "Machine": 10.0, "ItemNo": "7077H0.0.0.0-05",
      "Description": "2.5\" SCH 40 WELD NECK FLAT FACE FLANGE 150 LBS CARBON STEEL",
      "Category": "FLANGES", "Qty": 2},
     {"ProjectID": 230219, "JobName": _D19[0], "PackingSlipID": 9001, "SlipNo": "900004009336",
      "SlipType": "Default", "CreatedDate": "2026-06-24", "ShippedDate": "2026-06-25",
-     "Shipper": "Purolator", "ShipTo": "Honeywell Electronic Materials", "Shipped": True,
+     "Shipper": "Purolator", "ShipFrom": "Macrodyne Technologies Inc", "FromCity": "Thornhill",
+     "ShipTo": "Honeywell Electronic Materials", "ToCity": "Spokane Valley", "Shipped": True,
      "Packed": True, "Machine": 10.0, "ItemNo": "7086H0.0.0.0-12",
      "Description": "2\" LONG RADIUS BUTTWELD SCH.40 ELBOW-90", "Category": "PIPE", "Qty": 4},
-    {"ProjectID": 230312, "JobName": _D12[0], "PackingSlipID": 9002, "SlipNo": "230127-11",
-     "SlipType": "Default", "CreatedDate": "2026-08-05", "ShippedDate": None,
-     "Shipper": "", "ShipTo": "Macrodyne Technologies Inc", "Shipped": False, "Packed": True,
+    # internal transfer: Racco → Concord (Macrodyne → Macrodyne)
+    {"ProjectID": 230312, "JobName": _D12[0], "PackingSlipID": 9002, "SlipNo": "20260429-3",
+     "SlipType": "AutoShip", "CreatedDate": "2026-04-30", "ShippedDate": None,
+     "Shipper": "", "ShipFrom": "Macrodyne Technologies Inc", "FromCity": "Thornhill",
+     "ShipTo": "Macrodyne Technologies Inc.", "ToCity": "Concord", "Shipped": False, "Packed": True,
      "Machine": 20.0, "ItemNo": "8900M0.0.0.0-66", "Description": "CONNECTING TUBE 33.750 LG",
      "Category": "MACHINED", "Qty": 7},
 ]
