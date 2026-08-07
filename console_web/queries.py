@@ -1710,8 +1710,10 @@ def _inventory_by_site_result(df):
 
 # ---- Shipping — Packing Slips (shipped lines by slip, project-scoped) ----
 def _s(v):
-    """Safe display string: blank for None / NaN / NaT. A pandas NULL is a truthy float NaN, which
-    otherwise defeats `x or ''` / `if x:` guards and leaks the literal 'nan' into composed text."""
+    """Safe display string: blank for None / NaN / NaT. A pandas NULL is a truthy float NaN (and a
+    null datetime is NaT), which defeats `x or ''` / `if x:` guards and would leak the literal
+    'nan'/'NaT' into composed band text. Belt-and-suspenders: also blank any value that stringifies
+    to a null sentinel, whatever its source."""
     if v is None:
         return ""
     try:
@@ -1719,7 +1721,8 @@ def _s(v):
             return ""
     except (TypeError, ValueError):
         pass
-    return str(v).strip()
+    s = str(v).strip()
+    return "" if s.lower() in ("nan", "nat", "none", "<na>", "nattype") else s
 
 
 def _spec_label(v):
