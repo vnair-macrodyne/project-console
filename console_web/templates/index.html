@@ -91,6 +91,9 @@
   .tablecard{overflow:hidden}
   .tscroll{overflow:auto;max-height:calc(100vh - 250px)}
   table{border-collapse:collapse;min-width:100%;font-variant-numeric:tabular-nums}
+  /* NC Dashboard: size to content instead of stretching to 100%, so table-fill slack can't
+     open a gap between the (max-width-capped) discipline column and the numeric columns. */
+  table.rq-nc_dashboard{min-width:0}
   thead th{position:sticky;top:0;background:var(--brand);color:#fff;font-weight:600;font-size:12.5px;
     text-align:left;padding:10px 13px;white-space:nowrap;cursor:pointer;z-index:1}
   thead th.r{text-align:right}
@@ -560,7 +563,7 @@ function _isBand(r,row){
   return r.columns.every(c=> _NUMT.indexOf(c.type)<0 || row[c.key]==null||row[c.key]==='' );
 }
 function renderPlain(r,rows){
-  let h='<table><thead><tr>';
+  let h='<table class="rq-'+String(r.query_id||'').replace(/[^A-Za-z0-9_]/g,'')+'"><thead><tr>';
   r.columns.forEach(c=>{ const rc=c.align==='right'?' r':''; const arrow=(!state._hier&&state.sort.key===c.key)?(state.sort.dir>0?'▲':'▼'):'';
     h+=`<th class="${rc.trim()}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`; });
   h+='</tr></thead><tbody>';
