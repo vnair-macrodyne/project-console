@@ -97,7 +97,7 @@ _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "po_delivered", "po_buyer", "item_location", "inventory_value",
               "inventory_by_site", "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
-              "nc_supplier", "nc_detail", "nc_rework"}
+              "nc_supplier", "nc_detail", "nc_rework", "nc_dashboard"}
 
 # reports that read ETO live and honour the optional date range / view
 ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
@@ -235,6 +235,11 @@ def catalogue():
          "desc": f"Rework / non-conformance labour charged to task 999 — hours and applied-rate "
                  f"cost per {proj.lower()} and {disc.lower()} (actual-only; 999 carries no budget). "
                  "The real cost-of-non-conformance labour the per-NCR view can't see.",
+         "needs_projects": True},
+        {"id": "nc_dashboard", "menu": "Non-Conformance", "label": "NC Dashboard",
+         "desc": f"Non-conformance as a % of budget — Labour (rework/999) and Material NC split, "
+                 f"per {disc.lower()} and an overall {proj.lower()} view, flagged against the "
+                 f"{proj.lower()}'s combined NC threshold (set in the Plan entry).",
          "needs_projects": True},
     ]
 
@@ -382,6 +387,30 @@ class LiveQueryService(QueryService):
                 slot = out.setdefault(int(pid), {}).setdefault(disc, [0.0, 0.0])
                 slot[0] += float(hrs or 0)
                 slot[1] += float(cost or 0)
+        except Exception:
+            return {}
+        return out
+
+    def _rework_thresholds(self, project_ids):
+        """Per-project rework/NCR threshold (fraction; 0.01 = 1%) from the latest PM/Plan entry
+        (Reporting.tblProjectPMEntry). Absent / not-yet-migrated → {} and the caller applies the
+        1% default. Set per project on the Plan entry screen."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return {}
+        ids = ",".join(str(p) for p in pids)
+        out = {}
+        try:
+            cur = self._console_conn().cursor()
+            cur.execute(
+                "SELECT ProjectID, ReworkThreshold FROM ("
+                "  SELECT ProjectID, ReworkThreshold,"
+                "         ROW_NUMBER() OVER (PARTITION BY ProjectID ORDER BY YearWeekKey DESC) AS rn"
+                "  FROM Reporting.tblProjectPMEntry"
+                f"  WHERE ReworkThreshold IS NOT NULL AND ProjectID IN ({ids})) t WHERE rn = 1")
+            for pid, thr in cur.fetchall():
+                if thr is not None:
+                    out[int(pid)] = float(thr)
         except Exception:
             return {}
         return out
@@ -565,6 +594,7 @@ class LiveQueryService(QueryService):
         ov = self._overlay_map()
         nc = self._nc_by_project(project_ids)
         rw = self._rework_by_discipline(project_ids)
+        thr = self._rework_thresholds(project_ids)
         rows = []
         for pid in sorted(fin):
             f = fin[pid]
@@ -572,6 +602,7 @@ class LiveQueryService(QueryService):
             g = nc.get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rec["Rework"] = round(sum(h for h, _ in rw.get(pid, {}).values()), 2) or None
+            rec["ReworkThreshold"] = thr.get(pid)     # per-project; _scorecard_row defaults to 1%
             rows.append(_scorecard_row(pid, f, rec))
         return _scorecard_result(rows)
 
@@ -992,6 +1023,34 @@ class LiveQueryService(QueryService):
     def _q_nc_rework(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_rework_result(self._rework_by_discipline(project_ids))
 
+    def _q_nc_dashboard(self, project_ids, date_from=None, date_to=None, **kw):
+        # NC as % of budget, Labour (rework 999) vs Material (NC material $), by discipline +
+        # overall. Lifetime view (NC is cumulative), so material NC ignores the date window.
+        fin = self._financials(project_ids)
+        rw = self._rework_by_discipline(project_ids)
+        ncrows = self._nc_rows(project_ids, None, None)
+        thr = self._rework_thresholds(project_ids)
+        matnc_pid, matnc_pd = {}, {}
+        for r in ncrows:
+            pv = r.get("ProjectID")
+            if pv in (None, ""):
+                continue
+            pid = int(pv)
+            dsc = r.get("Discipline") or "Other"
+            c = float(ncspec._material(r) or 0)
+            matnc_pid[pid] = matnc_pid.get(pid, 0.0) + c
+            dd = matnc_pd.setdefault(pid, {})
+            dd[dsc] = dd.get(dsc, 0.0) + c
+        data = []
+        for pid in sorted(fin):
+            f = fin[pid]
+            disc_budgets = {d.discipline: d.budget_hours for d in (f.disciplines or [])}
+            data.append(_nc_dash_record(
+                pid, f.labour_budget_hours, getattr(f, "labour_rate", None), f.material_budget,
+                disc_budgets, rw.get(pid, {}), matnc_pid.get(pid, 0.0),
+                matnc_pd.get(pid, {}), thr.get(pid)))
+        return _nc_dashboard_result(data)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared result builders (used by both live and demo backends)
@@ -1136,6 +1195,100 @@ def _nc_rework_result(rw):
             f"costing shows ~$0 labour. {disc}s use the same crosswalk as the labour reports.")
     return QueryResult("nc_rework", "Non-Conformance — Rework Labour", cols,
                        _nc_rework_rows(rw), cards, note)
+
+
+# ---- Non-Conformance — NC Dashboard (NC as % of budget: Labour + Material) ----
+def _nc_dash_record(pid, lab_budget_hrs, lab_rate, mat_budget, disc_budgets,
+                    rework_disc, mat_nc_total, mat_nc_disc, threshold):
+    """One project's NC-dashboard record (pure). Labour NC = rework(999): hours ÷ budget hours.
+    Material NC = NC material $ ÷ material budget $. Combined NC % = (rework $ + material NC $) ÷
+    total budget $, where labour budget $ = budget hours × applied rate. Flagged vs the project's
+    threshold (default 1%)."""
+    lab_budget_hrs = float(lab_budget_hrs or 0)
+    lab_rate = float(lab_rate or 0)
+    mat_budget = float(mat_budget or 0)
+    lab_nc_hrs = round(sum(float(h) for h, _ in rework_disc.values()), 2)
+    lab_nc_cost = round(sum(float(c) for _, c in rework_disc.values()), 2)
+    mat_nc = round(float(mat_nc_total or 0), 2)
+    lab_nc_pct = round(lab_nc_hrs / lab_budget_hrs, 4) if lab_budget_hrs else None
+    mat_nc_pct = round(mat_nc / mat_budget, 4) if mat_budget else None
+    total_budget = lab_budget_hrs * lab_rate + mat_budget
+    combined_cost = round(lab_nc_cost + mat_nc, 2)
+    combined_pct = round(combined_cost / total_budget, 4) if total_budget else None
+    thr = float(threshold) if threshold else 0.01
+    over = combined_pct is not None and combined_pct > thr
+    discs = []
+    for d in sorted(set(rework_disc) | set(mat_nc_disc)):
+        h, c = rework_disc.get(d, (0.0, 0.0))
+        dbud = float(disc_budgets.get(d) or 0)
+        discs.append({"disc": d, "hrs": round(float(h), 2) or None,
+                      "cost": round(float(c), 2) or None,
+                      "lab_pct": (round(float(h) / dbud, 4) if dbud else None),
+                      "mat_cost": round(float(mat_nc_disc.get(d, 0.0)), 2) or None})
+    return {"pid": int(pid), "lab_nc_hrs": lab_nc_hrs, "lab_nc_cost": lab_nc_cost,
+            "lab_nc_pct": lab_nc_pct, "mat_nc": mat_nc, "mat_nc_pct": mat_nc_pct,
+            "combined_cost": combined_cost, "combined_pct": combined_pct,
+            "threshold": thr, "over": over, "disciplines": discs}
+
+
+def _nc_dashboard_rows(data):
+    if not data:
+        return []
+    rows = []
+    for rec in data:
+        pid = rec["pid"]
+        cp = rec["combined_pct"]
+        band = (f"Project: {pid} — NC "
+                + (f"{cp * 100:.1f}% of budget" if cp is not None else "n/a")
+                + f" (threshold {rec['threshold'] * 100:.2f}%)"
+                + ("   ⚠ OVER" if rec["over"] else ""))
+        rows.append({"_kind": "l3_sub", "Discipline": band, "NCPct": cp})
+        for d in rec["disciplines"]:
+            rows.append({"_kind": "detail", "Discipline": d["disc"], "LabHrs": d["hrs"],
+                         "LabCost": d["cost"], "LabPct": d["lab_pct"], "MatCost": d["mat_cost"]})
+        lp = rec["lab_nc_pct"]
+        mp = rec["mat_nc_pct"]
+        rows.append({"_kind": "l1_sub",
+                     "Discipline": f"Project {pid} — Labour NC "
+                                   + (f"{lp * 100:.1f}%" if lp is not None else "n/a")
+                                   + " · Material NC "
+                                   + (f"{mp * 100:.1f}%" if mp is not None else "n/a"),
+                     "LabHrs": rec["lab_nc_hrs"] or None, "LabCost": rec["lab_nc_cost"] or None,
+                     "LabPct": lp, "MatCost": rec["mat_nc"] or None, "NCPct": cp})
+    tlab = round(sum(r["lab_nc_cost"] for r in data), 2)
+    tmat = round(sum(r["mat_nc"] for r in data), 2)
+    rows.append({"_kind": "grand", "Discipline": "GRAND TOTAL — Labour + Material NC",
+                 "LabCost": tlab, "MatCost": tmat})
+    return rows
+
+
+def _nc_dashboard_result(data):
+    proj, disc = L("project"), L("discipline")
+    cols = [
+        QueryColumn("Discipline", disc, "text", "left", wrap=True),
+        QueryColumn("LabHrs", "Labour NC (hrs)", "hours", "right", calc=True),
+        QueryColumn("LabCost", "Labour NC ($)", "money", "right", calc=True),
+        QueryColumn("LabPct", "Labour NC % (disc budget)", "pct", "right", calc=True),
+        QueryColumn("MatCost", "Material NC ($)", "money", "right", calc=True),
+        QueryColumn("NCPct", "NC % of budget", "pct", "right", calc=True),
+    ]
+    data = data or []
+    tlab = round(sum(r["lab_nc_cost"] for r in data), 2)
+    tmat = round(sum(r["mat_nc"] for r in data), 2)
+    over = [r for r in data if r["over"]]
+    cards = [Card("Labour NC ($)", _fmt_money2(tlab), "warn" if tlab else "neutral"),
+             Card("Material NC ($)", _fmt_money2(tmat), "warn" if tmat else "neutral"),
+             Card("Combined NC ($)", _fmt_money2(tlab + tmat)),
+             Card("Over NC threshold", str(len(over)), "bad" if over else "good")]
+    note = (f"Non-conformance as a % of budget, split into LABOUR (rework charged to task 999) and "
+            f"MATERIAL (NC material cost). Per {disc.lower()}: Labour NC % = rework hours ÷ that "
+            f"{disc.lower()}'s budget hours; Material NC $ is attributed by the NCR origin (no "
+            f"per-{disc.lower()} material budget exists, so it's shown as $, not %). Per "
+            f"{proj.lower()} (the band + subtotal): Combined NC % = (rework $ + material NC $) ÷ "
+            f"total budget $ (labour budget hours × applied rate + material budget), flagged ⚠ when "
+            f"it exceeds the {proj.lower()}'s NC threshold (Plan entry; default 1%). Lifetime view.")
+    return QueryResult("nc_dashboard", "Non-Conformance — NC Dashboard", cols,
+                       _nc_dashboard_rows(data), cards, note)
 
 
 def _budget_actual_result(rows):
@@ -2330,6 +2483,30 @@ class DemoQueryService(QueryService):
         rw = {pid: {d: list(v) for d, v in _DEMO_REWORK[pid].items()}
               for pid in self._sel(project_ids) if pid in _DEMO_REWORK}
         return _nc_rework_result(rw)
+
+    def _q_nc_dashboard(self, project_ids, date_from=None, date_to=None, **kw):
+        ncrows = self._nc_rows(project_ids)
+        matnc_pid, matnc_pd = {}, {}
+        for r in ncrows:
+            pid = int(r["ProjectID"])
+            dsc = r.get("Discipline") or "Other"
+            c = float(ncspec._material(r) or 0)
+            matnc_pid[pid] = matnc_pid.get(pid, 0.0) + c
+            dd = matnc_pd.setdefault(pid, {})
+            dd[dsc] = dd.get(dsc, 0.0) + c
+        # a per-project NC threshold (fraction) to exercise the ⚠ flag in demo; absent → 1%
+        thr = {230219: 0.01, 230312: 0.02}
+        data = []
+        for pid in self._sel(project_ids):
+            d = _DEMO[pid]
+            f = _DemoFin(d)
+            disc_budgets = {disc: b for disc, (b, _a) in d["disc"].items()}
+            rework = {disc: tuple(v) for disc, v in _DEMO_REWORK.get(pid, {}).items()}
+            data.append(_nc_dash_record(
+                pid, f.labour_budget_hours, f.labour_rate, f.material_budget,
+                disc_budgets, rework, matnc_pid.get(pid, 0.0),
+                matnc_pd.get(pid, {}), thr.get(pid)))
+        return _nc_dashboard_result(data)
 
     def _q_budget_actual(self, project_ids, **kw):
         rows = [_budget_actual_row(pid, _DemoFin(_DEMO[pid])) for pid in self._sel(project_ids)]

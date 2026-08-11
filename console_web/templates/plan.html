@@ -74,6 +74,9 @@
         <div class="fld"><label>Material Run-out (% of budget)</label>
           <div class="suffix"><input type="number" step="1" min="0" id="material_runout" class="entry" style="width:110px"><span class="u">%</span></div>
         </div>
+        <div class="fld"><label>Rework / NCR threshold (% of budget)</label>
+          <div class="suffix"><input type="number" step="0.1" min="0" id="rework_threshold" class="entry" placeholder="1.0" style="width:110px"><span class="u">%</span></div>
+        </div>
       </div>
       <div class="note">Run-out is a forecast of where the project lands at completion, as a % of
         budget (e.g. 125 = trending 25% over). It's a PM judgement for now; an objective run-out
@@ -137,6 +140,7 @@ el('proj').onchange=async()=>{
   el('percent_done').value=(b.percent_done!=null?b.percent_done:'');
   el('labour_runout').value=(b.labour_runout!=null?b.labour_runout:'');
   el('material_runout').value=(b.material_runout!=null?b.material_runout:'');
+  el('rework_threshold').value=(b.rework_threshold!=null?b.rework_threshold:'');
   el('form').style.display='block';
 };
 
@@ -148,7 +152,7 @@ el('saveBtn').onclick=async()=>{
   const payload={ project_id:Number(pid), entered_by:by,
     planned_ship:el('planned_ship').value||null,
     percent_done:val('percent_done'), labour_runout:val('labour_runout'),
-    material_runout:val('material_runout') };
+    material_runout:val('material_runout'), rework_threshold:val('rework_threshold') };
   el('saveBtn').disabled=true; showMsg('', 'Saving…');
   try{
     const r=await fetch('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

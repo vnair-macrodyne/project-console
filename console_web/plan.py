@@ -111,18 +111,21 @@ class LivePlanService(PlanService):
         name = self._eto_names([pid]).get(pid, "")
         base = {"project_id": pid, "name": name, "exists": False,
                 "percent_done": None, "planned_ship": None,
-                "labour_runout": None, "material_runout": None, "week": None}
+                "labour_runout": None, "material_runout": None,
+                "rework_threshold": None, "week": None}
         try:
             cur = self._cc().cursor()
             cur.execute("SELECT TOP 1 PercentComplete, PlannedShipDate, LabourRunout, "
-                        "MaterialRunout, YearWeekKey FROM Reporting.tblProjectPMEntry "
+                        "MaterialRunout, ReworkThreshold, YearWeekKey "
+                        "FROM Reporting.tblProjectPMEntry "
                         "WHERE ProjectID = ? ORDER BY YearWeekKey DESC", pid)
             r = cur.fetchone()
             if r:
                 base.update(exists=True,
                             percent_done=_pct_out(r[0]), planned_ship=_iso(r[1]),
                             labour_runout=_ratio_out(r[2]), material_runout=_ratio_out(r[3]),
-                            week=int(r[4]) if r[4] is not None else None)
+                            rework_threshold=_pct_out(r[4]),
+                            week=int(r[5]) if r[5] is not None else None)
         except Exception:
             pass
         return base
@@ -132,6 +135,7 @@ class LivePlanService(PlanService):
         pct = _frac_pct(payload.get("percent_done"))       # 0–100 (or 0–1) → fraction
         lrun = _ratio_pct(payload.get("labour_runout"))    # 125 (or 1.25) → 1.25
         mrun = _ratio_pct(payload.get("material_runout"))
+        thr = _thr_in(payload.get("rework_threshold"))     # 1.0 (%) → 0.01 fraction
         ship = _as_date(payload.get("planned_ship"))
         fy, wk, key = week_key(_dt.date.today())
         conn = self._cc()
@@ -142,18 +146,18 @@ class LivePlanService(PlanService):
         if row:
             cur.execute("UPDATE Reporting.tblProjectPMEntry SET PlannedShipDate = ?, "
                         "PercentComplete = ?, LabourRunout = ?, MaterialRunout = ?, "
-                        "CapturedAt = GETDATE() WHERE PMEntryID = ?",
-                        ship, pct, lrun, mrun, int(row[0]))
+                        "ReworkThreshold = ?, CapturedAt = GETDATE() WHERE PMEntryID = ?",
+                        ship, pct, lrun, mrun, thr, int(row[0]))
         else:
             carry = self._carry_forward(cur, pid)
             cur.execute(
                 "INSERT INTO Reporting.tblProjectPMEntry "
                 "(ProjectID, FiscalYear, WeekNo, YearWeekKey, PlannedShipDate, PercentComplete, "
-                " LabourRunout, MaterialRunout, MaterialActual, MaterialBudget, TotalLineItems, "
-                " LLTPOrdered, LLTPReleasedLate, LLTPOrderedLate, LLTPDeliveredLate, "
+                " LabourRunout, MaterialRunout, ReworkThreshold, MaterialActual, MaterialBudget, "
+                " TotalLineItems, LLTPOrdered, LLTPReleasedLate, LLTPOrderedLate, LLTPDeliveredLate, "
                 " PartsReleasedLate, PartsOrderedLate, IncludeFlag, Rank, ReRank, CapturedAt) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,GETDATE())",
-                pid, fy, wk, key, ship, pct, lrun, mrun,
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,GETDATE())",
+                pid, fy, wk, key, ship, pct, lrun, mrun, thr,
                 carry.get("MaterialActual"), carry.get("MaterialBudget"),
                 carry.get("TotalLineItems"), carry.get("LLTPOrdered"),
                 carry.get("LLTPReleasedLate"), carry.get("LLTPOrderedLate"),
@@ -192,7 +196,7 @@ _DEMO_NAMES = {230219: "230219 - 5500 Ton Forging Press", 230312: "230312 - 2500
 class DemoPlanService(PlanService):
     _store = {   # persists across requests within the process
         230219: {"percent_done": 0.93, "planned_ship": "2026-10-02",
-                 "labour_runout": 1.25, "material_runout": 1.08},
+                 "labour_runout": 1.25, "material_runout": 1.08, "rework_threshold": 0.015},
     }
 
     def list_projects(self):
@@ -205,12 +209,14 @@ class DemoPlanService(PlanService):
         rec = DemoPlanService._store.get(pid)
         base = {"project_id": pid, "name": _DEMO_NAMES.get(pid, ""), "exists": rec is not None,
                 "percent_done": None, "planned_ship": None,
-                "labour_runout": None, "material_runout": None, "week": week_key(_dt.date.today())[2]}
+                "labour_runout": None, "material_runout": None, "rework_threshold": None,
+                "week": week_key(_dt.date.today())[2]}
         if rec:
             base.update(percent_done=_pct_out(rec["percent_done"]),
                         planned_ship=rec["planned_ship"],
                         labour_runout=_ratio_out(rec["labour_runout"]),
-                        material_runout=_ratio_out(rec["material_runout"]))
+                        material_runout=_ratio_out(rec["material_runout"]),
+                        rework_threshold=_pct_out(rec.get("rework_threshold")))
         return base
 
     def save_plan(self, payload):
@@ -220,6 +226,7 @@ class DemoPlanService(PlanService):
             "planned_ship": (payload.get("planned_ship") or None),
             "labour_runout": _ratio_pct(payload.get("labour_runout")),
             "material_runout": _ratio_pct(payload.get("material_runout")),
+            "rework_threshold": _thr_in(payload.get("rework_threshold")),
         }
         return {"ok": True, "project_id": pid, "week": week_key(_dt.date.today())[2],
                 "percent_done": DemoPlanService._store[pid]["percent_done"],
@@ -252,6 +259,12 @@ def _ratio_pct(x):
     if v is None:
         return None
     return round(v / 100.0, 4) if v > 5.0 else round(v, 4)
+
+
+def _thr_in(x):
+    """Rework threshold input is always a percent (1.0 = 1%); store a 0–1 fraction (0.01)."""
+    v = _num(x)
+    return round(v / 100.0, 4) if v is not None else None
 
 
 def _pct_out(frac):
