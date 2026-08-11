@@ -104,7 +104,7 @@
   tbody tr.k-l2_sub td{background:#BDD7EE;font-weight:600;border-top:1px solid #a7c6e6}
   tbody tr.k-l3_sub td{background:#9DC3E6;font-weight:700;border-top:1px solid #86b2dd}
   tbody tr.k-grand  td{background:#2E75B6;color:#fff;font-weight:700}
-  tbody tr.band td{font-weight:700;letter-spacing:.01em}
+  tbody tr.band td{font-weight:700;letter-spacing:.01em;white-space:normal}
   /* pagination */
   .pager{display:flex;align-items:center;gap:8px;margin:10px 0 0;flex-wrap:wrap}
   .pager .pg{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 11px;
@@ -469,9 +469,12 @@ function fmt(v,type){
   if(type==='id') return String(v);
   return v;
 }
-function pctPill(v){
+function pctPill(v, thr){
   if(v===null||v===undefined) return '';
-  const cls = v>1.0?'bad':(v>=0.9?'warn':'good');
+  // thr set (e.g. NC dashboard): colour purely against that threshold — red over, green under.
+  // Otherwise the default budget-consumption scale (red ≥100%, amber ≥90%).
+  const cls = (thr!==null&&thr!==undefined) ? (v>thr?'bad':'good')
+                                            : (v>1.0?'bad':(v>=0.9?'warn':'good'));
   return `<span class="pill ${cls}">${(v*100).toFixed(1)}%</span>`;
 }
 function tlClass(v,type){
@@ -572,7 +575,7 @@ function renderPlain(r,rows){
     }
     h+=`<tr${kc?` class="${kc.trim()}"`:''}>`;
     r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':'', c.calc?'calc':''].filter(Boolean).join(' ');
-      const cell=c.type==='pct'?pctPill(row[c.key]):fmt(row[c.key],c.type);
+      const cell=c.type==='pct'?pctPill(row[c.key], row._thr):fmt(row[c.key],c.type);
       h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`; });
     h+='</tr>'; });
   return h+'</tbody></table>';

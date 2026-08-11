@@ -1242,26 +1242,29 @@ def _nc_dashboard_rows(data):
     rows = []
     for rec in data:
         pid = rec["pid"]
+        thr = rec["threshold"]                       # colours every % pill on this project's rows
         cp, lp, mp = rec["combined_pct"], rec["lab_nc_pct"], rec["mat_nc_pct"]
         # Full-width project band header: carries the whole NC summary in the label (no numeric
         # column populated → the frontend renders it as a spanning band, so the discipline column
         # is sized only by the short discipline names below, not by this long line).
         band = (f"Project {pid} — Combined NC {_p(cp)} of budget"
                 f"   ·   Labour {_p(lp)} · Material {_p(mp)}"
-                f"   ·   threshold {rec['threshold'] * 100:.2f}%"
+                f"   ·   threshold {thr * 100:.2f}%"
                 + ("     ⚠ OVER" if rec["over"] else ""))
-        rows.append({"_kind": "l3_sub", "Discipline": band})
+        rows.append({"_kind": "l3_sub", "Discipline": band, "_thr": thr})
         for d in rec["disciplines"]:
             rows.append({"_kind": "detail", "Discipline": d["disc"], "LabHrs": d["hrs"],
-                         "LabCost": d["cost"], "LabPct": d["lab_pct"], "MatCost": d["mat_cost"]})
+                         "LabCost": d["cost"], "LabPct": d["lab_pct"], "MatCost": d["mat_cost"],
+                         "_thr": thr})
         # Numeric subtotal — short label so it doesn't stretch the discipline column.
         rows.append({"_kind": "l1_sub", "Discipline": f"Project {pid} — total",
                      "LabHrs": rec["lab_nc_hrs"] or None, "LabCost": rec["lab_nc_cost"] or None,
-                     "LabPct": lp, "MatCost": rec["mat_nc"] or None, "NCPct": cp})
+                     "LabPct": lp, "MatCost": rec["mat_nc"] or None, "NCPct": cp, "_thr": thr})
     tlab = round(sum(r["lab_nc_cost"] for r in data), 2)
     tmat = round(sum(r["mat_nc"] for r in data), 2)
     tbud = sum(r.get("total_budget") or 0 for r in data)
-    grand = {"_kind": "grand", "Discipline": "GRAND TOTAL", "LabCost": tlab, "MatCost": tmat}
+    grand = {"_kind": "grand", "Discipline": "GRAND TOTAL", "LabCost": tlab, "MatCost": tmat,
+             "_thr": 0.01}
     if tbud:
         grand["NCPct"] = round((tlab + tmat) / tbud, 4)
     rows.append(grand)
