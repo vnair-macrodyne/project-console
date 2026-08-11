@@ -97,7 +97,7 @@ _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "po_delivered", "po_buyer", "item_location", "inventory_value",
               "inventory_by_site", "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
-              "nc_supplier", "nc_detail"}
+              "nc_supplier", "nc_detail", "nc_rework"}
 
 # reports that read ETO live and honour the optional date range / view
 ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
@@ -231,6 +231,11 @@ def catalogue():
          "desc": "Full NCR list — number, status, source, origin, discipline, part, supplier, "
                  "PO, cost, open corrective actions, root cause and CAPA.",
          "needs_projects": True},
+        {"id": "nc_rework", "menu": "Non-Conformance", "label": "Rework Labour",
+         "desc": f"Rework / non-conformance labour charged to task 999 — hours and applied-rate "
+                 f"cost per {proj.lower()} and {disc.lower()} (actual-only; 999 carries no budget). "
+                 "The real cost-of-non-conformance labour the per-NCR view can't see.",
+         "needs_projects": True},
     ]
 
 
@@ -348,6 +353,38 @@ class LiveQueryService(QueryService):
             from console.domain.hourtype_map import HourTypeDisciplineDAO
             self._hdmap = HourTypeDisciplineDAO.derive_description_map_from_eto(self._eto_conn())
         return self._hdmap
+
+    def _rework_by_discipline(self, project_ids):
+        """Rework / NC labour (task 999) by project → discipline, actual-only.
+        Spec 999 is the project's Non-Conformance / Rework bucket; it carries NO budget
+        (tblSpecHours has no 999 rows) and NONE of it is NCR-linked (verified 2026-08-07 —
+        which is exactly why the per-NCR NC labour reads $0). We attribute it to disciplines with
+        the SAME HourDescription→discipline crosswalk as normal actuals, so it lines up with the
+        discipline blocks. Returns {pid: {discipline: [hours, cost]}} (applied-rate cost)."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return {}
+        ids = _ids_sql(pids)
+        hd = self._hourdesc_map() or {}
+        sql = f"""
+            SELECT ProjectID, HourDescription, SUM(HourTime) AS Hours,
+                   SUM(LaborCostingValue) AS Cost
+            FROM dbo.vwCostingTimecardsSummed_BySpecIDAndHourType
+            WHERE SpecID = 999 AND ProjectID IN ({ids})
+            GROUP BY ProjectID, HourDescription
+        """
+        out = {}
+        try:
+            cur = self._eto_conn().cursor()
+            cur.execute(sql)
+            for pid, hdesc, hrs, cost in cur.fetchall():
+                disc = hd.get(hdesc, "Other")
+                slot = out.setdefault(int(pid), {}).setdefault(disc, [0.0, 0.0])
+                slot[0] += float(hrs or 0)
+                slot[1] += float(cost or 0)
+        except Exception:
+            return {}
+        return out
 
     def _financials(self, project_ids):
         # Cross-request TTL cache (module-level _FIN_CACHE), keyed by project-set. The Executive
@@ -529,12 +566,22 @@ class LiveQueryService(QueryService):
 
     def _q_discipline(self, project_ids, **kw):
         fin = self._financials(project_ids)
+        rw = self._rework_by_discipline(project_ids)
         rows = []
         for pid in sorted(fin):
+            prw = rw.get(pid, {})
             for d in fin[pid].disciplines:
+                rwh, rwc = prw.get(d.discipline, (0.0, 0.0))
+                # planned = actual EXCLUDING rework(999); consumed % is on planned only, so
+                # rework isn't folded into the budget-vs-actual position (Vijay 2026-08-07).
+                planned = round((d.actual_hours or 0.0) - float(rwh), 2)
+                cons = round(planned / d.budget_hours, 4) if d.budget_hours else None
+                rem = round(d.budget_hours - planned, 2) if d.budget_hours is not None else None
                 rows.append({"ProjectID": pid, "Discipline": d.discipline,
-                             "BudgetHours": d.budget_hours, "ActualHours": d.actual_hours,
-                             "ConsumedPct": d.consumed_pct, "RemainingHours": d.remaining_hours})
+                             "BudgetHours": d.budget_hours, "ActualHours": planned,
+                             "ConsumedPct": cons, "RemainingHours": rem,
+                             "ReworkHours": round(float(rwh), 2) or None,
+                             "ReworkCost": round(float(rwc), 2) or None})
         return _discipline_result(rows)
 
     def _q_budget_actual(self, project_ids, **kw):
@@ -929,6 +976,9 @@ class LiveQueryService(QueryService):
     def _q_nc_detail(self, project_ids, date_from=None, date_to=None, **kw):
         return _nc_detail_result(self._nc_rows(project_ids, date_from, date_to))
 
+    def _q_nc_rework(self, project_ids, date_from=None, date_to=None, **kw):
+        return _nc_rework_result(self._rework_by_discipline(project_ids))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared result builders (used by both live and demo backends)
@@ -994,13 +1044,71 @@ def _discipline_result(rows):
         QueryColumn("ActualHours", "Actual (hrs)", "hours", "right", calc=True),
         QueryColumn("ConsumedPct", "Consumed %", "pct", "right"),
         QueryColumn("RemainingHours", "Remaining (hrs)", "hours", "right"),
+        QueryColumn("ReworkHours", "Rework 999 (hrs)", "hours", "right", calc=True),
+        QueryColumn("ReworkCost", "Rework 999 ($)", "money", "right", calc=True),
     ]
     over = [r for r in rows if (r.get("ConsumedPct") or 0) > 1.0]
+    rework = round(sum(r.get("ReworkCost") or 0 for r in rows), 2)
     cards = [
         Card(f"{disc} lines", str(len(rows))),
         Card("Over budget", str(len(over)), "bad" if over else "good"),
+        Card("Rework labour (999)", _fmt_money2(rework), "warn" if rework else "neutral"),
     ]
-    return QueryResult("discipline", f"{disc} Financials", cols, rows, cards)
+    note = (f"Budgeted vs actual {L('labour').lower()} hours per {disc.lower()}. Actual and "
+            "Consumed % are PLANNED work only — labour charged to task 999 "
+            "(rework / non-conformance) is pulled OUT and shown in the Rework 999 columns, since "
+            "999 carries no budget and shouldn't inflate the consumed %. Actual + Rework = total "
+            f"hours charged to the {disc.lower()}.")
+    return QueryResult("discipline", f"{disc} Financials", cols, rows, cards, note)
+
+
+# ---- Non-Conformance — Rework Labour (task 999, by project & discipline) ----
+def _nc_rework_rows(rw):
+    """rw = {pid: {discipline: [hours, cost]}}. Grouped project → discipline with per-project and
+    grand subtotals (cost IS summable; hours too, within a project)."""
+    if not rw:
+        return []
+    rows, ghrs, gcost = [], 0.0, 0.0
+    for pid in sorted(rw, key=lambda x: int(x)):
+        discs = rw[pid]
+        rows.append({"_kind": "l3_sub", "Discipline": f"Project: {int(pid)}"})
+        phrs = pcost = 0.0
+        for disc in sorted(discs):
+            h, c = discs[disc]
+            rows.append({"_kind": "detail", "Discipline": disc,
+                         "ReworkHours": round(float(h), 2), "ReworkCost": round(float(c), 2)})
+            phrs += float(h)
+            pcost += float(c)
+        rows.append({"_kind": "l1_sub", "Discipline": f"Project {int(pid)} — total",
+                     "ReworkHours": round(phrs, 2), "ReworkCost": round(pcost, 2)})
+        ghrs += phrs
+        gcost += pcost
+    rows.append({"_kind": "grand", "Discipline": "GRAND TOTAL — rework labour",
+                 "ReworkHours": round(ghrs, 2), "ReworkCost": round(gcost, 2)})
+    return rows
+
+
+def _nc_rework_result(rw):
+    proj, disc = L("project"), L("discipline")
+    cols = [
+        QueryColumn("Discipline", disc, "text", "left"),
+        QueryColumn("ReworkHours", "Rework (hrs)", "hours", "right", calc=True),
+        QueryColumn("ReworkCost", "Rework ($)", "money", "right", calc=True),
+    ]
+    rw = rw or {}
+    projects = len(rw)
+    total_hrs = round(sum(h for d in rw.values() for h, _ in d.values()), 2)
+    total_cost = round(sum(c for d in rw.values() for _, c in d.values()), 2)
+    cards = [Card("Rework labour", _fmt_money2(total_cost), "warn" if total_cost else "neutral"),
+             Card("Rework hours", "{:,.1f}".format(total_hrs)),
+             Card(f"{proj}s with rework", str(projects))]
+    note = (f"Rework / non-conformance labour — hours and applied-rate cost charged to task 999 "
+            f"(the {proj.lower()}'s Non-Conformance / Rework bucket), by {proj.lower()} and "
+            f"{disc.lower()}. This is actual-only: 999 carries no budget, and NONE of it is linked "
+            "to an individual NCR (it's booked at the project level), which is why the per-NCR NC "
+            f"costing shows ~$0 labour. {disc}s use the same crosswalk as the labour reports.")
+    return QueryResult("nc_rework", "Non-Conformance — Rework Labour", cols,
+                       _nc_rework_rows(rw), cards, note)
 
 
 def _budget_actual_result(rows):
@@ -2096,6 +2204,14 @@ _DEMO_XWALK = {
     "Commissioning": "Other", "Documentation": "Other",
 }
 
+# Rework / NC (task 999) labour by project → discipline — actual-only, no budget.
+# {pid: {discipline: (hours, applied-rate cost)}}. Must be ≤ the demo disc actual so planned ≥ 0.
+_DEMO_REWORK = {
+    230219: {"Mechanical Engineering": (60.0, 5100.0), "Electrical Engineering": (18.0, 1530.0),
+             "Manufacturing": (67.0, 5360.0)},
+    230312: {"Mechanical Engineering": (12.0, 1020.0)},
+}
+
 
 # Executive-board extras for the demo (schedule/2-wk/procurement — the manual overlay)
 _DEMO_EXEC = {
@@ -2155,12 +2271,22 @@ class DemoQueryService(QueryService):
     def _q_discipline(self, project_ids, **kw):
         rows = []
         for pid in self._sel(project_ids):
+            prw = _DEMO_REWORK.get(pid, {})
             for disc, (b, a) in sorted(_DEMO[pid]["disc"].items()):
-                pct = round(a / b, 4) if b else None
+                rwh, rwc = prw.get(disc, (0.0, 0.0))
+                planned = round(a - rwh, 2)
+                pct = round(planned / b, 4) if b else None
                 rows.append({"ProjectID": pid, "Discipline": disc,
-                             "BudgetHours": b, "ActualHours": a, "ConsumedPct": pct,
-                             "RemainingHours": round(b - a, 2)})
+                             "BudgetHours": b, "ActualHours": planned, "ConsumedPct": pct,
+                             "RemainingHours": round(b - planned, 2),
+                             "ReworkHours": round(rwh, 2) or None,
+                             "ReworkCost": round(rwc, 2) or None})
         return _discipline_result(rows)
+
+    def _q_nc_rework(self, project_ids, date_from=None, date_to=None, **kw):
+        rw = {pid: {d: list(v) for d, v in _DEMO_REWORK[pid].items()}
+              for pid in self._sel(project_ids) if pid in _DEMO_REWORK}
+        return _nc_rework_result(rw)
 
     def _q_budget_actual(self, project_ids, **kw):
         rows = [_budget_actual_row(pid, _DemoFin(_DEMO[pid])) for pid in self._sel(project_ids)]
