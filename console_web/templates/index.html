@@ -91,9 +91,10 @@
   .tablecard{overflow:hidden}
   .tscroll{overflow:auto;max-height:calc(100vh - 250px)}
   table{border-collapse:collapse;min-width:100%;font-variant-numeric:tabular-nums}
-  /* NC Dashboard: size to content instead of stretching to 100%, so table-fill slack can't
-     open a gap between the (max-width-capped) discipline column and the numeric columns. */
-  table.rq-nc_dashboard{min-width:0}
+  /* NC Dashboard: keep the data columns tight AND fill the card. A blank trailing column soaks
+     up the table-fill slack at the right edge, so it can never open a gap between the
+     (max-width-capped) discipline column and the numeric columns. */
+  table.rq-nc_dashboard th.filler,table.rq-nc_dashboard td.filler{width:100%;padding:0;cursor:default}
   thead th{position:sticky;top:0;background:var(--brand);color:#fff;font-weight:600;font-size:12.5px;
     text-align:left;padding:10px 13px;white-space:nowrap;cursor:pointer;z-index:1}
   thead th.r{text-align:right}
@@ -563,9 +564,13 @@ function _isBand(r,row){
   return r.columns.every(c=> _NUMT.indexOf(c.type)<0 || row[c.key]==null||row[c.key]==='' );
 }
 function renderPlain(r,rows){
+  // A blank trailing column absorbs table-fill slack at the right edge for reports that would
+  // otherwise be narrower than the card (keeps columns tight without a mid-table gap).
+  const pad = r.query_id==='nc_dashboard';
   let h='<table class="rq-'+String(r.query_id||'').replace(/[^A-Za-z0-9_]/g,'')+'"><thead><tr>';
   r.columns.forEach(c=>{ const rc=c.align==='right'?' r':''; const arrow=(!state._hier&&state.sort.key===c.key)?(state.sort.dir>0?'▲':'▼'):'';
     h+=`<th class="${rc.trim()}" data-k="${c.key}">${c.label}<span class="arrow">${arrow}</span></th>`; });
+  if(pad) h+='<th class="filler"></th>';
   h+='</tr></thead><tbody>';
   rows.forEach(row=>{
     const kind=row._kind||'';
@@ -573,13 +578,14 @@ function renderPlain(r,rows){
     if(kind && kind!=='detail' && _isBand(r,row)){
       let label='';
       for(const c of r.columns){ if(row[c.key]!=null&&row[c.key]!==''){ label=fmt(row[c.key],c.type); break; } }
-      h+=`<tr class="band${kc}"><td colspan="${r.columns.length}">${label}</td></tr>`;
+      h+=`<tr class="band${kc}"><td colspan="${r.columns.length+(pad?1:0)}">${label}</td></tr>`;
       return;
     }
     h+=`<tr${kc?` class="${kc.trim()}"`:''}>`;
     r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':'', c.calc?'calc':''].filter(Boolean).join(' ');
       const cell=c.type==='pct'?pctPill(row[c.key], row._thr):fmt(row[c.key],c.type);
       h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`; });
+    if(pad) h+='<td class="filler"></td>';
     h+='</tr>'; });
   return h+'</tbody></table>';
 }
