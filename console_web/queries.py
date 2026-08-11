@@ -462,6 +462,7 @@ class LiveQueryService(QueryService):
         nc = self._nc_by_project(project_ids)
         proc = self._procurement_actuals(project_ids)
         tw = self._two_week_actuals(project_ids)
+        rw = self._rework_by_discipline(project_ids)
         rows = []
         for pid in fin:
             f = fin[pid]
@@ -471,7 +472,15 @@ class LiveQueryService(QueryService):
             rec.update(proc.get(pid, {}))          # calculated Line Items / LLTP Del. Late
             rec.update(tw.get(pid, {}))            # calculated 2-week labour hrs / material $
             name, client = meta.get(pid, (None, None))
-            disc_pct = {d.discipline: d.consumed_pct for d in (f.disciplines if f else [])}
+            # per-discipline % is PLANNED (excludes rework 999), consistent with the scorecard and
+            # Discipline Financials — rework is tracked separately as its own % of budget.
+            prw = rw.get(pid, {})
+            disc_pct = {}
+            for d in (f.disciplines if f else []):
+                rwh = prw.get(d.discipline, (0.0, 0.0))[0]
+                planned = (d.actual_hours or 0.0) - float(rwh)
+                disc_pct[d.discipline] = (round(planned / d.budget_hours, 4)
+                                          if d.budget_hours else None)
             rows.append(_exec_row(pid, name, client, f, rec, disc_pct))
         return _finalize_exec(rows)
 
@@ -555,12 +564,14 @@ class LiveQueryService(QueryService):
         fin = self._financials(project_ids)
         ov = self._overlay_map()
         nc = self._nc_by_project(project_ids)
+        rw = self._rework_by_discipline(project_ids)
         rows = []
         for pid in sorted(fin):
             f = fin[pid]
             rec = dict(ov.get(str(pid), {}))
             g = nc.get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
+            rec["Rework"] = round(sum(h for h, _ in rw.get(pid, {}).values()), 2) or None
             rows.append(_scorecard_row(pid, f, rec))
         return _scorecard_result(rows)
 
@@ -572,15 +583,17 @@ class LiveQueryService(QueryService):
             prw = rw.get(pid, {})
             for d in fin[pid].disciplines:
                 rwh, rwc = prw.get(d.discipline, (0.0, 0.0))
-                # planned = actual EXCLUDING rework(999); consumed % is on planned only, so
-                # rework isn't folded into the budget-vs-actual position (Vijay 2026-08-07).
+                # Consumed % is PLANNED work only — rework(999) is pulled OUT of the actual and
+                # shown separately, both in hours/$ and as its own % of budget (Vijay 2026-08-07).
                 planned = round((d.actual_hours or 0.0) - float(rwh), 2)
                 cons = round(planned / d.budget_hours, 4) if d.budget_hours else None
                 rem = round(d.budget_hours - planned, 2) if d.budget_hours is not None else None
+                rwpct = round(float(rwh) / d.budget_hours, 4) if d.budget_hours else None
                 rows.append({"ProjectID": pid, "Discipline": d.discipline,
                              "BudgetHours": d.budget_hours, "ActualHours": planned,
                              "ConsumedPct": cons, "RemainingHours": rem,
                              "ReworkHours": round(float(rwh), 2) or None,
+                             "ReworkPct": rwpct,
                              "ReworkCost": round(float(rwc), 2) or None})
         return _discipline_result(rows)
 
@@ -990,6 +1003,9 @@ def _scorecard_result(rows):
         QueryColumn("LabourBudget", f"{labour} Budget (hrs)", "hours", "right"),
         QueryColumn("LabourActual", f"{labour} Actual (hrs)", "hours", "right", calc=True),
         QueryColumn("LabourPct", f"{labour} %", "pct", "right"),
+        QueryColumn("LabourRework", "Rework (hrs)", "hours", "right", calc=True),
+        QueryColumn("ReworkPct", "Rework % of budget", "pct", "right", calc=True),
+        QueryColumn("ReworkThreshold", "Rework thresh %", "pct", "right"),
         QueryColumn("MaterialBudget", f"{material} Budget", "money", "right"),
         QueryColumn("MaterialCommitted", "Committed Spend", "money", "right", calc=True),
         QueryColumn("MaterialInventory", "Inventory", "money", "right", calc=True),
@@ -1009,10 +1025,14 @@ def _scorecard_result(rows):
         QueryColumn("Rank", "Rank", "int", "right"),
     ]
     over = [r for r in rows if (r.get("LabourPct") or 0) > 1.0]
+    over_rw = [r for r in rows
+               if r.get("ReworkPct") is not None and r.get("ReworkThreshold") is not None
+               and r["ReworkPct"] > r["ReworkThreshold"]]
     earn = [r.get("EarningEAC") for r in rows if r.get("EarningEAC") is not None]
     cards = [
         Card(L("projects"), str(len(rows))),
         Card(f"Over {labour.lower()} budget", str(len(over)), "bad" if over else "good"),
+        Card("Over rework threshold", str(len(over_rw)), "bad" if over_rw else "good"),
         Card(f"Total {material.lower()} budget",
              _fmt_money(sum(r.get("MaterialBudget") or 0 for r in rows))),
     ]
@@ -1031,7 +1051,12 @@ def _scorecard_result(rows):
             f"projects what the job will actually return: CPI (earned ÷ actual — under 1.0 = "
             f"trending over), Earning $ = sold price − cost at completion (labour run-out priced "
             f"at the applied rate + material EAC), and Margin @ Completion vs the margin sold. "
-            f"These render only where ETO carries the sold price and a % complete to run out.")
+            f"These render only where ETO carries the sold price and a % complete to run out. "
+            f"{labour} Actual and {labour} % are PLANNED work — rework (task 999) is excluded and "
+            f"tracked separately as Rework (hrs) and Rework % of budget, flagged when it exceeds "
+            f"the {proj.lower()}'s rework threshold (default 1%, set per {proj.lower()} in the "
+            f"Plan entry). Run-out, CPI and earning stay on TOTAL labour (rework is still real "
+            f"spend).")
     return QueryResult("scorecard", f"{proj} {L('scorecard')}", cols, rows, cards, note)
 
 
@@ -1045,20 +1070,22 @@ def _discipline_result(rows):
         QueryColumn("ConsumedPct", "Consumed %", "pct", "right"),
         QueryColumn("RemainingHours", "Remaining (hrs)", "hours", "right"),
         QueryColumn("ReworkHours", "Rework 999 (hrs)", "hours", "right", calc=True),
+        QueryColumn("ReworkPct", "Rework % of budget", "pct", "right", calc=True),
         QueryColumn("ReworkCost", "Rework 999 ($)", "money", "right", calc=True),
     ]
     over = [r for r in rows if (r.get("ConsumedPct") or 0) > 1.0]
     rework = round(sum(r.get("ReworkCost") or 0 for r in rows), 2)
     cards = [
         Card(f"{disc} lines", str(len(rows))),
-        Card("Over budget", str(len(over)), "bad" if over else "good"),
+        Card("Over budget (planned)", str(len(over)), "bad" if over else "good"),
         Card("Rework labour (999)", _fmt_money2(rework), "warn" if rework else "neutral"),
     ]
     note = (f"Budgeted vs actual {L('labour').lower()} hours per {disc.lower()}. Actual and "
-            "Consumed % are PLANNED work only — labour charged to task 999 "
-            "(rework / non-conformance) is pulled OUT and shown in the Rework 999 columns, since "
-            "999 carries no budget and shouldn't inflate the consumed %. Actual + Rework = total "
-            f"hours charged to the {disc.lower()}.")
+            "Consumed % are PLANNED work only — labour charged to task 999 (rework / "
+            "non-conformance) is pulled OUT and shown separately: hours, its own % of the "
+            f"{disc.lower()}'s budget hours, and applied-rate $. 999 carries no budget of its own, "
+            "so it isn't counted in the budget-vs-actual position. Actual + Rework = total hours "
+            f"charged to the {disc.lower()}.")
     return QueryResult("discipline", f"{disc} Financials", cols, rows, cards, note)
 
 
@@ -1146,11 +1173,24 @@ def _scorecard_row(pid, f, rec):
     # falling back to the PM's typed run-out only when there's no % complete yet.
     _ro = _ev.compute(f.labour_budget_hours, f.labour_actual_hours, _num(rec.get("PctDone")))
     earning, margin = _earning_block(f, _ro)
+    # Labour Actual / % are PLANNED (exclude rework 999); rework is its own hours + % of budget,
+    # flagged against the per-project threshold (default 1%). Run-out / CPI / earning above stay on
+    # the TOTAL actual (rework is still real spend). Vijay 2026-08-07.
+    rw_h = _num(rec.get("Rework")) or 0.0
+    planned_actual = (round(f.labour_actual_hours - rw_h, 2)
+                      if f.labour_actual_hours is not None else None)
+    planned_pct = (round(planned_actual / f.labour_budget_hours, 4)
+                   if (f.labour_budget_hours and planned_actual is not None) else None)
+    rework_pct = round(rw_h / f.labour_budget_hours, 4) if f.labour_budget_hours else None
+    rework_thresh = _num(rec.get("ReworkThreshold")) or 0.01     # per-project; 1% default
     return {
         "ProjectID": pid,
         "LabourBudget": f.labour_budget_hours,
-        "LabourActual": f.labour_actual_hours,
-        "LabourPct": f.labour_consumed_pct,
+        "LabourActual": planned_actual,
+        "LabourPct": planned_pct,
+        "LabourRework": (rw_h or None),
+        "ReworkPct": rework_pct,
+        "ReworkThreshold": rework_thresh,
         "MaterialBudget": f.material_budget,
         "MaterialCommitted": getattr(f, "material_committed", None),
         "MaterialInventory": getattr(f, "material_inventory", None),
@@ -2239,7 +2279,8 @@ class DemoQueryService(QueryService):
         for pid in self._sel(project_ids):
             d, e = _DEMO[pid], _DEMO_EXEC[pid]
             f = _DemoFin(d)
-            disc_pct = {disc: (round(a / b, 4) if b else None)
+            prw = _DEMO_REWORK.get(pid, {})
+            disc_pct = {disc: (round((a - prw.get(disc, (0.0, 0.0))[0]) / b, 4) if b else None)
                         for disc, (b, a) in d["disc"].items()}
             rec = {"Rank": d["rank"], "POShipDate": e["po"], "CustAgreedDate": d["ship"],
                    "PlannedShipDate": e["planned"], "PctDone": d["done"],
@@ -2265,6 +2306,7 @@ class DemoQueryService(QueryService):
                    "CustAgreedDate": d["ship"]}
             g = _demo_nc_by_project().get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
+            rec["Rework"] = round(sum(h for h, _ in _DEMO_REWORK.get(pid, {}).values()), 2) or None
             rows.append(_scorecard_row(pid, f, rec))
         return _scorecard_result(rows)
 
@@ -2276,10 +2318,11 @@ class DemoQueryService(QueryService):
                 rwh, rwc = prw.get(disc, (0.0, 0.0))
                 planned = round(a - rwh, 2)
                 pct = round(planned / b, 4) if b else None
+                rwpct = round(rwh / b, 4) if b else None
                 rows.append({"ProjectID": pid, "Discipline": disc,
                              "BudgetHours": b, "ActualHours": planned, "ConsumedPct": pct,
                              "RemainingHours": round(b - planned, 2),
-                             "ReworkHours": round(rwh, 2) or None,
+                             "ReworkHours": round(rwh, 2) or None, "ReworkPct": rwpct,
                              "ReworkCost": round(rwc, 2) or None})
         return _discipline_result(rows)
 
@@ -2575,6 +2618,8 @@ _DEMO_LAB_PERIOD = [
     _lab("Engineering", 230219, *_D19, "222", "222 - Papenfuss, Paul", "Mechanical Engineering", "HPU Design", 8.0, 95),
     _lab("Engineering", 230219, *_D19, "5070", "5070 - Rozik, Greg", "Electrical Engineering", "PLC programming", 4.0, 80, 1.5),
     _lab("Manufacturing", 230219, *_D19, "5281", "5281 - Hacault, Nathan", "Mechanical Assembly", "", 10.5, 95),
+    _lab("Manufacturing", 230219, *_D19, "5281", "5281 - Hacault, Nathan", "Re-work", "NCR rework (task 999)", 6.0, 95),
+    _lab("Engineering", 230219, *_D19, "222", "222 - Papenfuss, Paul", "Re-work", "NCR rework (task 999)", 3.0, 95),
     _lab("Engineering", 230312, *_D12, "155", "155 - Tam, SzeWai", "Hydraulic Engineering", "Manifold layout", 7.0, 95),
     _lab("Manufacturing", 230312, *_D12, "121", "121 - Ferns, Rob", "Tubing/Piping", "", 8.0, 95),
     _lab("Engineering", 240087, *_D87, "203", "203 - Kerridge, Trevor", "Electrical Engineering", "Controls", 8.0, 95),

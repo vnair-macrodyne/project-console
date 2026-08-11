@@ -222,7 +222,8 @@ def query_daily_labour(start_date, end_date, project_ids=None):
         cust.CName                                  AS Customer,
         tc.EmpNumber                                AS EmpNo,
         tc.EmpNumber + ' - ' + e.EmpLastName + ', ' + e.EmpFirstName AS Employee,
-        ht.HourDescription                          AS Category,
+        CASE WHEN tc.SpecID = 999 THEN 'Re-work'
+             ELSE ht.HourDescription END             AS Category,
         ISNULL(tc.TimecardCustom1, '')              AS JobDetail,
         1                                           AS Entries,
         tc.HourTime                                 AS Hours,
