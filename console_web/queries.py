@@ -1228,37 +1228,43 @@ def _nc_dash_record(pid, lab_budget_hrs, lab_rate, mat_budget, disc_budgets,
     return {"pid": int(pid), "lab_nc_hrs": lab_nc_hrs, "lab_nc_cost": lab_nc_cost,
             "lab_nc_pct": lab_nc_pct, "mat_nc": mat_nc, "mat_nc_pct": mat_nc_pct,
             "combined_cost": combined_cost, "combined_pct": combined_pct,
-            "threshold": thr, "over": over, "disciplines": discs}
+            "total_budget": round(total_budget, 2), "threshold": thr, "over": over,
+            "disciplines": discs}
 
 
 def _nc_dashboard_rows(data):
     if not data:
         return []
+
+    def _p(x):                                   # fraction → "1.4%" / "n/a"
+        return f"{x * 100:.1f}%" if x is not None else "n/a"
+
     rows = []
     for rec in data:
         pid = rec["pid"]
-        cp = rec["combined_pct"]
-        band = (f"Project: {pid} — NC "
-                + (f"{cp * 100:.1f}% of budget" if cp is not None else "n/a")
-                + f" (threshold {rec['threshold'] * 100:.2f}%)"
-                + ("   ⚠ OVER" if rec["over"] else ""))
-        rows.append({"_kind": "l3_sub", "Discipline": band, "NCPct": cp})
+        cp, lp, mp = rec["combined_pct"], rec["lab_nc_pct"], rec["mat_nc_pct"]
+        # Full-width project band header: carries the whole NC summary in the label (no numeric
+        # column populated → the frontend renders it as a spanning band, so the discipline column
+        # is sized only by the short discipline names below, not by this long line).
+        band = (f"Project {pid} — Combined NC {_p(cp)} of budget"
+                f"   ·   Labour {_p(lp)} · Material {_p(mp)}"
+                f"   ·   threshold {rec['threshold'] * 100:.2f}%"
+                + ("     ⚠ OVER" if rec["over"] else ""))
+        rows.append({"_kind": "l3_sub", "Discipline": band})
         for d in rec["disciplines"]:
             rows.append({"_kind": "detail", "Discipline": d["disc"], "LabHrs": d["hrs"],
                          "LabCost": d["cost"], "LabPct": d["lab_pct"], "MatCost": d["mat_cost"]})
-        lp = rec["lab_nc_pct"]
-        mp = rec["mat_nc_pct"]
-        rows.append({"_kind": "l1_sub",
-                     "Discipline": f"Project {pid} — Labour NC "
-                                   + (f"{lp * 100:.1f}%" if lp is not None else "n/a")
-                                   + " · Material NC "
-                                   + (f"{mp * 100:.1f}%" if mp is not None else "n/a"),
+        # Numeric subtotal — short label so it doesn't stretch the discipline column.
+        rows.append({"_kind": "l1_sub", "Discipline": f"Project {pid} — total",
                      "LabHrs": rec["lab_nc_hrs"] or None, "LabCost": rec["lab_nc_cost"] or None,
                      "LabPct": lp, "MatCost": rec["mat_nc"] or None, "NCPct": cp})
     tlab = round(sum(r["lab_nc_cost"] for r in data), 2)
     tmat = round(sum(r["mat_nc"] for r in data), 2)
-    rows.append({"_kind": "grand", "Discipline": "GRAND TOTAL — Labour + Material NC",
-                 "LabCost": tlab, "MatCost": tmat})
+    tbud = sum(r.get("total_budget") or 0 for r in data)
+    grand = {"_kind": "grand", "Discipline": "GRAND TOTAL", "LabCost": tlab, "MatCost": tmat}
+    if tbud:
+        grand["NCPct"] = round((tlab + tmat) / tbud, 4)
+    rows.append(grand)
     return rows
 
 
