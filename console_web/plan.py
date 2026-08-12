@@ -115,7 +115,7 @@ class LivePlanService(PlanService):
         pid = int(project_id)
         name = self._eto_names([pid]).get(pid, "")
         base = {"project_id": pid, "name": name, "exists": False,
-                "planned_ship": None,
+                "planned_ship": None, "planned_ship_default": False,
                 "labour_runout": None, "material_runout": None,   # optional PM overrides only
                 "rework_threshold": None, "week": None,
                 "discipline_progress": {d: None for d in DISCIPLINES}}
@@ -149,6 +149,23 @@ class LivePlanService(PlanService):
                     base["exists"] = True
         except Exception:
             pass
+        # Planned Ship stays a MANUAL Console value — ETO carries no maintained ship date
+        # (verified 2026-08-11: tblProjects.PDelivery / vwProjects.SalesDelivery / per-spec
+        # BudgetShipRelease all empty). To avoid a blank field, default it from the customer-agreed
+        # (else PO) ship date already in the overlay; it's just a starting point the PM can override.
+        if not base.get("planned_ship"):
+            try:
+                cur = self._cc().cursor()
+                cur.execute("SELECT TOP 1 CustAgreedShipDate, POShipDate "
+                            "FROM Reporting.vw_Console_ManualOverlay WHERE ProjectID = ?", pid)
+                r = cur.fetchone()
+                if r:
+                    d = r[0] if r[0] is not None else r[1]
+                    if d is not None:
+                        base["planned_ship"] = _iso(d)
+                        base["planned_ship_default"] = True
+            except Exception:
+                pass
         return base
 
     def save_plan(self, payload):
@@ -256,7 +273,7 @@ class DemoPlanService(PlanService):
         pid = int(project_id)
         rec = DemoPlanService._store.get(pid)
         base = {"project_id": pid, "name": _DEMO_NAMES.get(pid, ""), "exists": rec is not None,
-                "planned_ship": None,
+                "planned_ship": None, "planned_ship_default": False,
                 "labour_runout": None, "material_runout": None, "rework_threshold": None,
                 "week": week_key(_dt.date.today())[2],
                 "discipline_progress": {d: None for d in DISCIPLINES}}

@@ -64,7 +64,9 @@
     <div class="card">
       <h2>This Week — Schedule</h2>
       <div class="row">
-        <div class="fld"><label>Planned Ship Date</label><input type="date" id="planned_ship" class="entry"></div>
+        <div class="fld"><label>Planned Ship Date</label><input type="date" id="planned_ship" class="entry">
+          <p class="hint" id="shipHint" style="display:none;margin:2px 0 0">Defaulted from the customer-agreed ship date — adjust if the plan differs.</p>
+        </div>
         <div class="fld"><label>Rework / NCR threshold (% of budget)</label>
           <div class="suffix"><input type="number" step="0.1" min="0" id="rework_threshold" class="entry" placeholder="1.0" style="width:110px"><span class="u">%</span></div>
         </div>
@@ -157,6 +159,7 @@ el('proj').onchange=async()=>{
   const b=await (await fetch('/api/plan/'+pid)).json();
   el('status').textContent=b.exists?'Updating this week':'New — first entry for this project';
   el('planned_ship').value=b.planned_ship||'';
+  el('shipHint').style.display = b.planned_ship_default ? 'block' : 'none';
   el('labour_runout').value=(b.labour_runout!=null?b.labour_runout:'');
   el('material_runout').value=(b.material_runout!=null?b.material_runout:'');
   el('rework_threshold').value=(b.rework_threshold!=null?b.rework_threshold:'');
