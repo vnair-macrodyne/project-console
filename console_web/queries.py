@@ -415,6 +415,33 @@ class LiveQueryService(QueryService):
             return {}
         return out
 
+    def _discipline_progress(self, project_ids):
+        """Per-discipline % complete (declared by PM / discipline lead), latest week per
+        project+discipline, from Reporting.tblProjectDisciplineProgress. Returns
+        {pid: {discipline: 0–1 fraction}}. Absent / not-yet-migrated → {} (callers then have no
+        %C, so run-out stays blank rather than guessing). This is the ONE judgement the Carpedia
+        run-out engine consumes; everything else is derived."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return {}
+        ids = ",".join(str(p) for p in pids)
+        out = {}
+        try:
+            cur = self._console_conn().cursor()
+            cur.execute(
+                "SELECT ProjectID, Discipline, PercentComplete FROM ("
+                "  SELECT ProjectID, Discipline, PercentComplete,"
+                "         ROW_NUMBER() OVER (PARTITION BY ProjectID, Discipline "
+                "                            ORDER BY YearWeekKey DESC) AS rn"
+                "  FROM Reporting.tblProjectDisciplineProgress"
+                f"  WHERE PercentComplete IS NOT NULL AND ProjectID IN ({ids})) t WHERE rn = 1")
+            for pid, disc, pct in cur.fetchall():
+                if pct is not None:
+                    out.setdefault(int(pid), {})[disc] = float(pct)
+        except Exception:
+            return {}
+        return out
+
     def _financials(self, project_ids):
         # Cross-request TTL cache (module-level _FIN_CACHE), keyed by project-set. The Executive
         # board, Scorecard, Discipline Financials and Budget-vs-Actual all net the SAME financials
@@ -492,6 +519,8 @@ class LiveQueryService(QueryService):
         proc = self._procurement_actuals(project_ids)
         tw = self._two_week_actuals(project_ids)
         rw = self._rework_by_discipline(project_ids)
+        prog = self._discipline_progress(project_ids)
+        committed = self._material_actuals(project_ids)
         rows = []
         for pid in fin:
             f = fin[pid]
@@ -500,6 +529,12 @@ class LiveQueryService(QueryService):
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rec.update(proc.get(pid, {}))          # calculated Line Items / LLTP Del. Late
             rec.update(tw.get(pid, {}))            # calculated 2-week labour hrs / material $
+            # % Done is the CALCULATED roll-up of per-discipline declared %C; material run-out is
+            # computed from committed POs (both Carpedia-aligned). Manual entries are only overrides.
+            rollup = _rollup_pct_complete(f.disciplines if f else [], prog.get(pid, {}))
+            if rollup is not None:
+                rec["PctDone"] = rollup
+            rec["MaterialCommittedFull"] = committed.get(pid)
             name, client = meta.get(pid, (None, None))
             # per-discipline % is PLANNED (excludes rework 999), consistent with the scorecard and
             # Discipline Financials — rework is tracked separately as its own % of budget.
@@ -595,6 +630,8 @@ class LiveQueryService(QueryService):
         nc = self._nc_by_project(project_ids)
         rw = self._rework_by_discipline(project_ids)
         thr = self._rework_thresholds(project_ids)
+        prog = self._discipline_progress(project_ids)
+        committed = self._material_actuals(project_ids)
         rows = []
         for pid in sorted(fin):
             f = fin[pid]
@@ -603,15 +640,24 @@ class LiveQueryService(QueryService):
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rec["Rework"] = round(sum(h for h, _ in rw.get(pid, {}).values()), 2) or None
             rec["ReworkThreshold"] = thr.get(pid)     # per-project; _scorecard_row defaults to 1%
+            # % complete is now the CALCULATED roll-up of per-discipline declared %C; the overlay's
+            # RunoutLabour/RunoutMaterial become optional overrides. (Manual RunoutLabour → % override.)
+            rollup = _rollup_pct_complete(f.disciplines, prog.get(pid, {}))
+            if rollup is not None:
+                rec["PctDone"] = rollup
+            rec["MaterialCommittedFull"] = committed.get(pid)
+            rec["RunoutLabourPct"] = rec.pop("RunoutLabour", None)   # treat old manual as % override
             rows.append(_scorecard_row(pid, f, rec))
         return _scorecard_result(rows)
 
     def _q_discipline(self, project_ids, **kw):
         fin = self._financials(project_ids)
         rw = self._rework_by_discipline(project_ids)
+        prog = self._discipline_progress(project_ids)
         rows = []
         for pid in sorted(fin):
             prw = rw.get(pid, {})
+            pprog = prog.get(pid, {})
             for d in fin[pid].disciplines:
                 rwh, rwc = prw.get(d.discipline, (0.0, 0.0))
                 # Consumed % is PLANNED work only — rework(999) is pulled OUT of the actual and
@@ -620,9 +666,14 @@ class LiveQueryService(QueryService):
                 cons = round(planned / d.budget_hours, 4) if d.budget_hours else None
                 rem = round(d.budget_hours - planned, 2) if d.budget_hours is not None else None
                 rwpct = round(float(rwh) / d.budget_hours, 4) if d.budget_hours else None
+                # Run-out uses TOTAL actual hours (incl. rework — real spend) ÷ declared %C.
+                pct = pprog.get(d.discipline)
+                ro = _ev.compute(d.budget_hours, d.actual_hours, pct)
                 rows.append({"ProjectID": pid, "Discipline": d.discipline,
                              "BudgetHours": d.budget_hours, "ActualHours": planned,
                              "ConsumedPct": cons, "RemainingHours": rem,
+                             "PctComplete": pct,
+                             "RunoutHours": ro.eac, "RunoutPct": ro.runout_pct,
                              "ReworkHours": round(float(rwh), 2) or None,
                              "ReworkPct": rwpct,
                              "ReworkCost": round(float(rwc), 2) or None})
@@ -1071,12 +1122,14 @@ def _scorecard_result(rows):
         QueryColumn("MaterialPayables", "Payables", "money", "right", calc=True),
         QueryColumn("MaterialActual", "Resource Consumption", "money", "right", calc=True),
         QueryColumn("MaterialPct", f"{material} %", "pct", "right"),
+        QueryColumn("RunoutMaterialPct", f"{material} Run-out %", "pct", "right", calc=True),
         QueryColumn("NCOpen", "Open NCRs", "int", "right", calc=True),
         QueryColumn("NCCost", "Cost of NC", "money", "right", calc=True),
         QueryColumn("PctDone", "% Done", "pct", "right"),
         QueryColumn("CustAgreedDate", "Cust Agreed Ship", "date", "left"),
         QueryColumn("RunoutLabour", f"{labour} Run-out (hrs)", "hours", "right", calc=True),
-        QueryColumn("RunoutPct", "Run-out %", "pct", "right", calc=True),
+        QueryColumn("RunoutPct", f"{labour} Run-out %", "pct", "right", calc=True),
+        QueryColumn("RunoutOverride", "Run-out src", "text", "left"),
         QueryColumn("CPI", "CPI", "num", "right", "Earning at Completion", calc=True),
         QueryColumn("EarningEAC", "Earning $", "money", "right", "Earning at Completion", calc=True),
         QueryColumn("SoldMargin", "Sold Margin", "pct", "right", "Earning at Completion"),
@@ -1103,10 +1156,13 @@ def _scorecard_result(rows):
             f"total resources drawn to the {proj.lower()}: Committed Spend (purchased material) + "
             f"Inventory (issued from stock) + Payables (other booked costs) — footing to ETO's "
             f"“Material Costs Compared” report. {material} % = Resource Consumption ÷ budget. "
-            f"{labour} is hours from timecards; NCR figures from the costing data. Budgets and "
-            f"% Done are the PM plan. Run-out is the computed Estimate at Completion "
-            f"(actual ÷ % complete) — green ≤95% of budget, amber 95–105%, red >105%; it falls "
-            f"back to the PM's entered run-out only when % Done is blank. Earning at Completion "
+            f"{labour} is hours from timecards; NCR figures from the costing data. Budgets are the "
+            f"PM plan; % Done is the CALCULATED roll-up of the per-{L('discipline').lower()} % "
+            f"complete (hours-weighted: Σ %C×budget ÷ Σ budget). Run-outs are CALCULATED "
+            f"(Carpedia-aligned), not typed: {labour} run-out = Estimate at Completion = actual ÷ "
+            f"% complete; {material} run-out = committed POs floored at budget (commitment-driven, "
+            f"not %-complete driven). Both colour green ≤95% of budget, amber 95–105%, red >105%. "
+            f"“Run-out src” shows “manual” only when a PM has entered an optional override. Earning at Completion "
             f"projects what the job will actually return: CPI (earned ÷ actual — under 1.0 = "
             f"trending over), Earning $ = sold price − cost at completion (labour run-out priced "
             f"at the applied rate + material EAC), and Margin @ Completion vs the margin sold. "
@@ -1127,6 +1183,9 @@ def _discipline_result(rows):
         QueryColumn("BudgetHours", "Budget (hrs)", "hours", "right"),
         QueryColumn("ActualHours", "Actual (hrs)", "hours", "right", calc=True),
         QueryColumn("ConsumedPct", "Consumed %", "pct", "right"),
+        QueryColumn("PctComplete", "% Complete", "pct", "right"),
+        QueryColumn("RunoutHours", "Run-out (hrs)", "hours", "right", calc=True),
+        QueryColumn("RunoutPct", "Run-out %", "pct", "right", calc=True),
         QueryColumn("RemainingHours", "Remaining (hrs)", "hours", "right"),
         QueryColumn("ReworkHours", "Rework 999 (hrs)", "hours", "right", calc=True),
         QueryColumn("ReworkPct", "Rework % of budget", "pct", "right", calc=True),
@@ -1144,7 +1203,11 @@ def _discipline_result(rows):
             "non-conformance) is pulled OUT and shown separately: hours, its own % of the "
             f"{disc.lower()}'s budget hours, and applied-rate $. 999 carries no budget of its own, "
             "so it isn't counted in the budget-vs-actual position. Actual + Rework = total hours "
-            f"charged to the {disc.lower()}.")
+            f"charged to the {disc.lower()}. % Complete is declared per {disc.lower()} (the one "
+            "judgement); Run-out is then CALCULATED (Carpedia-aligned): Estimate at Completion = "
+            "total actual hours ÷ % complete, and Run-out % = EAC ÷ budget (green ≤95%, amber "
+            "95–105%, red >105%). Below 15% complete an additive early-stage EAC is used and marked "
+            "low-confidence. Blank % Complete ⇒ no run-out yet.")
     return QueryResult("discipline", f"{disc} Financials", cols, rows, cards, note)
 
 
@@ -1330,11 +1393,60 @@ def _crosswalk_result(rows):
     return QueryResult("crosswalk", L("crosswalk"), cols, rows, cards)
 
 
+# ── Carpedia run-out helpers (shared live + demo) ─────────────────────────────
+# CARPEDIA-ALIGNED FORMULAE (PROJECT_CONSOLE_RUNOUT_METHODOLOGY_2026-07-28):
+#   %C(project)      = Σ( %C(discipline) × budget_hrs(discipline) ) ÷ Σ budget_hrs   ( = EV ÷ BAC )
+#   Labour run-out   : EV = %C×BAC ; CPI = EV÷AC ; EAC = AC÷%C ; run-out% = EAC÷BAC = %consumed÷%C
+#                      (early stage %C<15% → EAC = AC + (BAC−EV); see earned_value.compute)
+#   Material run-out : EAC = committed POs (received + open) + remaining-un-ordered
+#                            where remaining-un-ordered = max(0, budget − committed)
+#                            ⇒ EAC = max(committed, budget) ; run-out% = EAC ÷ budget
+#                      Commitment-driven, floored at budget — NOT %-complete driven.
+# Both are CALCULATED. The PM's typed run-out is only an optional OVERRIDE (flagged).
+
+def _rollup_pct_complete(disciplines, prog):
+    """Project %C = Σ(%C_disc × budget_hrs_disc) ÷ Σ budget_hrs_disc (hours-weighted EV÷BAC).
+    prog = {discipline: 0–1 fraction}. A discipline with no declared % contributes 0 progress
+    (it's budgeted work not yet started). Returns None when there are no budget hours at all."""
+    num = den = 0.0
+    for d in (disciplines or []):
+        bh = float(getattr(d, "budget_hours", 0) or 0)
+        if bh <= 0:
+            continue
+        p = prog.get(getattr(d, "discipline", None)) if prog else None
+        num += bh * (float(p) if p is not None else 0.0)
+        den += bh
+    return round(num / den, 4) if den else None
+
+
+def _material_runout(committed, budget):
+    """Carpedia material run-out — commitment-driven, floored at budget.
+    EAC = committed (received + open) + max(0, budget − committed) = max(committed, budget).
+    Returns a dict; run-out % and EAC are None when there's no material budget to run out against."""
+    b = _num(budget)
+    c = _num(committed) or 0.0
+    if not b:
+        return {"eac": None, "runout_pct": None, "committed": (round(c, 2) or None),
+                "unordered": None, "over": False}
+    unordered = max(0.0, b - c)
+    eac = c + unordered                                   # == max(c, b)
+    return {"eac": round(eac, 2), "runout_pct": round(eac / b, 4),
+            "committed": round(c, 2), "unordered": round(unordered, 2), "over": eac > b}
+
+
 def _scorecard_row(pid, f, rec):
     # Run-out = computed EAC from budget/actual hours + PM %complete (earned_value engine),
     # falling back to the PM's typed run-out only when there's no % complete yet.
     _ro = _ev.compute(f.labour_budget_hours, f.labour_actual_hours, _num(rec.get("PctDone")))
     earning, margin = _earning_block(f, _ro)
+    # Material run-out — Carpedia commitment basis (committed POs floored at budget), unless the PM
+    # has typed an override (kept optional). RunoutMaterial in the overlay is that manual override.
+    _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget)
+    _mat_ovr = _num(rec.get("RunoutMaterial"))
+    runout_mat_pct = _mat_ovr if _mat_ovr is not None else _mr["runout_pct"]
+    lab_ovr = _num(rec.get("RunoutLabourPct"))            # optional labour run-out % override
+    runout_lab_pct = lab_ovr if lab_ovr is not None else _ro.runout_pct
+    overridden = (_mat_ovr is not None) or (lab_ovr is not None)
     # Labour Actual / % are PLANNED (exclude rework 999); rework is its own hours + % of budget,
     # flagged against the per-project threshold (default 1%). Run-out / CPI / earning above stay on
     # the TOTAL actual (rework is still real spend). Vijay 2026-08-07.
@@ -1364,7 +1476,11 @@ def _scorecard_row(pid, f, rec):
         "PctDone": _num(rec.get("PctDone")),
         "CustAgreedDate": _iso(rec.get("CustAgreedDate") or rec.get("POShipDate")),
         "RunoutLabour": (_ro.eac if _ro.eac is not None else _num(rec.get("RunoutLabour"))),
-        "RunoutPct": _ro.runout_pct,
+        "RunoutPct": runout_lab_pct,
+        "RunoutMaterialPct": runout_mat_pct,
+        "MaterialEAC": _mr["eac"],
+        "MaterialUnordered": _mr["unordered"],
+        "RunoutOverride": ("manual" if overridden else None),
         "CPI": (round(_ro.cpi, 3) if _ro.cpi is not None else None),
         "EarningEAC": earning,
         "SoldMargin": getattr(f, "sold_margin", None),
@@ -1482,6 +1598,9 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
     agreed = rec.get("CustAgreedDate")
     _ro = _ev.compute(f.labour_budget_hours if f else None,
                       f.labour_actual_hours if f else None, _frac(rec.get("PctDone")))
+    # Material run-out: Carpedia commitment basis (committed POs floored at budget), PM override wins.
+    _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget if f else None)
+    _mat_ovr = _num(rec.get("RunoutMaterial"))
     row = {
         "Rank": _int(rec.get("Rank")),
         "ProjectID": pid,
@@ -1495,7 +1614,7 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
         "LabPctHrs": f.labour_consumed_pct if f else None,
         "RunoutLabour": (_ro.runout_pct if _ro.runout_pct is not None else _num(rec.get("RunoutLabour"))),
         "MatPct": f.material_consumed_pct if f else None,
-        "RunoutMaterial": _num(rec.get("RunoutMaterial")),
+        "RunoutMaterial": (_mat_ovr if _mat_ovr is not None else _mr["runout_pct"]),
         "PctDoneDelta": _frac(rec.get("PctDoneDelta")),
         "LabHrs2wk": _num(rec.get("LabHrs2wk")),
         "MatSpend2wk": _num(rec.get("MatSpend2wk")),
@@ -2414,6 +2533,35 @@ _DEMO_REWORK = {
     230312: {"Mechanical Engineering": (12.0, 1020.0)},
 }
 
+# Declared % complete per discipline (0–1) — the ONE judgement; run-out is derived from it.
+_DEMO_PROGRESS = {
+    230219: {"Project Management": 0.95, "Mechanical Engineering": 0.88,
+             "Electrical Engineering": 0.90, "Hydraulic Engineering": 0.92,
+             "Manufacturing": 0.80, "Other": 0.85},
+    230312: {"Project Management": 0.80, "Mechanical Engineering": 0.75,
+             "Electrical Engineering": 0.78, "Hydraulic Engineering": 0.82,
+             "Manufacturing": 0.60, "Other": 0.70},
+    240087: {"Project Management": 0.50, "Mechanical Engineering": 0.40,
+             "Electrical Engineering": 0.42, "Hydraulic Engineering": 0.45,
+             "Manufacturing": 0.30, "Other": 0.35},
+}
+# Committed material POs (received + open), CAD — the Carpedia material run-out basis.
+# 230219 committed > budget (over → run-out >100%); the others under (floored at 100%).
+_DEMO_COMMITTED = {230219: 2700000.0, 230312: 1600000.0, 240087: 500000.0}
+
+
+def _demo_rollup_pct(pid):
+    """Demo project %C = hours-weighted roll-up of _DEMO_PROGRESS over the discipline budgets."""
+    prog = _DEMO_PROGRESS.get(pid, {})
+    num = den = 0.0
+    for disc, (b, _a) in _DEMO[pid]["disc"].items():
+        if not b or b <= 0:
+            continue
+        p = prog.get(disc)
+        num += b * (float(p) if p is not None else 0.0)
+        den += b
+    return round(num / den, 4) if den else None
+
 
 # Executive-board extras for the demo (schedule/2-wk/procurement — the manual overlay)
 _DEMO_EXEC = {
@@ -2445,8 +2593,9 @@ class DemoQueryService(QueryService):
             disc_pct = {disc: (round((a - prw.get(disc, (0.0, 0.0))[0]) / b, 4) if b else None)
                         for disc, (b, a) in d["disc"].items()}
             rec = {"Rank": d["rank"], "POShipDate": e["po"], "CustAgreedDate": d["ship"],
-                   "PlannedShipDate": e["planned"], "PctDone": d["done"],
-                   "RunoutLabour": d["runout"], "RunoutMaterial": e["mat_runout"],
+                   "PlannedShipDate": e["planned"],
+                   "PctDone": _demo_rollup_pct(pid),          # calculated roll-up (was d["done"])
+                   "MaterialCommittedFull": _DEMO_COMMITTED.get(pid),  # material run-out basis
                    "PctDoneDelta": e["done_delta"], "LabHrs2wk": e["lab2wk"],
                    "MatSpend2wk": e["mat2wk"]}
             rec.update(dict(zip(_PROC_KEYS, e["proc"])))
@@ -2464,8 +2613,10 @@ class DemoQueryService(QueryService):
         for pid in self._sel(project_ids):
             d = _DEMO[pid]
             f = _DemoFin(d)
-            rec = {"PctDone": d["done"], "RunoutLabour": d["runout"], "Rank": d["rank"],
-                   "CustAgreedDate": d["ship"]}
+            # % Done is now the calculated roll-up of per-discipline %C; material run-out is
+            # computed from committed POs. No manual overrides in the demo (all Carpedia-computed).
+            rec = {"PctDone": _demo_rollup_pct(pid), "Rank": d["rank"], "CustAgreedDate": d["ship"],
+                   "MaterialCommittedFull": _DEMO_COMMITTED.get(pid)}
             g = _demo_nc_by_project().get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rec["Rework"] = round(sum(h for h, _ in _DEMO_REWORK.get(pid, {}).values()), 2) or None
@@ -2476,13 +2627,18 @@ class DemoQueryService(QueryService):
         rows = []
         for pid in self._sel(project_ids):
             prw = _DEMO_REWORK.get(pid, {})
+            pprog = _DEMO_PROGRESS.get(pid, {})
             for disc, (b, a) in sorted(_DEMO[pid]["disc"].items()):
                 rwh, rwc = prw.get(disc, (0.0, 0.0))
                 planned = round(a - rwh, 2)
                 pct = round(planned / b, 4) if b else None
                 rwpct = round(rwh / b, 4) if b else None
+                # Run-out from TOTAL actual hours (a) ÷ declared %C (Carpedia EAC).
+                pc = pprog.get(disc)
+                ro = _ev.compute(b, a, pc)
                 rows.append({"ProjectID": pid, "Discipline": disc,
                              "BudgetHours": b, "ActualHours": planned, "ConsumedPct": pct,
+                             "PctComplete": pc, "RunoutHours": ro.eac, "RunoutPct": ro.runout_pct,
                              "RemainingHours": round(b - planned, 2),
                              "ReworkHours": round(rwh, 2) or None, "ReworkPct": rwpct,
                              "ReworkCost": round(rwc, 2) or None})

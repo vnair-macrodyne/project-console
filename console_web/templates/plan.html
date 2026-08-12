@@ -62,25 +62,36 @@
 
   <div id="form" style="display:none">
     <div class="card">
-      <h2>This Week</h2>
+      <h2>This Week — Schedule</h2>
       <div class="row">
         <div class="fld"><label>Planned Ship Date</label><input type="date" id="planned_ship" class="entry"></div>
-        <div class="fld"><label>% Done</label>
-          <div class="suffix"><input type="number" step="1" min="0" max="100" id="percent_done" class="entry" style="width:110px"><span class="u">%</span></div>
-        </div>
-        <div class="fld"><label>Labour Run-out (% of budget)</label>
-          <div class="suffix"><input type="number" step="1" min="0" id="labour_runout" class="entry" style="width:110px"><span class="u">%</span></div>
-        </div>
-        <div class="fld"><label>Material Run-out (% of budget)</label>
-          <div class="suffix"><input type="number" step="1" min="0" id="material_runout" class="entry" style="width:110px"><span class="u">%</span></div>
-        </div>
         <div class="fld"><label>Rework / NCR threshold (% of budget)</label>
           <div class="suffix"><input type="number" step="0.1" min="0" id="rework_threshold" class="entry" placeholder="1.0" style="width:110px"><span class="u">%</span></div>
         </div>
       </div>
-      <div class="note">Run-out is a forecast of where the project lands at completion, as a % of
-        budget (e.g. 125 = trending 25% over). It's a PM judgement for now; an objective run-out
-        and % Done will follow from the activity allocation model.</div>
+    </div>
+
+    <div class="card">
+      <h2>% Complete per Discipline</h2>
+      <p class="hint">Declare progress for each discipline — this is the one judgement the plan
+        needs. The dashboard then <b>calculates</b> the run-out from it (Carpedia: Estimate at
+        Completion = actual hours ÷ % complete); you no longer type run-out by hand.</p>
+      <div class="row" id="discGrid" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Run-out overrides <span class="hint" style="font-weight:400">— optional</span></h2>
+      <p class="hint">Leave blank to use the calculated run-out. Enter a value only to override it
+        (e.g. a known scope change the math can't see yet); the dashboard flags it as “manual”.
+        Material run-out is otherwise computed from committed POs, floored at budget.</p>
+      <div class="row">
+        <div class="fld"><label>Labour Run-out (% of budget)</label>
+          <div class="suffix"><input type="number" step="1" min="0" id="labour_runout" class="entry" placeholder="calc" style="width:110px"><span class="u">%</span></div>
+        </div>
+        <div class="fld"><label>Material Run-out (% of budget)</label>
+          <div class="suffix"><input type="number" step="1" min="0" id="material_runout" class="entry" placeholder="calc" style="width:110px"><span class="u">%</span></div>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -95,6 +106,14 @@
 <script>
 const el=id=>document.getElementById(id);
 const state={};
+const DISCIPLINES=["Project Management","Mechanical Engineering","Electrical Engineering",
+                   "Hydraulic Engineering","Manufacturing","Other"];
+function buildDiscInputs(){
+  el('discGrid').innerHTML = DISCIPLINES.map((d,i)=>
+    `<div class="fld"><label>${d}</label><div class="suffix">`+
+    `<input type="number" step="1" min="0" max="100" id="disc_${i}" class="entry" style="width:110px">`+
+    `<span class="u">%</span></div></div>`).join('');
+}
 
 async function boot(){
   try{ state.me=await (await fetch('/api/me'+location.search)).json(); }catch(e){ state.me={}; }
@@ -107,6 +126,7 @@ async function boot(){
     el('product').textContent=b.product||'Project Console'; el('company').textContent=b.company||'';
     el('logo').textContent=(b.product||'PC').slice(0,2).toUpperCase();
     if(b.demo) el('demoBadge').style.display='inline-block'; }catch(e){}
+  buildDiscInputs();
   await loadProjects();
   if(state.readonly){
     el('by').closest('.card').insertAdjacentHTML('beforeend',
@@ -137,10 +157,11 @@ el('proj').onchange=async()=>{
   const b=await (await fetch('/api/plan/'+pid)).json();
   el('status').textContent=b.exists?'Updating this week':'New — first entry for this project';
   el('planned_ship').value=b.planned_ship||'';
-  el('percent_done').value=(b.percent_done!=null?b.percent_done:'');
   el('labour_runout').value=(b.labour_runout!=null?b.labour_runout:'');
   el('material_runout').value=(b.material_runout!=null?b.material_runout:'');
   el('rework_threshold').value=(b.rework_threshold!=null?b.rework_threshold:'');
+  const dp=b.discipline_progress||{};
+  DISCIPLINES.forEach((d,i)=>{ const v=dp[d]; el('disc_'+i).value=(v!=null?v:''); });
   el('form').style.display='block';
 };
 
@@ -149,10 +170,11 @@ el('saveBtn').onclick=async()=>{
   const by=el('by').value.trim();
   if(!by){ showMsg('err','Enter your name in “Entered by” before saving.'); return; }
   const val=id=>{ const v=el(id).value; return v!==''?parseFloat(v):null; };
+  const dp={}; DISCIPLINES.forEach((d,i)=>{ dp[d]=val('disc_'+i); });
   const payload={ project_id:Number(pid), entered_by:by,
     planned_ship:el('planned_ship').value||null,
-    percent_done:val('percent_done'), labour_runout:val('labour_runout'),
-    material_runout:val('material_runout'), rework_threshold:val('rework_threshold') };
+    labour_runout:val('labour_runout'), material_runout:val('material_runout'),
+    rework_threshold:val('rework_threshold'), discipline_progress:dp };
   el('saveBtn').disabled=true; showMsg('', 'Saving…');
   try{
     const r=await fetch('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

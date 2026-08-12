@@ -18,6 +18,11 @@ gap-closer now; the allocation table is stood up ready for that next phase.
 """
 import datetime as _dt
 
+# The six disciplines the plan captures % complete against (order = the form's order).
+# Matches the dashboard crosswalk / earned-value roll-up.
+DISCIPLINES = ["Project Management", "Mechanical Engineering", "Electrical Engineering",
+               "Hydraulic Engineering", "Manufacturing", "Other"]
+
 
 # ── week keying (matches the workbook's Year-Week convention, e.g. 202629) ──────
 def excel_weeknum(d):
@@ -110,33 +115,52 @@ class LivePlanService(PlanService):
         pid = int(project_id)
         name = self._eto_names([pid]).get(pid, "")
         base = {"project_id": pid, "name": name, "exists": False,
-                "percent_done": None, "planned_ship": None,
-                "labour_runout": None, "material_runout": None,
-                "rework_threshold": None, "week": None}
+                "planned_ship": None,
+                "labour_runout": None, "material_runout": None,   # optional PM overrides only
+                "rework_threshold": None, "week": None,
+                "discipline_progress": {d: None for d in DISCIPLINES}}
         try:
             cur = self._cc().cursor()
-            cur.execute("SELECT TOP 1 PercentComplete, PlannedShipDate, LabourRunout, "
+            cur.execute("SELECT TOP 1 PlannedShipDate, LabourRunout, "
                         "MaterialRunout, ReworkThreshold, YearWeekKey "
                         "FROM Reporting.tblProjectPMEntry "
                         "WHERE ProjectID = ? ORDER BY YearWeekKey DESC", pid)
             r = cur.fetchone()
             if r:
                 base.update(exists=True,
-                            percent_done=_pct_out(r[0]), planned_ship=_iso(r[1]),
-                            labour_runout=_ratio_out(r[2]), material_runout=_ratio_out(r[3]),
-                            rework_threshold=_pct_out(r[4]),
-                            week=int(r[5]) if r[5] is not None else None)
+                            planned_ship=_iso(r[0]),
+                            labour_runout=_ratio_out(r[1]), material_runout=_ratio_out(r[2]),
+                            rework_threshold=_pct_out(r[3]),
+                            week=int(r[4]) if r[4] is not None else None)
+        except Exception:
+            pass
+        # per-discipline % complete — latest week per discipline (the run-out inputs)
+        try:
+            cur = self._cc().cursor()
+            cur.execute(
+                "SELECT Discipline, PercentComplete FROM ("
+                "  SELECT Discipline, PercentComplete,"
+                "         ROW_NUMBER() OVER (PARTITION BY Discipline ORDER BY YearWeekKey DESC) rn"
+                "  FROM Reporting.tblProjectDisciplineProgress"
+                "  WHERE ProjectID = ? AND PercentComplete IS NOT NULL) t WHERE rn = 1", pid)
+            for disc, pct in cur.fetchall():
+                if disc in base["discipline_progress"]:
+                    base["discipline_progress"][disc] = _pct_out(pct)
+                    base["exists"] = True
         except Exception:
             pass
         return base
 
     def save_plan(self, payload):
         pid = int(payload["project_id"])
-        pct = _frac_pct(payload.get("percent_done"))       # 0–100 (or 0–1) → fraction
-        lrun = _ratio_pct(payload.get("labour_runout"))    # 125 (or 1.25) → 1.25
-        mrun = _ratio_pct(payload.get("material_runout"))
+        # % complete is now captured PER DISCIPLINE (drives the calculated run-out); the single
+        # project PercentComplete is retired (dashboard derives it from the roll-up). Labour /
+        # Material run-out are optional OVERRIDES — blank means "use the calculated figure".
+        lrun = _ratio_pct(payload.get("labour_runout"))    # optional override; 125 → 1.25
+        mrun = _ratio_pct(payload.get("material_runout"))  # optional override
         thr = _thr_in(payload.get("rework_threshold"))     # 1.0 (%) → 0.01 fraction
         ship = _as_date(payload.get("planned_ship"))
+        by = (payload.get("entered_by") or None)
         fy, wk, key = week_key(_dt.date.today())
         conn = self._cc()
         cur = conn.cursor()
@@ -145,27 +169,48 @@ class LivePlanService(PlanService):
         row = cur.fetchone()
         if row:
             cur.execute("UPDATE Reporting.tblProjectPMEntry SET PlannedShipDate = ?, "
-                        "PercentComplete = ?, LabourRunout = ?, MaterialRunout = ?, "
+                        "LabourRunout = ?, MaterialRunout = ?, "
                         "ReworkThreshold = ?, CapturedAt = GETDATE() WHERE PMEntryID = ?",
-                        ship, pct, lrun, mrun, thr, int(row[0]))
+                        ship, lrun, mrun, thr, int(row[0]))
         else:
             carry = self._carry_forward(cur, pid)
             cur.execute(
                 "INSERT INTO Reporting.tblProjectPMEntry "
-                "(ProjectID, FiscalYear, WeekNo, YearWeekKey, PlannedShipDate, PercentComplete, "
+                "(ProjectID, FiscalYear, WeekNo, YearWeekKey, PlannedShipDate, "
                 " LabourRunout, MaterialRunout, ReworkThreshold, MaterialActual, MaterialBudget, "
                 " TotalLineItems, LLTPOrdered, LLTPReleasedLate, LLTPOrderedLate, LLTPDeliveredLate, "
                 " PartsReleasedLate, PartsOrderedLate, IncludeFlag, Rank, ReRank, CapturedAt) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,GETDATE())",
-                pid, fy, wk, key, ship, pct, lrun, mrun, thr,
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,GETDATE())",
+                pid, fy, wk, key, ship, lrun, mrun, thr,
                 carry.get("MaterialActual"), carry.get("MaterialBudget"),
                 carry.get("TotalLineItems"), carry.get("LLTPOrdered"),
                 carry.get("LLTPReleasedLate"), carry.get("LLTPOrderedLate"),
                 carry.get("LLTPDeliveredLate"), carry.get("PartsReleasedLate"),
                 carry.get("PartsOrderedLate"), carry.get("Rank"), carry.get("ReRank"))
+        self._save_discipline_progress(cur, pid, fy, wk, key, by,
+                                       payload.get("discipline_progress") or {})
         conn.commit()
         return {"ok": True, "project_id": pid, "week": key,
-                "percent_done": pct, "planned_ship": _iso(ship)}
+                "planned_ship": _iso(ship)}
+
+    def _save_discipline_progress(self, cur, pid, fy, wk, key, by, prog):
+        """Upsert per-discipline % complete for the current week (the run-out inputs)."""
+        for disc in DISCIPLINES:
+            if disc not in prog:
+                continue                                    # not on the form payload → leave as-is
+            frac = _frac_pct(prog.get(disc))                # blank clears it (NULL)
+            cur.execute("SELECT ProgressID FROM Reporting.tblProjectDisciplineProgress "
+                        "WHERE ProjectID = ? AND YearWeekKey = ? AND Discipline = ?", pid, key, disc)
+            r = cur.fetchone()
+            if r:
+                cur.execute("UPDATE Reporting.tblProjectDisciplineProgress "
+                            "SET PercentComplete = ?, EnteredBy = ?, CapturedAt = GETDATE() "
+                            "WHERE ProgressID = ?", frac, by, int(r[0]))
+            else:
+                cur.execute("INSERT INTO Reporting.tblProjectDisciplineProgress "
+                            "(ProjectID, FiscalYear, WeekNo, YearWeekKey, Discipline, "
+                            " PercentComplete, EnteredBy, CapturedAt) VALUES (?,?,?,?,?,?,?,GETDATE())",
+                            pid, fy, wk, key, disc, frac, by)
 
     def _carry_forward(self, cur, pid):
         """Latest prior week's procurement/material values, so a new week doesn't blank them."""
@@ -195,8 +240,11 @@ _DEMO_NAMES = {230219: "230219 - 5500 Ton Forging Press", 230312: "230312 - 2500
 
 class DemoPlanService(PlanService):
     _store = {   # persists across requests within the process
-        230219: {"percent_done": 0.93, "planned_ship": "2026-10-02",
-                 "labour_runout": 1.25, "material_runout": 1.08, "rework_threshold": 0.015},
+        230219: {"planned_ship": "2026-10-02",
+                 "labour_runout": None, "material_runout": None, "rework_threshold": 0.015,
+                 "discipline_progress": {"Project Management": 0.95, "Mechanical Engineering": 0.88,
+                                         "Electrical Engineering": 0.90, "Hydraulic Engineering": 0.92,
+                                         "Manufacturing": 0.80, "Other": 0.85}},
     }
 
     def list_projects(self):
@@ -208,28 +256,30 @@ class DemoPlanService(PlanService):
         pid = int(project_id)
         rec = DemoPlanService._store.get(pid)
         base = {"project_id": pid, "name": _DEMO_NAMES.get(pid, ""), "exists": rec is not None,
-                "percent_done": None, "planned_ship": None,
+                "planned_ship": None,
                 "labour_runout": None, "material_runout": None, "rework_threshold": None,
-                "week": week_key(_dt.date.today())[2]}
+                "week": week_key(_dt.date.today())[2],
+                "discipline_progress": {d: None for d in DISCIPLINES}}
         if rec:
-            base.update(percent_done=_pct_out(rec["percent_done"]),
-                        planned_ship=rec["planned_ship"],
+            base.update(planned_ship=rec["planned_ship"],
                         labour_runout=_ratio_out(rec["labour_runout"]),
                         material_runout=_ratio_out(rec["material_runout"]),
-                        rework_threshold=_pct_out(rec.get("rework_threshold")))
+                        rework_threshold=_pct_out(rec.get("rework_threshold")),
+                        discipline_progress={d: _pct_out(rec.get("discipline_progress", {}).get(d))
+                                             for d in DISCIPLINES})
         return base
 
     def save_plan(self, payload):
         pid = int(payload["project_id"])
+        prog = payload.get("discipline_progress") or {}
         DemoPlanService._store[pid] = {
-            "percent_done": _frac_pct(payload.get("percent_done")),
             "planned_ship": (payload.get("planned_ship") or None),
             "labour_runout": _ratio_pct(payload.get("labour_runout")),
             "material_runout": _ratio_pct(payload.get("material_runout")),
             "rework_threshold": _thr_in(payload.get("rework_threshold")),
+            "discipline_progress": {d: _frac_pct(prog.get(d)) for d in DISCIPLINES},
         }
         return {"ok": True, "project_id": pid, "week": week_key(_dt.date.today())[2],
-                "percent_done": DemoPlanService._store[pid]["percent_done"],
                 "planned_ship": DemoPlanService._store[pid]["planned_ship"]}
 
 
