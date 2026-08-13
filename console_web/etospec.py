@@ -583,6 +583,108 @@ COLS_FLAT = [
 _LLT_FLAG_COL = "PartCustom7"; _OVERSIZE_FLAG_COL = "PartCustom8"; _ENG_RELEASE_COL = "PartCustom6"
 _LLT_CRITICAL_DAYS = 90
 
+# ── PO Exceptions: PER-LINE detail layout (the 19 fields Vijay requested, 2026-08-12) ──────────
+# Populated from ETO: Buyer, Project#, Project, Code(spec), Item, Category, Release date, PO#,
+# Planned/Revised/Receipt dates, Status(derived), Lead time, Oversized. BLANK — ETO holds no source:
+# Planned Ship (BudgetShipRelease empty), Days to Assembly (MfgBegin empty), RFQ Date, Permit Dates,
+# Last Updated (no PO-line modified timestamp). Kept as columns so the layout matches the workbook.
+COLS_EXC = [
+    ("Buyer",          "Buyer",            16, "L", False),
+    ("ProjectID",      "Project #",         8, "C", False),
+    ("JobName",        "Project",          20, "L", False),
+    ("Code",           "Code",              6, "C", False),
+    ("Item",           "Item",             11, "L", False),
+    ("Category",       "Category",         16, "L", False),
+    ("EngRelease",     "Release Date",     11, "C", False),
+    ("PO",             "PO #",             10, "L", False),
+    ("PlannedShip",    "Planned Ship",     11, "C", False),
+    ("PlannedReceipt", "Planned Receipt",  12, "C", False),
+    ("RevisedReceipt", "Revised Receipt",  12, "C", False),
+    ("ReceiptDate",    "Receipt Date",     11, "C", False),
+    ("Status",         "Status",           12, "L", False),
+    ("LastUpdated",    "Last Updated",     11, "C", False),
+    ("DaysToAssembly", "Days to Assembly",  8, "R", True),
+    ("RFQDate",        "RFQ Date",         11, "C", False),
+    ("PermitDates",    "Permit Dates",     12, "L", False),
+    ("LeadTime",       "Lead Time",         8, "R", True),
+    ("Oversized",      "Oversized",         8, "C", False),
+]
+
+
+def _num_or_none(v):
+    import pandas as pd
+    try:
+        f = float(v)
+        return None if pd.isna(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _spec_code(v):
+    """SpecID 10.0 -> '10' (machine/spec code); blank-safe."""
+    f = _num_or_none(v)
+    if f is None:
+        return ""
+    return str(int(f)) if float(f).is_integer() else str(f)
+
+
+def exc_detail(df, today=None):
+    """One normalized row per OPEN, OVERDUE PO line — the full field set for the detail report.
+    Exceptions = open lines (not fully received) whose need-by (revised else required) has passed."""
+    import pandas as pd
+    today = today or _dt.date.today()
+    out = []
+    for _, r in df.iterrows():
+        req = pd.to_datetime(r.get("DateRequired"), errors="coerce")
+        rev = pd.to_datetime(r.get("DateRevised"), errors="coerce")
+        need = rev if pd.notna(rev) else req
+        needd = need.date() if pd.notna(need) else None
+        if not (needd and needd < today):                 # exceptions = OVERDUE open lines
+            continue
+        rcpt = pd.to_datetime(r.get("ReceiptDate"), errors="coerce")
+        eng = pd.to_datetime(r.get("EngReleaseDate"), errors="coerce")
+        recv = _num_or_none(r.get("Received")) or 0.0
+        status = "Overdue — partial" if recv > 0 else "Overdue"
+        pid = r.get("ProjectID")
+        out.append({
+            "Buyer": (str(r.get("Buyer")).strip() if not _blank(r.get("Buyer")) else "(unassigned)"),
+            "ProjectID": ("" if _blank(pid) else str(int(pid)) if _num_or_none(pid)
+                          and float(pid).is_integer() else str(pid)),
+            "JobName": ("" if _blank(r.get("JobName")) else str(r.get("JobName"))),
+            "Code": _spec_code(r.get("Code")),
+            "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
+            "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
+            "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
+            "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
+            "PlannedShip": "",                            # ETO holds no maintained ship date
+            "PlannedReceipt": (req.date().isoformat() if pd.notna(req) else ""),
+            "RevisedReceipt": (rev.date().isoformat() if pd.notna(rev) else ""),
+            "ReceiptDate": (rcpt.date().isoformat() if pd.notna(rcpt) else ""),
+            "Status": status,
+            "LastUpdated": "",                            # no PO-line modified timestamp in ETO
+            "DaysToAssembly": None,                       # no maintained assembly date
+            "RFQDate": "",                                # not in ETO
+            "PermitDates": "",                            # not in ETO
+            "LeadTime": (int(_num_or_none(r.get("LeadDays"))) if _num_or_none(r.get("LeadDays")) else None),
+            "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
+            "ExtValue": round(_num_or_none(r.get("ExtValue")) or 0.0, 2),
+            "DaysLate": (today - needd).days,
+        })
+    return pd.DataFrame(out)
+
+
+def exc_detail_build_rows(items):
+    """(cells, kind) rows for the per-line detail report — sorted by buyer then most-overdue."""
+    if items is None or items.empty:
+        return [(["No open-PO exceptions as of report date."] + [""] * (len(COLS_EXC) - 1), "grand")]
+    it = items.sort_values(["Buyer", "DaysLate"], ascending=[True, False])
+    rows = [([r[c[0]] for c in COLS_EXC], "detail") for _, r in it.iterrows()]
+    tot = [""] * len(COLS_EXC)
+    tot[0] = "GRAND TOTAL"
+    tot[4] = f"{len(it)} line(s)"
+    rows.append((tot, "grand"))
+    return rows
+
 
 def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None, date_to=None):
     buyer_sel = "COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, CAST(poh.BuyerID AS varchar(20)))"
@@ -601,8 +703,10 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         {buyer_sel}                     AS Buyer,
         pod.ProjectID                   AS ProjectID,
         p.DisplayName                   AS JobName,
+        pod.SpecID                      AS Code,
         pod.ItemID                      AS Item,
         pod.ItemDescription             AS Description,
+        pdd.ItemMasterCategoryDescription AS Category,
         poh.PurchaseOrderID             AS PO,
         poh.CName                       AS Vendor,
         pod.PurchaseQty                 AS Qty,
@@ -610,6 +714,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         pod.ExtendedPrice               AS ExtValue,
         CAST(pod.DateRequired AS date)  AS DateRequired,
         CAST(pod.DateRevised  AS date)  AS DateRevised,
+        CAST(pdd.LastReceivedDate AS date) AS ReceiptDate,
         CAST(poh.PurchaseDate AS date)  AS Ordered,
         {lead_sel}                      AS LeadDays,
         {llt_sel}                       AS LLTFlag,
@@ -617,6 +722,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         {rel_sel}                       AS EngReleaseDate
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
+    LEFT JOIN vwPurchaseOrderDetailsDetailed pdd ON pdd.PurchaseDetailID = pod.PurchaseDetailID
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
     {buyer_join}
     {lead_join}
@@ -1038,7 +1144,8 @@ def delivered_book_bytes(df, label):
 # Web adapters — turn (col_defs, grouped rows) into the console's generic shape
 # ─────────────────────────────────────────────────────────────────────────────
 _MONEY_FIELDS = {"LabourCost", "Cost", "WagesPayable", "ExtValue", "Price"}
-_INT_FIELDS = {"Entries", "UniqueEmps", "Employees", "POCount", "DaysLate", "Lead"}
+_INT_FIELDS = {"Entries", "UniqueEmps", "Employees", "POCount", "DaysLate", "Lead",
+               "DaysToAssembly", "LeadTime"}
 _WRAP_FIELDS = {"JobName", "Description"}
 
 

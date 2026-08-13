@@ -798,7 +798,7 @@ class LiveQueryService(QueryService):
             enriched = False
             raw = self._df(etospec.query_po_exceptions(False, pids, dfrom, dto))
         as_of = _dt.date.today()
-        items = etospec.exc_aggregate(etospec.exc_classify(raw, today=as_of))
+        items = etospec.exc_detail(raw, today=as_of)
         return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}", enriched)
 
     def _q_po_late(self, project_ids, date_from=None, date_to=None, **kw):
@@ -1743,16 +1743,19 @@ def _spec_po_status_result(pdf, label):
 
 
 def _spec_po_exc_result(items, label, enriched=True):
-    """items = exc_aggregate output (one row per project-item)."""
-    grouped = etospec.exc_build_rows(items)
-    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_FLAT)]
-    rows = etospec.web_rows(etospec.COLS_FLAT, grouped)
+    """items = exc_detail output — one row per OPEN, OVERDUE PO line (per-line detail)."""
+    grouped = etospec.exc_detail_build_rows(items)
+    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
+    rows = etospec.web_rows(etospec.COLS_EXC, grouped)
     n = 0 if items is None or items.empty else len(items)
     val = 0.0 if not n else float(items["ExtValue"].sum())
-    cards = [Card("Exception items", "{:,}".format(n), "bad" if n else "good"),
+    cards = [Card("Overdue lines", "{:,}".format(n), "bad" if n else "good"),
              Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
-    note = ("Open purchase-order lines that are past their need-by date, one row per item, "
-            "grouped by buyer. LLT and Oversize are flags maintained on the item."
+    note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
+            "line. Code = machine/spec; Category = item category; Receipt Date = last receipt. Status "
+            "is derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates, Last Updated and Lead "
+            "Time are shown for the workbook layout but ETO holds no maintained source for them, so "
+            "they read blank."
             + ("" if enriched else " Item details weren't available this run, so LLT / Oversize are blank."))
     return QueryResult("po_exceptions", "Purchasing — Procurement Exceptions", qcols, rows, cards, note,
                        {"kind": "exceptions", "items": items, "label": label})
@@ -2738,7 +2741,7 @@ class DemoQueryService(QueryService):
         sel = set(self._sel(project_ids))
         raw = pd.DataFrame([r for r in _DEMO_EXC_RAW if r["ProjectID"] in sel],
                            columns=_DEMO_EXC_COLS)
-        items = etospec.exc_aggregate(etospec.exc_classify(raw, today=_dt.date(2026, 7, 22)))
+        items = etospec.exc_detail(raw, today=_dt.date(2026, 7, 22))
         return _spec_po_exc_result(items, "As at Jul 22, 2026 (demo)", True)
 
     def _q_po_late(self, project_ids, date_from=None, date_to=None, **kw):
@@ -3114,25 +3117,25 @@ _DEMO_PACKSLIP = [
 ]
 
 # Procurement Exceptions — query_po_exceptions output shape
-_DEMO_EXC_COLS = ["Buyer", "ProjectID", "JobName", "Item", "Description", "PO", "Vendor",
-                  "Qty", "Received", "ExtValue", "DateRequired", "DateRevised", "Ordered",
-                  "LeadDays", "LLTFlag", "OverFlag", "EngReleaseDate"]
+_DEMO_EXC_COLS = ["Buyer", "ProjectID", "JobName", "Code", "Item", "Description", "Category",
+                  "PO", "Vendor", "Qty", "Received", "ExtValue", "DateRequired", "DateRevised",
+                  "ReceiptDate", "Ordered", "LeadDays", "LLTFlag", "OverFlag", "EngReleaseDate"]
 _DEMO_EXC_RAW = [
-    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Item": "48255",
-     "Description": "Spherical roller bearings (lot)", "PO": "48255", "Vendor": "SKF Canada",
-     "Qty": 40, "Received": 0, "ExtValue": 28800.0, "DateRequired": "2026-06-30",
-     "DateRevised": None, "Ordered": "2026-05-02", "LeadDays": 62, "LLTFlag": 1,
-     "OverFlag": 0, "EngReleaseDate": "2026-04-15"},
-    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Item": "48260",
-     "Description": "Cylinder seals & glands", "PO": "48260", "Vendor": "Bosch Rexroth",
-     "Qty": 12, "Received": 0, "ExtValue": 15400.0, "DateRequired": "2026-07-10",
-     "DateRevised": None, "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0,
-     "OverFlag": 0, "EngReleaseDate": None},
-    {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Item": "48120",
-     "Description": "S7-1500 PLC + IO", "PO": "48120", "Vendor": "Siemens",
-     "Qty": 1, "Received": 0, "ExtValue": 47600.0, "DateRequired": "2026-07-01",
-     "DateRevised": None, "Ordered": "2026-06-22", "LeadDays": 120, "LLTFlag": 1,
-     "OverFlag": 1, "EngReleaseDate": "2026-05-30"},
+    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48255",
+     "Description": "Spherical roller bearings (lot)", "Category": "Bearings", "PO": "48255",
+     "Vendor": "SKF Canada", "Qty": 40, "Received": 0, "ExtValue": 28800.0,
+     "DateRequired": "2026-06-30", "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-05-02",
+     "LeadDays": 62, "LLTFlag": 1, "OverFlag": 0, "EngReleaseDate": "2026-04-15"},
+    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48260",
+     "Description": "Cylinder seals & glands", "Category": "Hydraulic Components", "PO": "48260",
+     "Vendor": "Bosch Rexroth", "Qty": 12, "Received": 4, "ExtValue": 15400.0,
+     "DateRequired": "2026-07-10", "DateRevised": None, "ReceiptDate": "2026-07-18",
+     "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0, "OverFlag": 0, "EngReleaseDate": None},
+    {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Code": 20, "Item": "48120",
+     "Description": "S7-1500 PLC + IO", "Category": "Electrical / Controls", "PO": "48120",
+     "Vendor": "Siemens", "Qty": 1, "Received": 0, "ExtValue": 47600.0, "DateRequired": "2026-07-01",
+     "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-06-22", "LeadDays": 120,
+     "LLTFlag": 1, "OverFlag": 1, "EngReleaseDate": "2026-05-30"},
 ]
 
 # Late Vendors — query_late_vendors output shape (OVERDUE open lines, not yet received)
