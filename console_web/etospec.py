@@ -826,20 +826,17 @@ def exc_build_rows(items):
 
 
 def exceptions_book_bytes(items, label):
-    """Single AutoFiltered sheet. items = exc_aggregate output."""
+    """Single AutoFiltered sheet. items = exc_detail output (one row per open, overdue PO line)."""
     from openpyxl.worksheet.properties import PageSetupProperties
-    rows = exc_build_rows(items)
+    rows = exc_detail_build_rows(items)
     wb = Workbook(); wb.remove(wb.active)
     ws = wb.create_sheet("Procurement Exceptions")
     _populate_sheet(ws, "Procurement Exceptions by Buyer",
-                    "Open POs late / ordered late — one row per project-item (sortable)",
-                    COLS_FLAT, rows, label)
-    ci = [i for i, c in enumerate(COLS_FLAT, 1) if c[0] == "ExtValue"][0]
-    for row in range(4, ws.max_row + 1):
-        ws.cell(row=row, column=ci).number_format = "$#,##0.00"
-    last_data = 3 + (len(items) if not items.empty else 0)
+                    "Open POs past need-by — one row per PO line (sortable)",
+                    COLS_EXC, rows, label)
+    last_data = 3 + (len(items) if items is not None and not items.empty else 0)
     if last_data >= 4:
-        ws.auto_filter.ref = f"A3:{get_column_letter(len(COLS_FLAT))}{last_data}"
+        ws.auto_filter.ref = f"A3:{get_column_letter(len(COLS_EXC))}{last_data}"
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
