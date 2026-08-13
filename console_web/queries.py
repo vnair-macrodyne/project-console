@@ -92,7 +92,7 @@ class QueryResult:
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
-              "lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
+              "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
               "po_delivered", "po_buyer", "item_location", "inventory_value",
               "inventory_by_site", "packing_slip",
@@ -100,14 +100,14 @@ _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "nc_supplier", "nc_detail", "nc_rework", "nc_dashboard"}
 
 # reports that read ETO live and honour the optional date range / view
-ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e",
+ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc",
                   "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
                   "po_delivered", "po_buyer",
                   "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
                   "nc_supplier", "nc_detail"}
 
 # labour reports carry the two-view toggle (This Pay Period / Project Lifetime)
-LABOUR_VIEW_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e"}
+LABOUR_VIEW_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc"}
 
 
 def catalogue():
@@ -151,6 +151,12 @@ def catalogue():
          "needs_projects": True},
         {"id": "lab_e", "menu": labour, "label": "Project Labour Spend",
          "desc": f"{proj} → department → employee — entries, hours, OT and labour cost.",
+         "needs_projects": True},
+        {"id": "lab_disc", "menu": labour, "label": f"By {disc}",
+         "desc": f"{proj} → {disc.lower()} — headcount, hours, OT and applied-rate cost per "
+                 f"{disc.lower()} (Hydraulic, Mechanical, Electrical, PM, Manufacturing, Other), "
+                 "using the same crosswalk as the dashboard; rework (task 999) shown as its own "
+                 "Re-work line.",
          "needs_projects": True},
         # ── Purchasing (the deployed PO reports) ───────────────────────────
         {"id": "po_all", "menu": "Purchasing", "label": "PO Report",
@@ -703,7 +709,12 @@ class LiveQueryService(QueryService):
         dfrom = _as_date(date_from)      # None = Start of Project to Date (no lower bound)
         pids = [int(p) for p in project_ids] if project_ids else None
         df = self._df(etospec.query_daily_labour(dfrom, dto, pids))
+        if report_id == "lab_disc":
+            df = _labour_add_discipline(df, self._hourdesc_map())
         return _spec_labour_result(report_id, df, _window_label(dfrom, dto))
+
+    def _q_lab_disc(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour(project_ids, "lab_disc", date_from, date_to)
 
     def _q_lab_a(self, project_ids, date_from=None, date_to=None, **kw):
         return self._labour(project_ids, "lab_a", date_from, date_to)
@@ -1709,6 +1720,33 @@ def _window_label(dfrom, dto):
     return f"{dfrom:%b %d, %Y} – {dto:%b %d, %Y}"
 
 
+def _labour_add_discipline(df, xwalk):
+    """Add a 'Discipline' column to the labour frame using the HourDescription→discipline crosswalk
+    (the SAME map the dashboard uses). Category carries the HourDescription; task-999 rows arrive as
+    'Re-work' and stay their own bucket. Unmapped descriptions fall back to the keyword rule."""
+    if df is None or getattr(df, "empty", True):
+        if df is not None:
+            df["Discipline"] = []
+        return df
+    try:
+        from console.domain.hourtype_map import discipline_for
+    except Exception:
+        discipline_for = None
+    xw = xwalk or {}
+
+    def _one(cat, dept):
+        if cat == "Re-work":
+            return "Re-work"
+        d = xw.get(cat)
+        if d:
+            return d
+        return discipline_for(dept, cat) if discipline_for else "Other"
+
+    out = df.copy()
+    out["Discipline"] = [_one(c, dep) for c, dep in zip(out["Category"], out["Department"])]
+    return out
+
+
 def _spec_labour_result(report_id, df, label):
     """Build a labour QueryResult for one time window (single control = the date range)."""
     meta = etospec.LABOUR_REPORTS[report_id]
@@ -2709,9 +2747,14 @@ class DemoQueryService(QueryService):
     def _labour_demo(self, project_ids, report_id, date_from):
         lifetime = _as_date(date_from) is None      # Start of Project to Date = all history
         df = self._demo_labour_df(project_ids, lifetime=lifetime)
+        if report_id == "lab_disc":
+            df = _labour_add_discipline(df, _DEMO_XWALK)
         label = ("from project start through Jul 25, 2026 (demo)" if lifetime
                  else "selected window (demo)")
         return _spec_labour_result(report_id, df, label)
+
+    def _q_lab_disc(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour_demo(project_ids, "lab_disc", date_from)
 
     def _q_lab_a(self, project_ids, date_from=None, date_to=None, **kw):
         return self._labour_demo(project_ids, "lab_a", date_from)

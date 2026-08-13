@@ -303,7 +303,9 @@ def build_report_c(df):
 
 
 def build_report_d(df):
-    """Department -> Employee -> job-detail rows (cumulative). Employee subtotal + dept total."""
+    """Department -> Employee -> LABOUR CATEGORY -> job-detail rows (cumulative). The job details
+    are grouped by labour category with a per-category subtotal, then an employee subtotal and a
+    department total."""
     rows = []
     n = len(COLS_D)
     band = lambda label, rt: rows.append(([label] + [""] * (n - 1), rt))
@@ -314,13 +316,18 @@ def build_report_d(df):
         for _, er in emps.iterrows():
             esub = dsub[dsub["EmpNo"] == er.EmpNo]
             band(f"{er.Employee}", "l2_sub")
-            g = (esub.groupby(["ProjectID", "JobName", "Category", "JobDetail"], dropna=False)[_AGG]
-                     .sum().reset_index().sort_values(["ProjectID", "Category", "JobDetail"]))
-            for _, r in g.iterrows():
-                rows.append(([r.ProjectID, r.JobName, r.Category, r.JobDetail,
-                              round(r.Hours, 2), round(r.OTHours, 2), round(r.LabourCost, 2)], "detail"))
+            for cat in sorted(esub["Category"].dropna().unique()):
+                csub = esub[esub["Category"] == cat]
+                g = (csub.groupby(["ProjectID", "JobName", "JobDetail"], dropna=False)[_AGG]
+                         .sum().reset_index().sort_values(["ProjectID", "JobDetail"]))
+                for _, r in g.iterrows():
+                    rows.append(([r.ProjectID, r.JobName, cat, r.JobDetail,
+                                  round(r.Hours, 2), round(r.OTHours, 2), round(r.LabourCost, 2)],
+                                 "detail"))
+                _, h, ot, c = _sums(csub)
+                rows.append((["", "", f"{cat} — subtotal", "", h, ot, c], "l1_sub"))
             _, h, ot, c = _sums(esub)
-            rows.append(([f"{er.Employee} — Subtotal", "", "", "", h, ot, c], "l1_sub"))
+            rows.append(([f"{er.Employee} — Subtotal", "", "", "", h, ot, c], "l2_sub"))
         _, h, ot, c = _sums(dsub)
         rows.append(([f"{dept} — Department Total", "", "", "", h, ot, c], "l3_sub"))
     _, h, ot, c = _sums(df)
@@ -351,6 +358,51 @@ def build_report_e(df):
     return rows
 
 
+COLS_DISC = [
+    ("ProjectID",  "Project ID",  8,  "L", False),
+    ("JobName",    "Job Name",    22, "L", False),
+    ("Discipline", "Discipline",  18, "L", False),
+    ("Employees",  "Emps",        6,  "R", True),
+    ("Entries",    "Entries",     7,  "R", True),
+    ("Hours",      "Hours",       8,  "R", True),
+    ("OTHours",    "OT Hours",    8,  "R", True),
+    ("LabourCost", "Labour Cost", 11, "R", True),
+]
+
+# canonical discipline order for the by-discipline report (matches the dashboard crosswalk)
+_DISC_ORDER = ["Project Management", "Mechanical Engineering", "Electrical Engineering",
+               "Hydraulic Engineering", "Manufacturing", "Other", "Re-work"]
+
+
+def _disc_sort_key(d):
+    ds = "" if d is None else str(d)
+    return (_DISC_ORDER.index(ds), "") if ds in _DISC_ORDER else (len(_DISC_ORDER), ds)
+
+
+def build_report_disc(df):
+    """Project -> Discipline (the 6-discipline crosswalk + a Re-work bucket): headcount, hours,
+    OT and applied-rate cost per discipline, with a per-project subtotal and a grand total.
+    Requires a 'Discipline' column on df (added by the query layer via the crosswalk)."""
+    rows = []
+    for pid in sorted(df["ProjectID"].dropna().unique(), key=str):
+        psub = df[df["ProjectID"] == pid]
+        job = psub["JobName"].iloc[0]
+        gsum = psub.groupby("Discipline", dropna=False)[_AGG].sum()
+        gemp = psub.groupby("Discipline", dropna=False)["EmpNo"].nunique()
+        for disc in sorted(gsum.index, key=_disc_sort_key):
+            a = gsum.loc[disc]
+            label = "(unclassified)" if disc is None or (isinstance(disc, float)) else str(disc)
+            rows.append(([pid, job, label, int(gemp.loc[disc]), int(a.Entries),
+                          round(float(a.Hours), 2), round(float(a.OTHours), 2),
+                          round(float(a.LabourCost), 2)], "detail"))
+        e, h, ot, c = _sums(psub)
+        rows.append(([f"Project {pid} — total", "", "", int(psub["EmpNo"].nunique()),
+                      e, h, ot, c], "l1_sub"))
+    e, h, ot, c = _sums(df)
+    rows.append((["GRAND TOTAL", "", "", int(df["EmpNo"].nunique()), e, h, ot, c], "grand"))
+    return rows
+
+
 # report registry: id -> metadata + column defs + builder
 LABOUR_REPORTS = {
     "lab_a": dict(order=0, label="Departmental Project Detail",
@@ -368,6 +420,9 @@ LABOUR_REPORTS = {
     "lab_e": dict(order=4, label="Project Labour Spend",
                   title="ETO Daily Project Labour Spend",
                   suffix="E_Project_Spend", cols=COLS_E, builder=build_report_e),
+    "lab_disc": dict(order=5, label="By Discipline",
+                     title="ETO Labour by Discipline",
+                     suffix="F_By_Discipline", cols=COLS_DISC, builder=build_report_disc),
 }
 
 
