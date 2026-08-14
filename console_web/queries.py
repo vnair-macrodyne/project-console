@@ -92,22 +92,22 @@ class QueryResult:
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
-              "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc",
-              "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
+              "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
+              "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "item_location", "inventory_value",
               "inventory_by_site", "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail", "nc_rework", "nc_dashboard"}
 
 # reports that read ETO live and honour the optional date range / view
-ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc",
-                  "po_all", "po_status", "po_to_order", "po_exceptions", "po_late",
+ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
+                  "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
                   "po_delivered", "po_buyer",
                   "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
                   "nc_supplier", "nc_detail"}
 
 # labour reports carry the two-view toggle (This Pay Period / Project Lifetime)
-LABOUR_VIEW_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc"}
+LABOUR_VIEW_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum"}
 
 
 def catalogue():
@@ -149,6 +149,10 @@ def catalogue():
         {"id": "lab_d", "menu": labour, "label": "Employee Job Detail",
          "desc": "Department → employee → job-detail lines (the timecard note per task).",
          "needs_projects": True},
+        {"id": "lab_dsum", "menu": labour, "label": "Job Detail Summary",
+         "desc": "Department → labour category → job-detail summary — for each category, the "
+                 "underlying job details summed across employees (entries, hours, OT, cost).",
+         "needs_projects": True},
         {"id": "lab_e", "menu": labour, "label": "Project Labour Spend",
          "desc": f"{proj} → department → employee — entries, hours, OT and labour cost.",
          "needs_projects": True},
@@ -177,6 +181,11 @@ def catalogue():
          "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
                  "grouped by buyer. A forward-looking, at-risk view.",
          "needs_projects": True},
+        {"id": "po_listing", "menu": "Purchasing", "label": "PO Listing (all statuses)",
+         "desc": "Every purchase-order line across all statuses (Open, Overdue, partial, "
+                 "Received) on active — not cancelled — POs, in the same per-line layout as the "
+                 "Procurement Exceptions report. One row per PO line, grouped by buyer.",
+         "needs_projects": True},
         {"id": "po_late", "menu": "Purchasing", "label": "Overdue POs",
          "desc": "Open purchase-order lines whose need-by date has passed, grouped by vendor, "
                  "with how many days late. The expediting view — what's still outstanding.",
@@ -196,10 +205,10 @@ def catalogue():
          "desc": f"Current on-hand inventory for the items purchased on the selected "
                  f"{proj.lower()}s — by item and location (shared stock, live from ETO).",
          "needs_projects": True},
-        {"id": "inventory_value", "menu": "Inventory", "label": "Inventory Value",
-         "desc": f"On-hand inventory VALUE for the items purchased on the selected {proj.lower()}s "
-                 "— extended value by item and location, from ETO's receipt-layer cost (reconciles "
-                 "with material costs), summarised by location.",
+        {"id": "inventory_value", "menu": "Inventory", "label": "Inventory Coverage",
+         "desc": f"Material COVERAGE for the selected {proj.lower()}s — the quantity each item is "
+                 "REQUIRED for the build (outstanding inventory pulls) versus on-hand, the shortfall, "
+                 "and the value required. Location/Bin shown last.",
          "needs_projects": True},
         {"id": "inventory_by_site", "menu": "Inventory", "label": "Inventory by Site",
          "desc": "Where inventory sits across the sites (Macrodyne 1, Racco, TOC, PS1, Quinton, and "
@@ -731,6 +740,9 @@ class LiveQueryService(QueryService):
     def _q_lab_e(self, project_ids, date_from=None, date_to=None, **kw):
         return self._labour(project_ids, "lab_e", date_from, date_to)
 
+    def _q_lab_dsum(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour(project_ids, "lab_dsum", date_from, date_to)
+
     def _po_totals(self, pids, dfrom, dto):
         """Grand purchase totals (closed + open) across the selection, for context/cards."""
         try:
@@ -812,6 +824,18 @@ class LiveQueryService(QueryService):
         items = etospec.exc_detail(raw, today=as_of)
         return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}", enriched)
 
+    def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
+        import datetime as _dt
+        pids = [int(p) for p in project_ids] if project_ids else None
+        dfrom, dto = _as_date(date_from), _as_date(date_to)
+        try:
+            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto, all_statuses=True))
+        except Exception:
+            raw = self._df(etospec.query_po_exceptions(False, pids, dfrom, dto, all_statuses=True))
+        as_of = _dt.date.today()
+        items = etospec.po_listing_detail(raw, today=as_of)
+        return _spec_po_listing_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}")
+
     def _q_po_late(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else None
@@ -850,34 +874,39 @@ class LiveQueryService(QueryService):
         return _item_location_result(self._df(sql))
 
     def _q_inventory_value(self, project_ids, **kw):
-        """On-hand inventory VALUE (item + location) for the items purchased on the selected
-        projects. Value = SUM over receipt layers of (InventoryDetailQty × PurchasePrice) from
-        tblInventoryDetails — ETO's own UOM-consistent carrying cost, the SAME basis it consumes
-        into vwCostingSummed_ByProjectID.TotalInventoryPulls, so it reconciles with material costs.
-        On-hand quantity is the vwInventory snapshot (shared stock, scoped by the projects' PO
-        items — same as Item Location). Made-to-project / adjusted stock without a purchase-price
-        layer shows quantity but no purchased-material value. Verified 2026-08-06; see
-        PROJECT_CONSOLE_SHIPPING_INVENTORY_BUILD_2026-08-06.md."""
+        """Material COVERAGE per project → item: the quantity the build REQUIRES from stock versus
+        what is on-hand, the shortfall, and the value required. Source = vwInventoryUnfulfilledPulls,
+        ETO's outstanding inventory-pull requirement (design demand allocated to stock, minus what's
+        already fulfilled) — so 'Required' is what manufacturing still needs pulled for the job, not
+        shared warehouse on-hand. PullQty = required; QtyOnHand = current on-hand of that item at the
+        pull location; TotalCost = PullQty × AverageUnitCost = value of the required quantity. Rolled
+        up per item (a part pulled on several process lines shows one row: Required summed, on-hand
+        taken once). Location/Bin kept but shown last — parts get moved to a project staging area, so
+        the operational answer is Required · On-hand · Short · Value. Verified 2026-08-13; see
+        PROJECT_CONSOLE_INVENTORY_COVERAGE_2026-08-13.md."""
         pids = [int(p) for p in project_ids] if project_ids else []
         if not pids:
             return _inventory_value_result(None)
         ids = _ids_sql(pids)
         sql = f"""
-        SELECT pi.ProjectID AS ProjectID, p.DisplayName AS JobName,
-               inv.ItemCompanyID AS ItemNo, inv.ItemDescription AS Description,
-               inv.LocationName AS Location, inv.BinLabel AS Bin,
-               inv.QtyOnHand AS OnHand, lay.ExtValue AS ExtValue, lay.LayerQty AS LayerQty
-        FROM (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails
-              WHERE ProjectID IN ({ids}) AND ItemID IS NOT NULL) pi
-        JOIN dbo.vwInventory inv ON inv.ItemID = pi.ItemID
-        LEFT JOIN (SELECT ItemID, InventoryLocation,
-                          SUM(CAST(InventoryDetailQty AS float) * CAST(PurchasePrice AS float)) AS ExtValue,
-                          SUM(CAST(InventoryDetailQty AS float)) AS LayerQty
-                   FROM dbo.tblInventoryDetails GROUP BY ItemID, InventoryLocation) lay
-          ON lay.ItemID = inv.ItemID AND lay.InventoryLocation = inv.InventoryLocation
-        LEFT JOIN dbo.tblProjects p ON p.ProjectID = pi.ProjectID
-        WHERE inv.QtyOnHand > 0
-        ORDER BY pi.ProjectID, inv.LocationName, inv.ItemCompanyID
+        SELECT up.ProjectID AS ProjectID, p.DisplayName AS JobName,
+               up.ItemCompanyID AS ItemNo,
+               MAX(up.ItemDescription) AS Description,
+               MAX(up.CategoryDescription) AS Category,
+               SUM(CAST(up.PullQty AS float)) AS Required,
+               MAX(CAST(up.QtyOnHand AS float)) AS OnHand,
+               MAX(CAST(up.AverageUnitCost AS float)) AS UnitCost,
+               SUM(CAST(up.TotalCost AS float)) AS ExtValue,
+               MAX(loc.LocationName) AS Location,
+               MAX(up.BinLabel) AS Bin
+        FROM dbo.vwInventoryUnfulfilledPulls up
+        LEFT JOIN dbo.tblProjects p ON p.ProjectID = up.ProjectID
+        LEFT JOIN (SELECT InventoryLocation, MAX(LocationName) AS LocationName
+                   FROM dbo.vwInventory GROUP BY InventoryLocation) loc
+          ON loc.InventoryLocation = up.InventoryLocation
+        WHERE up.ProjectID IN ({ids})
+        GROUP BY up.ProjectID, p.DisplayName, up.ItemCompanyID
+        ORDER BY up.ProjectID, up.ItemCompanyID
         """
         return _inventory_value_result(self._df(sql))
 
@@ -1799,6 +1828,38 @@ def _spec_po_exc_result(items, label, enriched=True):
                        {"kind": "exceptions", "items": items, "label": label})
 
 
+def _spec_po_listing_result(items, label):
+    """items = po_listing_detail output — one row per PO line, ALL statuses (active POs only).
+    Same 19-column exception layout; the Excel export reuses the exceptions workbook writer."""
+    grouped = etospec.po_listing_build_rows(items)
+    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
+    rows = etospec.web_rows(etospec.COLS_EXC, grouped)
+    if items is None or items.empty:
+        n = overdue = received = open_lines = 0
+        val = 0.0
+    else:
+        st = items["Status"].astype(str)
+        n = len(items)
+        overdue = int(st.str.startswith("Overdue").sum())
+        received = int((st == "Received").sum())
+        open_lines = int(st.str.startswith("Open").sum())
+        val = float(items["ExtValue"].sum())
+    cards = [Card("PO lines", "{:,}".format(n)),
+             Card("Open", "{:,}".format(open_lines)),
+             Card("Overdue", "{:,}".format(overdue), "bad" if overdue else "good"),
+             Card("Received", "{:,}".format(received)),
+             Card("Committed value", _fmt_money2(val))]
+    note = ("Every purchase-order line across all statuses (Open before need-by, Overdue, partial, "
+            "and Received) on active — i.e. not cancelled — POs, one row per line, in the same "
+            "per-line layout as Procurement Exceptions. Code = machine/spec; Category = item "
+            "category; Receipt Date = last receipt; Status is derived. Planned Ship, Days to "
+            "Assembly, RFQ Date, Permit Dates, Last Updated and Lead Time are kept for the workbook "
+            "layout but ETO holds no maintained source, so they read blank. Excel export uses the "
+            "same workbook format as the exception report.")
+    return QueryResult("po_listing", "Purchasing — PO Listing (all statuses)", qcols, rows, cards, note,
+                       {"kind": "exceptions", "items": items, "label": label})
+
+
 def _spec_late_result(df, label):
     """df = query_late_vendors output (overdue open lines). Web shows vendor-grouped lines;
     export writes the faithful single-sheet workbook."""
@@ -2064,38 +2125,51 @@ def _item_location_result(df):
                        _item_location_rows(df), cards, note)
 
 
-# ---- Inventory — On-Hand Value (extended value by item & location, project-scoped) ----
+# ---- Inventory — Coverage (required vs on-hand vs short, project-scoped) ----
+def _inv_short(req, oh):
+    """Shortfall = required minus on-hand, floored at 0 (never show 'negative short')."""
+    r = 0.0 if req is None else float(req)
+    h = 0.0 if oh is None else float(oh)
+    return round(max(0.0, r - h), 4)
+
+
 def _inventory_value_rows(df):
-    """Grouped project → location → line, with per-location value bands (the by-location summary),
-    a per-project value subtotal and a grand total. Value IS summable (unlike raw on-hand qty)."""
+    """Grouped project → item detail, with a per-project Required/Short/Value subtotal and a grand
+    total. Required and Value are summable; on-hand is a snapshot per item so it is NOT totalled."""
     if df is None or df.empty:
         return []
-    rows, gtot = [], 0.0
+    rows, g_req, g_short, g_val = [], 0.0, 0.0, 0.0
     for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
         psub = df[df["ProjectID"] == pid]
         job = _s(psub["JobName"].iloc[0]) if "JobName" in psub.columns else ""
         rows.append({"_kind": "l3_sub",
                      "ItemNo": f"Project: {int(pid)} — {job or ''}".rstrip(" —")})
-        pval = 0.0
-        for loc in sorted(psub["Location"].dropna().unique(), key=str):
-            lsub = psub[psub["Location"] == loc]
-            lval = float(lsub["ExtValue"].fillna(0).sum())
-            pval += lval
-            rows.append({"_kind": "l2_sub",
-                         "ItemNo": f"{loc} — {len(lsub)} line(s), {lsub['ItemNo'].nunique()} item(s)",
-                         "ExtValue": round(lval, 2)})
-            for _, r in lsub.iterrows():
-                rows.append({
-                    "_kind": "detail",
-                    "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
-                    "Bin": r.get("Bin"), "OnHand": _num(r.get("OnHand")),
-                    "ExtValue": _num(r.get("ExtValue")),
-                })
-        gtot += pval
-        rows.append({"_kind": "l1_sub", "Description": f"Project {int(pid)} — on-hand value",
-                     "ExtValue": round(pval, 2)})
-    rows.append({"_kind": "grand", "ItemNo": "GRAND TOTAL — on-hand value",
-                 "ExtValue": round(gtot, 2)})
+        p_req = p_short = p_val = 0.0
+        for _, r in psub.iterrows():
+            req, oh = r.get("Required"), r.get("OnHand")
+            short = _inv_short(req, oh)
+            val = _num(r.get("ExtValue"))
+            p_req += float(req or 0)
+            p_short += short
+            p_val += float(val or 0)
+            rows.append({
+                "_kind": "detail",
+                "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
+                "Category": r.get("Category"),
+                "Required": _num(req), "OnHand": _num(oh), "Short": short,
+                "UnitCost": _num(r.get("UnitCost")), "ExtValue": val,
+                "Location": r.get("Location"), "Bin": r.get("Bin"),
+            })
+        g_req += p_req
+        g_short += p_short
+        g_val += p_val
+        rows.append({"_kind": "l1_sub",
+                     "Description": f"Project {int(pid)} — required / short / value",
+                     "Required": round(p_req, 2), "Short": round(p_short, 2),
+                     "ExtValue": round(p_val, 2)})
+    rows.append({"_kind": "grand", "ItemNo": "GRAND TOTAL",
+                 "Required": round(g_req, 2), "Short": round(g_short, 2),
+                 "ExtValue": round(g_val, 2)})
     return rows
 
 
@@ -2104,31 +2178,41 @@ def _inventory_value_result(df):
     cols = [
         QueryColumn("ItemNo", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
-        QueryColumn("Bin", "Bin", "text", "left"),
+        QueryColumn("Category", "Category", "text", "left"),
+        QueryColumn("Required", "Required", "num", "right"),
         QueryColumn("OnHand", "On Hand", "num", "right"),
-        QueryColumn("ExtValue", "Ext. Value", "money", "right"),
+        QueryColumn("Short", "Short", "num", "right"),
+        QueryColumn("UnitCost", "Unit Cost", "money2", "right"),
+        QueryColumn("ExtValue", "Value Req’d", "money", "right"),
+        QueryColumn("Location", "Location", "text", "left"),
+        QueryColumn("Bin", "Bin", "text", "left"),
     ]
     empty = df is None or df.empty
     lines = 0 if empty else int(len(df))
     items = 0 if empty else int(df["ItemNo"].nunique())
-    locs = 0 if empty else int(df["Location"].nunique())
-    val = 0.0 if empty else float(df["ExtValue"].fillna(0).sum())
-    uncosted = 0 if empty else int(df["ExtValue"].isna().sum())
-    cards = [Card("On-hand value", _fmt_money2(val)),
-             Card("Stocked lines", "{:,}".format(lines)),
-             Card("Distinct items", "{:,}".format(items)),
-             Card("Locations", "{:,}".format(locs))]
-    note = (f"On-hand inventory value for the items purchased on the selected {proj.lower()}s, by "
-            "item and location, grouped by location (live from ETO). Extended value is ETO's "
-            "purchased-material carrying cost from receipt layers (tblInventoryDetails: quantity × "
-            "purchase price) — the same basis consumed into material costs, so it reconciles. "
-            "On-hand is SHARED stock, not reserved to a "
-            f"{proj.lower()} — an item on more than one {proj.lower()} appears under each. "
-            + (f"{uncosted:,} line(s) are made-to-{proj.lower()} or adjusted stock without a "
-               "purchase-price layer, so they show on-hand quantity but no purchased-material "
-               "value. " if uncosted else "")
-            + "Only items with on-hand > 0 are listed.")
-    return QueryResult("inventory_value", "Inventory — On-Hand Value", cols,
+    req_val = 0.0 if empty else float(df["ExtValue"].fillna(0).sum())
+    if empty:
+        short_items = short_val = 0
+    else:
+        short_qty = (df["Required"].fillna(0) - df["OnHand"].fillna(0)).clip(lower=0)
+        short_items = int((short_qty > 0).sum())
+        short_val = float((short_qty * df["UnitCost"].fillna(0)).sum())
+    cards = [Card("Value required", _fmt_money2(req_val)),
+             Card("Items required", "{:,}".format(items)),
+             Card("Items short", "{:,}".format(short_items),
+                  tone=("warn" if short_items else "neutral")),
+             Card("Short value", _fmt_money2(short_val),
+                  tone=("warn" if short_val else "neutral"))]
+    note = (f"Material coverage for the selected {proj.lower()}s — per item, the quantity the build "
+            "REQUIRES from stock (ETO's outstanding inventory pulls) versus current on-hand, the "
+            "shortfall, and the value of the required quantity (required × unit cost). This answers "
+            f"what the {proj.lower()} still needs pulled, not shared warehouse on-hand — a part "
+            "pulled on several process lines is rolled up to one row (Required summed, on-hand taken "
+            "once). Fully-fulfilled requirements drop off, so an item here still has an outstanding "
+            "pull. Location and Bin are shown last: parts are moved to a "
+            f"{proj.lower()} staging area, so bin is not where manufacturing looks. On-hand is a "
+            "snapshot per item and is not totalled.")
+    return QueryResult("inventory_value", "Inventory — Material Coverage", cols,
                        _inventory_value_rows(df), cards, note)
 
 
@@ -2771,6 +2855,9 @@ class DemoQueryService(QueryService):
     def _q_lab_e(self, project_ids, date_from=None, date_to=None, **kw):
         return self._labour_demo(project_ids, "lab_e", date_from)
 
+    def _q_lab_dsum(self, project_ids, date_from=None, date_to=None, **kw):
+        return self._labour_demo(project_ids, "lab_dsum", date_from)
+
     def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
         import pandas as pd, datetime as _dt
         sel = set(self._sel(project_ids))
@@ -2786,6 +2873,14 @@ class DemoQueryService(QueryService):
                            columns=_DEMO_EXC_COLS)
         items = etospec.exc_detail(raw, today=_dt.date(2026, 7, 22))
         return _spec_po_exc_result(items, "As at Jul 22, 2026 (demo)", True)
+
+    def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
+        import pandas as pd, datetime as _dt
+        sel = set(self._sel(project_ids))
+        src = _DEMO_EXC_RAW + _DEMO_POLIST_EXTRA
+        raw = pd.DataFrame([r for r in src if r["ProjectID"] in sel], columns=_DEMO_EXC_COLS)
+        items = etospec.po_listing_detail(raw, today=_dt.date(2026, 7, 22))
+        return _spec_po_listing_result(items, "As at Jul 22, 2026 (demo)")
 
     def _q_po_late(self, project_ids, date_from=None, date_to=None, **kw):
         import pandas as pd
@@ -3097,26 +3192,30 @@ _DEMO_ITEMLOC = [
      "Bin": "", "OnHand": 3, "MinReq": 1},
 ]
 
-# Inventory Value — _q_inventory_value output shape (on-hand value by item & location)
-_DEMO_INVVAL_COLS = ["ProjectID", "JobName", "ItemNo", "Description", "Location", "Bin",
-                     "OnHand", "ExtValue", "LayerQty"]
+# Inventory Coverage — _q_inventory_value output shape (required vs on-hand vs short, by item)
+_DEMO_INVVAL_COLS = ["ProjectID", "JobName", "ItemNo", "Description", "Category",
+                     "Required", "OnHand", "UnitCost", "ExtValue", "Location", "Bin"]
 _DEMO_INVVAL = [
-    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E03308",
-     "Description": "Three level sensor terminal block; Grey; 6.2mm", "Location": "Macrodyne 2 (Racco)",
-     "Bin": "E4B4", "OnHand": 4100, "ExtValue": 26650.0, "LayerQty": 4100},
-    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E05416",
-     "Description": "Cable tie, Black, 11.4\" (bags of 1000)", "Location": "Macrodyne 1",
-     "Bin": "", "OnHand": 4000, "ExtValue": 400.0, "LayerQty": 4000},
-    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "8005M0.0.0.0-04",
-     "Description": "SHCS 0.25-20 UNC x 0.625 (made-to-project, part-costed)",
-     "Location": "Macrodyne 2 (Racco)", "Bin": "M2", "OnHand": 1513, "ExtValue": 89.45,
-     "LayerQty": 1180},
-    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "9001S-001",
-     "Description": "Fabricated bracket (no purchase-price layer)", "Location": "Macrodyne 1",
-     "Bin": "", "OnHand": 6, "ExtValue": None, "LayerQty": None},
-    {"ProjectID": 230312, "JobName": _D12[0], "ItemNo": "E05413",
-     "Description": "Cable tie, Black, 5\" (bags of 1000)", "Location": "Macrodyne 1",
-     "Bin": "", "OnHand": 2000, "ExtValue": 100.0, "LayerQty": 2000},
+    # short: build needs 6, only 4 on hand
+    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E02379", "Category": "PLC",
+     "Description": "Panelview Plus 7; Std, 1200W, Power Supply: 24VDC",
+     "Required": 6, "OnHand": 4, "UnitCost": 4435.95, "ExtValue": 26615.70,
+     "Location": "Macrodyne 2 (Racco)", "Bin": "E2A2"},
+    # covered: 8 needed, 337 on hand
+    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E02558", "Category": "PLC",
+     "Description": "Point I/O module. Output channels: 8",
+     "Required": 3, "OnHand": 337, "UnitCost": 163.95, "ExtValue": 491.85,
+     "Location": "Macrodyne 2 (Racco)", "Bin": "E2A5"},
+    # short: 14 needed, 18 on hand -> covered
+    {"ProjectID": 230219, "JobName": _D19[0], "ItemNo": "E02564", "Category": "PLC",
+     "Description": "Point I/O terminal base; for safety point I/O",
+     "Required": 14, "OnHand": 18, "UnitCost": 30.44, "ExtValue": 426.12,
+     "Location": "Macrodyne 2 (Racco)", "Bin": "E3A5"},
+    # short: 6 needed, 0 on hand
+    {"ProjectID": 230312, "JobName": _D12[0], "ItemNo": "E04917", "Category": "WIRING",
+     "Description": "Lugs, (1@#4-500MCM), (Box of 3 lugs)",
+     "Required": 6, "OnHand": 0, "UnitCost": 123.95, "ExtValue": 743.70,
+     "Location": "Macrodyne 1", "Bin": "E8A3"},
 ]
 
 # Inventory by Site — _q_inventory_by_site output shape (portfolio value by location)
@@ -3179,6 +3278,22 @@ _DEMO_EXC_RAW = [
      "Vendor": "Siemens", "Qty": 1, "Received": 0, "ExtValue": 47600.0, "DateRequired": "2026-07-01",
      "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-06-22", "LeadDays": 120,
      "LLTFlag": 1, "OverFlag": 1, "EngReleaseDate": "2026-05-30"},
+]
+
+# Extra lines to exercise the ALL-STATUS PO listing (received + open-before-need-by) on top of the
+# overdue exception rows above — used only by DemoQueryService._q_po_listing.
+_DEMO_POLIST_EXTRA = [
+    {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48301",
+     "Description": "Structural steel plate (received)", "Category": "Steel", "PO": "48301",
+     "Vendor": "Russel Metals", "Qty": 10, "Received": 10, "ExtValue": 21200.0,
+     "DateRequired": "2026-06-01", "DateRevised": None, "ReceiptDate": "2026-05-28",
+     "Ordered": "2026-04-20", "LeadDays": 40, "LLTFlag": 0, "OverFlag": 0,
+     "EngReleaseDate": "2026-03-15"},
+    {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Code": 20, "Item": "48410",
+     "Description": "Guarding & light curtains (on order, not yet due)", "Category": "Safety",
+     "PO": "48410", "Vendor": "SICK", "Qty": 6, "Received": 0, "ExtValue": 9800.0,
+     "DateRequired": "2026-08-30", "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-07-15",
+     "LeadDays": 45, "LLTFlag": 0, "OverFlag": 0, "EngReleaseDate": "2026-06-01"},
 ]
 
 # Late Vendors — query_late_vendors output shape (OVERDUE open lines, not yet received)

@@ -403,6 +403,46 @@ def build_report_disc(df):
     return rows
 
 
+COLS_DSUM = [
+    ("Category",   "Labour Category", 18, "L", False),
+    ("JobDetail",  "Job Detail",      26, "L", False),
+    ("ProjectID",  "Project",         7,  "L", False),
+    ("JobName",    "Job Name",        20, "L", False),
+    ("Entries",    "Entries",         7,  "R", True),
+    ("Hours",      "Hours",           8,  "R", True),
+    ("OTHours",    "OT Hours",        8,  "R", True),
+    ("LabourCost", "Labour Cost",     11, "R", True),
+]
+
+
+def build_report_dsum(df):
+    """Department -> LABOUR CATEGORY -> job-detail SUMMARY (cumulative). For each labour category
+    the underlying job details are summed ACROSS employees — one row per (project, job detail) —
+    with a per-category subtotal, then a department total. The 'summary' counterpart to the
+    Employee Job Detail report (same job-detail grain, but the per-employee split is collapsed)."""
+    rows = []
+    n = len(COLS_DSUM)
+    band = lambda label, rt: rows.append(([label] + [""] * (n - 1), rt))
+    for dept in sorted(df["Department"].dropna().unique()):
+        dsub = df[df["Department"] == dept]
+        band(f"Department: {dept}", "l3_sub")
+        for cat in sorted(dsub["Category"].dropna().unique()):
+            csub = dsub[dsub["Category"] == cat]
+            g = (csub.groupby(["ProjectID", "JobName", "JobDetail"], dropna=False)[_AGG]
+                     .sum().reset_index().sort_values(["ProjectID", "JobDetail"]))
+            for _, r in g.iterrows():
+                rows.append(([cat, r.JobDetail, r.ProjectID, r.JobName,
+                              int(r.Entries), round(r.Hours, 2), round(r.OTHours, 2),
+                              round(r.LabourCost, 2)], "detail"))
+            e, h, ot, c = _sums(csub)
+            rows.append(([f"{cat} — subtotal", "", "", "", e, h, ot, c], "l1_sub"))
+        e, h, ot, c = _sums(dsub)
+        rows.append(([f"{dept} — Department Total", "", "", "", e, h, ot, c], "l2_sub"))
+    e, h, ot, c = _sums(df)
+    rows.append((["GRAND TOTAL", "", "", "", e, h, ot, c], "grand"))
+    return rows
+
+
 # report registry: id -> metadata + column defs + builder
 LABOUR_REPORTS = {
     "lab_a": dict(order=0, label="Departmental Project Detail",
@@ -423,6 +463,9 @@ LABOUR_REPORTS = {
     "lab_disc": dict(order=5, label="By Discipline",
                      title="ETO Labour by Discipline",
                      suffix="F_By_Discipline", cols=COLS_DISC, builder=build_report_disc),
+    "lab_dsum": dict(order=6, label="Job Detail Summary",
+                     title="ETO Daily Job Detail Summary",
+                     suffix="G_Job_Detail_Summary", cols=COLS_DSUM, builder=build_report_dsum),
 }
 
 
@@ -741,7 +784,8 @@ def exc_detail_build_rows(items):
     return rows
 
 
-def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None, date_to=None):
+def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None, date_to=None,
+                        all_statuses=False):
     buyer_sel = "COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, CAST(poh.BuyerID AS varchar(20)))"
     buyer_join = "LEFT JOIN tblEmployee bu ON bu.EmployeeID = poh.BuyerID"
     lead_sel = "eim.EstimatedLeadTime" if include_leadtime else "CAST(NULL AS int)"
@@ -781,10 +825,81 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
     {buyer_join}
     {lead_join}
-    WHERE poh.PurchaseActive = 1
-      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}{_po_date_window(date_from, date_to)}
+    WHERE poh.PurchaseActive = 1{"" if all_statuses else _RECV_OPEN_CLAUSE}{proj}{_po_date_window(date_from, date_to)}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
     """
+
+
+# open = not fully received; dropped when all_statuses=True (PurchaseActive=1 already excludes cancelled)
+_RECV_OPEN_CLAUSE = "\n      AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty)"
+
+
+def po_listing_detail(df, today=None):
+    """One normalized row per PO LINE across ALL statuses (open, overdue, partial, received) on
+    active — i.e. not cancelled — POs. Same 19-field layout and field sourcing as the exception
+    detail; the difference is (a) no overdue filter and (b) a fuller Status: Received / Received —
+    partial / Overdue / Overdue — partial / Open (before need-by). DaysLate is signed (negative =
+    days until need-by) so the report can sort most-overdue first."""
+    import pandas as pd
+    today = today or _dt.date.today()
+    out = []
+    for _, r in df.iterrows():
+        req = pd.to_datetime(r.get("DateRequired"), errors="coerce")
+        rev = pd.to_datetime(r.get("DateRevised"), errors="coerce")
+        need = rev if pd.notna(rev) else req
+        needd = need.date() if pd.notna(need) else None
+        rcpt = pd.to_datetime(r.get("ReceiptDate"), errors="coerce")
+        eng = pd.to_datetime(r.get("EngReleaseDate"), errors="coerce")
+        qty = _num_or_none(r.get("Qty")) or 0.0
+        recv = _num_or_none(r.get("Received")) or 0.0
+        full = qty > 0 and recv >= qty
+        part = recv > 0 and not full
+        overdue = bool(needd and needd < today and not full)
+        if full:
+            status = "Received"                                      # fully received / closed
+        elif overdue:
+            status = "Overdue — partial" if part else "Overdue"
+        else:
+            status = "Open — partial" if part else "Open"
+        pid = r.get("ProjectID")
+        out.append({
+            "Buyer": (str(r.get("Buyer")).strip() if not _blank(r.get("Buyer")) else "(unassigned)"),
+            "ProjectID": ("" if _blank(pid) else str(int(pid)) if _num_or_none(pid)
+                          and float(pid).is_integer() else str(pid)),
+            "JobName": ("" if _blank(r.get("JobName")) else str(r.get("JobName"))),
+            "Code": _spec_code(r.get("Code")),
+            "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
+            "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
+            "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
+            "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
+            "PlannedShip": "",                            # ETO holds no maintained ship date
+            "PlannedReceipt": (req.date().isoformat() if pd.notna(req) else ""),
+            "RevisedReceipt": (rev.date().isoformat() if pd.notna(rev) else ""),
+            "ReceiptDate": (rcpt.date().isoformat() if pd.notna(rcpt) else ""),
+            "Status": status,
+            "LastUpdated": "",                            # no PO-line modified timestamp in ETO
+            "DaysToAssembly": None,                       # no maintained assembly date
+            "RFQDate": "",                                # not in ETO
+            "PermitDates": "",                            # not in ETO
+            "LeadTime": (int(_num_or_none(r.get("LeadDays"))) if _num_or_none(r.get("LeadDays")) else None),
+            "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
+            "ExtValue": round(_num_or_none(r.get("ExtValue")) or 0.0, 2),
+            "DaysLate": ((today - needd).days if needd else -10 ** 6),
+        })
+    return pd.DataFrame(out)
+
+
+def po_listing_build_rows(items):
+    """(cells, kind) rows for the all-status PO listing — sorted buyer, then most-overdue first."""
+    if items is None or items.empty:
+        return [(["No purchase-order lines for the selection."] + [""] * (len(COLS_EXC) - 1), "grand")]
+    it = items.sort_values(["Buyer", "DaysLate"], ascending=[True, False])
+    rows = [([r[c[0]] for c in COLS_EXC], "detail") for _, r in it.iterrows()]
+    tot = [""] * len(COLS_EXC)
+    tot[0] = "GRAND TOTAL"
+    tot[4] = f"{len(it)} line(s)"
+    rows.append((tot, "grand"))
+    return rows
 
 
 def _blank(v):
