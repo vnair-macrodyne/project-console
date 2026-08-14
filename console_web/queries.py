@@ -150,8 +150,8 @@ def catalogue():
          "desc": "Department → employee → job-detail lines (the timecard note per task).",
          "needs_projects": True},
         {"id": "lab_dsum", "menu": labour, "label": "Job Detail Summary",
-         "desc": f"{proj} → machine number → job-detail summary — for each machine, the underlying "
-                 "job details summed (entries, hours, OT, cost).",
+         "desc": f"{proj} → machine number → {disc.lower()} → job-detail summary — job details "
+                 "summed within each machine and discipline (entries, hours, OT, cost).",
          "needs_projects": True},
         {"id": "lab_e", "menu": labour, "label": "Project Labour Spend",
          "desc": f"{proj} → department → employee — entries, hours, OT and labour cost.",
@@ -718,7 +718,7 @@ class LiveQueryService(QueryService):
         dfrom = _as_date(date_from)      # None = Start of Project to Date (no lower bound)
         pids = [int(p) for p in project_ids] if project_ids else None
         df = self._df(etospec.query_daily_labour(dfrom, dto, pids))
-        if report_id == "lab_disc":
+        if report_id in ("lab_disc", "lab_dsum"):
             df = _labour_add_discipline(df, self._hourdesc_map())
         return _spec_labour_result(report_id, df, _window_label(dfrom, dto))
 
@@ -2833,7 +2833,7 @@ class DemoQueryService(QueryService):
     def _labour_demo(self, project_ids, report_id, date_from):
         lifetime = _as_date(date_from) is None      # Start of Project to Date = all history
         df = self._demo_labour_df(project_ids, lifetime=lifetime)
-        if report_id == "lab_disc":
+        if report_id in ("lab_disc", "lab_dsum"):
             df = _labour_add_discipline(df, _DEMO_XWALK)
         label = ("from project start through Jul 25, 2026 (demo)" if lifetime
                  else "selected window (demo)")

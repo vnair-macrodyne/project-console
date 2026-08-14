@@ -405,8 +405,8 @@ def build_report_disc(df):
 
 
 COLS_DSUM = [
-    ("Machine",    "Machine",     8,  "L", False),
-    ("JobDetail",  "Job Detail",  32, "L", False),
+    ("Discipline", "Discipline",  18, "L", False),
+    ("JobDetail",  "Job Detail",  30, "L", False),
     ("Entries",    "Entries",     7,  "R", True),
     ("Hours",      "Hours",       8,  "R", True),
     ("OTHours",    "OT Hours",    8,  "R", True),
@@ -433,16 +433,19 @@ def _mach_sort(m):
 
 
 def build_report_dsum(df):
-    """Project -> MACHINE number -> job-detail SUMMARY (cumulative). Job details are summed across
-    everything else (employee, category) — one row per (machine, job detail) — with a per-machine
-    subtotal and a project total. Machine = the timecard SpecID; charges with no machine fall in a
-    '(no machine)' bucket."""
+    """Project -> MACHINE number -> DISCIPLINE -> job-detail SUMMARY (cumulative). Job details are
+    summed within each (machine, discipline) — one leaf row per job detail — with a discipline
+    subtotal, a machine subtotal and a project total. Machine = the timecard SpecID (charges with no
+    machine fall in a '(no machine)' bucket); Discipline = the dashboard crosswalk (rework shown as
+    its own line). Requires a 'Discipline' column (added by the query layer via the crosswalk)."""
     import pandas as pd
     rows = []
     n = len(COLS_DSUM)
     band = lambda label, rt: rows.append(([label] + [""] * (n - 1), rt))
     d = df.copy()
     d["_M"] = d["Machine"].apply(_mach_label) if "Machine" in d.columns else ""
+    if "Discipline" not in d.columns:
+        d["Discipline"] = None
     for pid in sorted(d["ProjectID"].dropna().unique(), key=str):
         psub = d[d["ProjectID"] == pid]
         job = psub["JobName"].iloc[0]
@@ -450,18 +453,28 @@ def build_report_dsum(df):
         for mach in sorted(psub["_M"].unique(), key=_mach_sort):
             msub = psub[psub["_M"] == mach]
             mlabel = mach if mach else "(no machine)"
-            g = (msub.groupby(["JobDetail"], dropna=False)[_AGG]
-                     .sum().reset_index().sort_values("JobDetail"))
-            for _, r in g.iterrows():
-                jd = r.JobDetail
-                blank = jd is None or (isinstance(jd, float) and pd.isna(jd)) or str(jd).strip() == ""
-                jd = "(no detail)" if blank else str(jd)
-                rows.append(([mlabel, jd, int(r.Entries), round(r.Hours, 2),
-                              round(r.OTHours, 2), round(r.LabourCost, 2)], "detail"))
+            band(f"Machine {mlabel}", "l2_sub")
+            discs = sorted(msub["Discipline"].dropna().unique(), key=_disc_sort_key)
+            if msub["Discipline"].isna().any():
+                discs = list(discs) + [None]
+            for disc in discs:
+                dsub = (msub[msub["Discipline"].isna()] if disc is None
+                        else msub[msub["Discipline"] == disc])
+                dlabel = "(unclassified)" if disc is None else str(disc)
+                g = (dsub.groupby(["JobDetail"], dropna=False)[_AGG]
+                         .sum().reset_index().sort_values("JobDetail"))
+                for _, r in g.iterrows():
+                    jd = r.JobDetail
+                    blank = jd is None or (isinstance(jd, float) and pd.isna(jd)) or str(jd).strip() == ""
+                    jd = "(no detail)" if blank else str(jd)
+                    rows.append(([dlabel, jd, int(r.Entries), round(r.Hours, 2),
+                                  round(r.OTHours, 2), round(r.LabourCost, 2)], "detail"))
+                e, h, ot, c = _sums(dsub)
+                rows.append(([f"{dlabel} — subtotal", "", e, h, ot, c], "l1_sub"))
             e, h, ot, c = _sums(msub)
-            rows.append(([f"Machine {mlabel} — subtotal", "", e, h, ot, c], "l1_sub"))
+            rows.append(([f"Machine {mlabel} — subtotal", "", e, h, ot, c], "l2_sub"))
         e, h, ot, c = _sums(psub)
-        rows.append(([f"Project {pid} — Total", "", e, h, ot, c], "l2_sub"))
+        rows.append(([f"Project {pid} — Total", "", e, h, ot, c], "l3_sub"))
     e, h, ot, c = _sums(df)
     rows.append((["GRAND TOTAL", "", e, h, ot, c], "grand"))
     return rows
@@ -488,7 +501,7 @@ LABOUR_REPORTS = {
                      title="ETO Labour by Discipline",
                      suffix="F_By_Discipline", cols=COLS_DISC, builder=build_report_disc),
     "lab_dsum": dict(order=6, label="Job Detail Summary",
-                     title="ETO Daily Job Detail Summary — by Project & Machine",
+                     title="ETO Daily Job Detail Summary — Project / Machine / Discipline",
                      suffix="G_Job_Detail_Summary", cols=COLS_DSUM, builder=build_report_dsum),
 }
 
