@@ -224,6 +224,7 @@ def query_daily_labour(start_date, end_date, project_ids=None):
         tc.EmpNumber + ' - ' + e.EmpLastName + ', ' + e.EmpFirstName AS Employee,
         CASE WHEN tc.SpecID = 999 THEN 'Re-work'
              ELSE ht.HourDescription END             AS Category,
+        tc.SpecID                                   AS Machine,
         ISNULL(tc.TimecardCustom1, '')              AS JobDetail,
         1                                           AS Entries,
         tc.HourTime                                 AS Hours,
@@ -404,42 +405,65 @@ def build_report_disc(df):
 
 
 COLS_DSUM = [
-    ("Category",   "Labour Category", 18, "L", False),
-    ("JobDetail",  "Job Detail",      26, "L", False),
-    ("ProjectID",  "Project",         7,  "L", False),
-    ("JobName",    "Job Name",        20, "L", False),
-    ("Entries",    "Entries",         7,  "R", True),
-    ("Hours",      "Hours",           8,  "R", True),
-    ("OTHours",    "OT Hours",        8,  "R", True),
-    ("LabourCost", "Labour Cost",     11, "R", True),
+    ("Machine",    "Machine",     8,  "L", False),
+    ("JobDetail",  "Job Detail",  32, "L", False),
+    ("Entries",    "Entries",     7,  "R", True),
+    ("Hours",      "Hours",       8,  "R", True),
+    ("OTHours",    "OT Hours",    8,  "R", True),
+    ("LabourCost", "Labour Cost", 11, "R", True),
 ]
 
 
+def _mach_label(v):
+    """Timecard SpecID -> machine number ('10.0' -> '10'); blank when the charge has no machine."""
+    f = _num_or_none(v)
+    if f is None:
+        return ""
+    return str(int(f)) if float(f).is_integer() else str(f)
+
+
+def _mach_sort(m):
+    """Numeric machines ascending; the '(no machine)' bucket last."""
+    if m == "":
+        return (1, 0.0, "")
+    try:
+        return (0, float(m), "")
+    except (TypeError, ValueError):
+        return (0, 0.0, m)
+
+
 def build_report_dsum(df):
-    """Department -> LABOUR CATEGORY -> job-detail SUMMARY (cumulative). For each labour category
-    the underlying job details are summed ACROSS employees — one row per (project, job detail) —
-    with a per-category subtotal, then a department total. The 'summary' counterpart to the
-    Employee Job Detail report (same job-detail grain, but the per-employee split is collapsed)."""
+    """Project -> MACHINE number -> job-detail SUMMARY (cumulative). Job details are summed across
+    everything else (employee, category) — one row per (machine, job detail) — with a per-machine
+    subtotal and a project total. Machine = the timecard SpecID; charges with no machine fall in a
+    '(no machine)' bucket."""
+    import pandas as pd
     rows = []
     n = len(COLS_DSUM)
     band = lambda label, rt: rows.append(([label] + [""] * (n - 1), rt))
-    for dept in sorted(df["Department"].dropna().unique()):
-        dsub = df[df["Department"] == dept]
-        band(f"Department: {dept}", "l3_sub")
-        for cat in sorted(dsub["Category"].dropna().unique()):
-            csub = dsub[dsub["Category"] == cat]
-            g = (csub.groupby(["ProjectID", "JobName", "JobDetail"], dropna=False)[_AGG]
-                     .sum().reset_index().sort_values(["ProjectID", "JobDetail"]))
+    d = df.copy()
+    d["_M"] = d["Machine"].apply(_mach_label) if "Machine" in d.columns else ""
+    for pid in sorted(d["ProjectID"].dropna().unique(), key=str):
+        psub = d[d["ProjectID"] == pid]
+        job = psub["JobName"].iloc[0]
+        band(f"Project: {pid} — {job}", "l3_sub")
+        for mach in sorted(psub["_M"].unique(), key=_mach_sort):
+            msub = psub[psub["_M"] == mach]
+            mlabel = mach if mach else "(no machine)"
+            g = (msub.groupby(["JobDetail"], dropna=False)[_AGG]
+                     .sum().reset_index().sort_values("JobDetail"))
             for _, r in g.iterrows():
-                rows.append(([cat, r.JobDetail, r.ProjectID, r.JobName,
-                              int(r.Entries), round(r.Hours, 2), round(r.OTHours, 2),
-                              round(r.LabourCost, 2)], "detail"))
-            e, h, ot, c = _sums(csub)
-            rows.append(([f"{cat} — subtotal", "", "", "", e, h, ot, c], "l1_sub"))
-        e, h, ot, c = _sums(dsub)
-        rows.append(([f"{dept} — Department Total", "", "", "", e, h, ot, c], "l2_sub"))
+                jd = r.JobDetail
+                blank = jd is None or (isinstance(jd, float) and pd.isna(jd)) or str(jd).strip() == ""
+                jd = "(no detail)" if blank else str(jd)
+                rows.append(([mlabel, jd, int(r.Entries), round(r.Hours, 2),
+                              round(r.OTHours, 2), round(r.LabourCost, 2)], "detail"))
+            e, h, ot, c = _sums(msub)
+            rows.append(([f"Machine {mlabel} — subtotal", "", e, h, ot, c], "l1_sub"))
+        e, h, ot, c = _sums(psub)
+        rows.append(([f"Project {pid} — Total", "", e, h, ot, c], "l2_sub"))
     e, h, ot, c = _sums(df)
-    rows.append((["GRAND TOTAL", "", "", "", e, h, ot, c], "grand"))
+    rows.append((["GRAND TOTAL", "", e, h, ot, c], "grand"))
     return rows
 
 
@@ -464,7 +488,7 @@ LABOUR_REPORTS = {
                      title="ETO Labour by Discipline",
                      suffix="F_By_Discipline", cols=COLS_DISC, builder=build_report_disc),
     "lab_dsum": dict(order=6, label="Job Detail Summary",
-                     title="ETO Daily Job Detail Summary",
+                     title="ETO Daily Job Detail Summary — by Project & Machine",
                      suffix="G_Job_Detail_Summary", cols=COLS_DSUM, builder=build_report_dsum),
 }
 

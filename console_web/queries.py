@@ -150,8 +150,8 @@ def catalogue():
          "desc": "Department → employee → job-detail lines (the timecard note per task).",
          "needs_projects": True},
         {"id": "lab_dsum", "menu": labour, "label": "Job Detail Summary",
-         "desc": "Department → labour category → job-detail summary — for each category, the "
-                 "underlying job details summed across employees (entries, hours, OT, cost).",
+         "desc": f"{proj} → machine number → job-detail summary — for each machine, the underlying "
+                 "job details summed (entries, hours, OT, cost).",
          "needs_projects": True},
         {"id": "lab_e", "menu": labour, "label": "Project Labour Spend",
          "desc": f"{proj} → department → employee — entries, hours, OT and labour cost.",
@@ -2818,14 +2818,16 @@ class DemoQueryService(QueryService):
                 continue
             factor = rec.get("Factor", 1.0)
             hrs = rec["Hours"]
+            machine = 999 if rec["Category"] == "Re-work" else _DEMO_MACH.get(rec["ProjectID"], None)
             rows.append({"Department": rec["Department"], "ProjectID": rec["ProjectID"],
                          "JobName": rec["JobName"], "Customer": rec["Customer"],
                          "EmpNo": rec["EmpNo"], "Employee": rec["Employee"],
-                         "Category": rec["Category"], "JobDetail": rec.get("JobDetail", ""),
+                         "Category": rec["Category"], "Machine": machine,
+                         "JobDetail": rec.get("JobDetail", ""),
                          "Entries": 1, "Hours": hrs, "OTHours": (hrs if factor > 1 else 0),
                          "LabourCost": round(hrs * rec["Rate"] * factor, 2)})
         cols = ["Department", "ProjectID", "JobName", "Customer", "EmpNo", "Employee",
-                "Category", "JobDetail", "Entries", "Hours", "OTHours", "LabourCost"]
+                "Category", "Machine", "JobDetail", "Entries", "Hours", "OTHours", "LabourCost"]
         return pd.DataFrame(rows, columns=cols)
 
     def _labour_demo(self, project_ids, report_id, date_from):
@@ -3087,6 +3089,10 @@ _DEMO_EXC = [
 _D19 = ("230219 - 5500 Ton Forging Press", "Williams International")
 _D12 = ("230312 - 2500T Compression Press", "Eaton Corporation")
 _D87 = ("240087 - 650 Ton Trim Press", "Norris Cylinder")
+
+
+# demo machine (SpecID) per project — rework charges use the 999 pseudo-spec
+_DEMO_MACH = {230219: 10, 230312: 20, 240087: 30}
 
 
 def _lab(dept, pid, jn, cust, empno, emp, cat, jd, hrs, rate, factor=1.0):
