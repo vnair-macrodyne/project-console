@@ -1961,18 +1961,22 @@ def _released_toorder_result(df, as_of):
     empty = df is None or df.empty
     items = 0 if empty else int(len(df))
     rows = _released_toorder_rows(df, as_of)
-    val = sum((r.get("ExtValue") or 0) for r in rows if r.get("_kind") == "detail")
+    val = sum((_num(r.get("ExtValue")) or 0) for r in rows if r.get("_kind") == "detail")
+    priced = sum(1 for r in rows if r.get("_kind") == "detail" and _num(r.get("ExtValue")) is not None)
     ages = [r.get("AgeDays") for r in rows if r.get("_kind") == "detail" and r.get("AgeDays") is not None]
     oldest = max(ages) if ages else 0
     cards = [Card("Items to order", "{:,}".format(items)),
              Card("Est. value", _fmt_money2(val)),
              Card("Oldest release", f"{oldest:,} days", "warn" if oldest > 30 else "neutral")]
+    unpriced = items - priced
     note = (f"Items engineering has RELEASED in the BOM (ETO release log) that have no purchase order "
             f"yet on the selected {proj.lower()}s — the buyers' still-to-place worklist, oldest "
             "release first. Released Qty is the net released quantity; Est. Unit / Est. Value are an "
             "estimate from the average historical PO price for the item (item last/list cost as "
             "fallback), so treat them as planning figures, not quotes. Anything already on a PO for "
-            f"the {proj.lower()} is excluded.")
+            f"the {proj.lower()} is excluded."
+            + (f" Note: {unpriced:,} of {items:,} item(s) have no price on record yet, so Est. value "
+               "is a lower bound." if unpriced else ""))
     return QueryResult("released_toorder", "Purchasing — Released, To Order", cols, rows, cards, note)
 
 
@@ -3520,7 +3524,10 @@ class _DemoFin:
 # ─────────────────────────────────────────────────────────────────────────────
 def _num(x):
     try:
-        return None if x is None else float(x)
+        if x is None:
+            return None
+        f = float(x)
+        return None if f != f else f          # NaN (f != f) → None, so it never poisons sums/cards
     except (TypeError, ValueError):
         return None
 
