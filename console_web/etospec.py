@@ -527,6 +527,7 @@ COLS_PO = [
     ("Received",    "Rec'd",        6, "R", True),
     ("Price",       "Price",        9, "R", True),
     ("ExtValue",    "Ext. Value",  10, "R", True),
+    ("ReleaseDate", "Release Date", 11, "C", False),
     ("Required",    "Required",    10, "C", False),
     ("Revised",     "Revised",     10, "C", False),
     ("DaysLate",    "Days Late",    8, "R", True),
@@ -572,12 +573,16 @@ def query_po_status_open(project_ids=None, date_from=None, date_to=None):
         pod.PurchasePrice             AS Price,
         pod.ExtendedPrice             AS ExtValue,
         CAST(pod.DateRequired AS date) AS Required,
-        CAST(pod.DateRevised  AS date) AS Revised
+        CAST(pod.DateRevised  AS date) AS Revised,
+        COALESCE(CAST(bomrel.BOMReleaseDate AS date),
+                 CAST(eim.[{_ENG_RELEASE_COL}] AS date)) AS ReleaseDate
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
     LEFT JOIN tblProjects p     ON p.ProjectID  = pod.ProjectID
     LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
     LEFT JOIN tblEmployee bu    ON bu.EmployeeID = poh.BuyerID
+    LEFT JOIN tblEngItemMaster eim ON eim.ItemID = pod.ItemID
+    {_bom_release_join(project_ids)}
     WHERE poh.PurchaseActive = 1
       AND (pod.Received IS NULL OR pod.Received < pod.PurchaseQty){proj}{dt}
     ORDER BY pod.ProjectID, pod.SpecID, poh.PurchaseOrderID, pod.ItemID
@@ -606,18 +611,20 @@ def po_build_rows(df):
         pstat = psub["ProjStatus"].iloc[0] if "ProjStatus" in psub.columns else None
         flag = "" if (pstat == "Sold") else f"   [!] NON-ACTIVE PROJECT ({pstat or 'unknown'}) — review/cancel"
         proj_index.append((pid, len(rows)))
-        rows.append(([f"Project: {pid} — {job}   ·   Customer: {cust}{flag}"] + [""] * 10, "l3_sub"))
+        rows.append(([f"Project: {pid} — {job}   ·   Customer: {cust}{flag}"] + [""] * 12, "l3_sub"))
         for mc in sorted(psub["MachineCode"].dropna().unique(), key=str):
             msub = psub[psub["MachineCode"] == mc]
-            rows.append(([f"Machine {mc}"] + [""] * 10, "l2_sub"))
+            rows.append(([f"Machine {mc}"] + [""] * 12, "l2_sub"))
             for _, r in msub.iterrows():
                 rows.append(([r.Item, r.Description, r.PO, r.Supplier, r.Qty, r.Received,
                               round(r.Price, 2), round(r.ExtValue, 2),
+                              str(r.ReleaseDate or ""),
                               str(r.Required or ""), str(r.Revised or ""),
                               (int(r.DaysLate) if r.Status == "Overdue" else ""), r.Status], "detail"))
         rows.append((["", f"Project {pid} — Open Value", "", "", "", "", "",
-                      round(psub["ExtValue"].sum(), 2), "", "", "", ""], "l1_sub"))
-    rows.append((["GRAND TOTAL — Open PO Value"] + [""] * 6 + [round(df["ExtValue"].sum(), 2), "", "", "", ""], "grand"))
+                      round(psub["ExtValue"].sum(), 2), "", "", "", "", ""], "l1_sub"))
+    rows.append((["GRAND TOTAL — Open PO Value"] + [""] * 6 + [round(df["ExtValue"].sum(), 2)]
+                 + [""] * 5, "grand"))
     return rows, proj_index
 
 
@@ -821,6 +828,63 @@ def exc_detail_build_rows(items):
     return rows
 
 
+def _bom_release_join(project_ids, pod_alias="pod", alias="bomrel"):
+    """LEFT JOIN giving the BOM RELEASE DATE per (ProjectID, ItemID) — the FIRST time engineering
+    released that item to purchasing (MIN ReleasedDateTime in tblBOMReleaseHistory). One row per
+    project+item, so it never fans out the PO lines. Scoped to the selected projects when given."""
+    scope = ""
+    if project_ids:
+        ids = ",".join(str(int(p)) for p in project_ids)
+        scope = f" WHERE ProjectID IN ({ids})"
+    return (f"LEFT JOIN (SELECT ProjectID, ItemID, MIN(ReleasedDateTime) AS BOMReleaseDate "
+            f"FROM dbo.tblBOMReleaseHistory{scope} GROUP BY ProjectID, ItemID) {alias} "
+            f"ON {alias}.ProjectID = {pod_alias}.ProjectID AND {alias}.ItemID = {pod_alias}.ItemID")
+
+
+def query_released_to_order(project_ids=None):
+    """Buyers' 'still to place' worklist: items ENGINEERING has released (tblBOMReleaseHistory, net
+    released qty > 0) that have NO purchase order yet on the project. One row per project+item, with
+    the release date and an ESTIMATED unit cost (avg historical PO price → item last-cost → list-cost
+    fallback). Excludes anything already on a PO for the project. Sorted oldest release first."""
+    scope = ""
+    if project_ids:
+        ids = ",".join(str(int(p)) for p in project_ids)
+        scope = f" WHERE ProjectID IN ({ids})"
+    return f"""
+    WITH rel AS (
+        SELECT ProjectID, ItemID, MIN(ReleasedDateTime) AS ReleaseDate,
+               SUM(CAST(QuantityChange AS float)) AS Qty
+        FROM dbo.tblBOMReleaseHistory{scope}
+        GROUP BY ProjectID, ItemID
+        HAVING SUM(CAST(QuantityChange AS float)) > 0
+    ),
+    bom AS (
+        SELECT ProjectID, ItemID, MAX(ItemCompanyID) AS ItemNo, MAX(ItemDescription) AS Description,
+               MAX(CAST(SpecID AS float)) AS MachineCode,
+               MAX(CAST(ItemLastCost AS float)) AS LastCost,
+               MAX(CAST(ItemListCost AS float)) AS ListCost
+        FROM dbo.vwEngBOM{scope} GROUP BY ProjectID, ItemID
+    ),
+    hist AS (
+        SELECT ItemID, AVG(CASE WHEN PurchaseQty > 0 THEN ExtendedPrice / PurchaseQty END) AS HistUnit
+        FROM dbo.vwPurchaseOrderDetails WHERE ItemID IS NOT NULL GROUP BY ItemID
+    ),
+    ordered AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails{scope})
+    SELECT rel.ProjectID AS ProjectID, p.DisplayName AS JobName, b.MachineCode AS MachineCode,
+           b.ItemNo AS ItemNo, rel.ItemID AS ItemID, b.Description AS Description,
+           CAST(rel.Qty AS decimal(18,2)) AS Qty,
+           CAST(rel.ReleaseDate AS date) AS ReleaseDate,
+           COALESCE(h.HistUnit, NULLIF(b.LastCost, 0), NULLIF(b.ListCost, 0)) AS UnitCost
+    FROM rel
+    LEFT JOIN ordered o ON o.ProjectID = rel.ProjectID AND o.ItemID = rel.ItemID
+    LEFT JOIN bom b     ON b.ProjectID = rel.ProjectID AND b.ItemID = rel.ItemID
+    LEFT JOIN hist h    ON h.ItemID = rel.ItemID
+    LEFT JOIN tblProjects p ON p.ProjectID = rel.ProjectID
+    WHERE o.ItemID IS NULL
+    ORDER BY rel.ReleaseDate ASC, rel.ProjectID
+    """
+
+
 def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None, date_to=None,
                         all_statuses=False):
     buyer_sel = "COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, CAST(poh.BuyerID AS varchar(20)))"
@@ -855,13 +919,14 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         {lead_sel}                      AS LeadDays,
         {llt_sel}                       AS LLTFlag,
         {over_sel}                      AS OverFlag,
-        {rel_sel}                       AS EngReleaseDate
+        COALESCE(CAST(bomrel.BOMReleaseDate AS date), {rel_sel}) AS EngReleaseDate
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
     LEFT JOIN vwPurchaseOrderDetailsDetailed pdd ON pdd.PurchaseDetailID = pod.PurchaseDetailID
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
     {buyer_join}
     {lead_join}
+    {_bom_release_join(project_ids)}
     WHERE poh.PurchaseActive = 1{"" if all_statuses else _RECV_OPEN_CLAUSE}{proj}{_po_date_window(date_from, date_to)}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
     """

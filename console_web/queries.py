@@ -94,7 +94,7 @@ class QueryResult:
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
-              "po_delivered", "po_buyer", "item_location", "inventory_value",
+              "po_delivered", "po_buyer", "released_toorder", "item_location", "inventory_value",
               "inventory_by_site", "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail", "nc_rework", "nc_dashboard"}
@@ -102,7 +102,7 @@ _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
 # reports that read ETO live and honour the optional date range / view
 ETO_REPORT_IDS = {"lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
                   "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
-                  "po_delivered", "po_buyer",
+                  "po_delivered", "po_buyer", "released_toorder",
                   "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
                   "nc_supplier", "nc_detail"}
 
@@ -176,6 +176,12 @@ def catalogue():
          "desc": f"Purchase-order lines entered in ETO but not yet issued (not printed or "
                  f"emailed to the vendor) — the still-to-place backlog, grouped by {proj.lower()} "
                  "and machine, with the age of each draft.",
+         "needs_projects": True},
+        {"id": "released_toorder", "menu": "Purchasing", "label": "Released — To Order",
+         "desc": f"Items engineering has RELEASED (from the BOM release log) with no purchase order "
+                 f"yet on the {proj.lower()} — the buyers' still-to-place worklist. One row per item "
+                 "with the release date, age since release, released qty and an estimated cost "
+                 "(historical PO price). Oldest release first.",
          "needs_projects": True},
         {"id": "po_exceptions", "menu": "Purchasing", "label": "Procurement Exceptions",
          "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
@@ -774,6 +780,16 @@ class LiveQueryService(QueryService):
             result.cards.append(Card("Total purchases", _fmt_money2(t["TotalPurchases"])))
             result.cards.append(Card("Received (closed)", _fmt_money2(t["ReceivedValue"])))
         return result
+
+    def _q_released_toorder(self, project_ids, date_from=None, date_to=None, **kw):
+        """Released-but-not-ordered worklist — items released in the BOM (tblBOMReleaseHistory) with
+        no PO yet on the project. Estimated cost from historical PO prices. Oldest release first."""
+        import datetime as _dt
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return _released_toorder_result(None, _dt.date.today())
+        raw = self._df(etospec.query_released_to_order(pids))
+        return _released_toorder_result(raw, _dt.date.today())
 
     def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
         """Draft PO lines — entered in ETO but not yet issued (not printed AND not emailed
@@ -1833,8 +1849,10 @@ def _spec_po_status_result(pdf, label):
              Card("Overdue lines", "{:,}".format(ov_lines), "bad" if ov_lines else "good"),
              Card("Overdue value", _fmt_money2(ov_val), "bad" if ov_val else "good")]
     note = ("Open purchase-order lines — On Order and Overdue. Overdue means the need-by date "
-            "has passed. Grouped by project and machine, with an overdue-aging summary; the "
-            "Excel export adds a contents and summary sheet.")
+            "has passed. Release Date = when the item's BOM was released to purchasing (ETO release "
+            "log, eng date as fallback) — reconcile it against when the PO was placed. Grouped by "
+            "project and machine, with an overdue-aging summary; the Excel export adds a contents "
+            "and summary sheet.")
     return QueryResult("po_status", "Purchasing — PO Status", qcols, rows, cards, note,
                        {"kind": "po_status", "df": pdf, "label": label})
 
@@ -1849,7 +1867,9 @@ def _spec_po_exc_result(items, label, enriched=True):
     cards = [Card("Overdue lines", "{:,}".format(n), "bad" if n else "good"),
              Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
     note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
-            "line. Code = machine/spec; Category = item category; Receipt Date = last receipt. Status "
+            "line. Code = machine/spec; Category = item category; Receipt Date = last receipt; "
+            "Release Date = when the item's BOM was released to purchasing (ETO release log, eng date "
+            "as fallback). Status "
             "is derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates, Last Updated and Lead "
             "Time are shown for the workbook layout but ETO holds no maintained source for them, so "
             "they read blank."
@@ -1882,12 +1902,78 @@ def _spec_po_listing_result(items, label):
     note = ("Every purchase-order line across all statuses (Open before need-by, Overdue, partial, "
             "and Received) on active — i.e. not cancelled — POs, one row per line, in the same "
             "per-line layout as Procurement Exceptions. Code = machine/spec; Category = item "
-            "category; Receipt Date = last receipt; Status is derived. Planned Ship, Days to "
+            "category; Receipt Date = last receipt; Release Date = when the item's BOM was released "
+            "to purchasing (ETO release log, eng date as fallback); Status is derived. Planned Ship, Days to "
             "Assembly, RFQ Date, Permit Dates, Last Updated and Lead Time are kept for the workbook "
             "layout but ETO holds no maintained source, so they read blank. Excel export uses the "
             "same workbook format as the exception report.")
     return QueryResult("po_listing", "Purchasing — PO Listing (all statuses)", qcols, rows, cards, note,
                        {"kind": "exceptions", "items": items, "label": label})
+
+
+def _released_toorder_rows(df, as_of):
+    """Flat, sortable detail rows — one per released-but-unordered item, oldest release first, with
+    age since release and an estimated extended cost. Grand total pinned last."""
+    import pandas as pd
+    if df is None or df.empty:
+        return []
+    d = df.copy()
+    d["_rel"] = pd.to_datetime(d["ReleaseDate"], errors="coerce")
+    d = d.sort_values(["_rel", "ProjectID"], na_position="last")
+    out, tot_val, n = [], 0.0, 0
+    for _, r in d.iterrows():
+        rel = r["_rel"]
+        reld = rel.date() if pd.notna(rel) else None
+        age = (as_of - reld).days if reld else None
+        qty = _num(r.get("Qty"))
+        unit = _num(r.get("UnitCost"))
+        ext = round((qty or 0) * (unit or 0), 2) if (qty is not None and unit is not None) else None
+        tot_val += ext or 0.0
+        n += 1
+        out.append({
+            "_kind": "detail",
+            "ProjectID": (int(r.get("ProjectID")) if pd.notna(r.get("ProjectID")) else None),
+            "JobName": r.get("JobName"),
+            "Machine": (_mc_label(r.get("MachineCode")) if pd.notna(r.get("MachineCode")) else ""),
+            "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
+            "Qty": qty, "ReleaseDate": (reld.isoformat() if reld else ""),
+            "AgeDays": age, "UnitCost": unit, "ExtValue": ext,
+        })
+    out.append({"_kind": "grand", "ItemNo": f"{n} item(s) to order",
+                "ExtValue": round(tot_val, 2)})
+    return out
+
+
+def _released_toorder_result(df, as_of):
+    proj = L("project")
+    cols = [
+        QueryColumn("ProjectID", proj, "id", "left"),
+        QueryColumn("JobName", "Job", "text", "left", wrap=True),
+        QueryColumn("Machine", "Machine", "text", "left"),
+        QueryColumn("ItemNo", "Item", "id", "left"),
+        QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("Qty", "Released Qty", "num", "right"),
+        QueryColumn("ReleaseDate", "Released", "date", "left"),
+        QueryColumn("AgeDays", "Age (days)", "int", "right"),
+        QueryColumn("UnitCost", "Est. Unit", "money2", "right"),
+        QueryColumn("ExtValue", "Est. Value", "money", "right"),
+    ]
+    empty = df is None or df.empty
+    items = 0 if empty else int(len(df))
+    rows = _released_toorder_rows(df, as_of)
+    val = sum((r.get("ExtValue") or 0) for r in rows if r.get("_kind") == "detail")
+    ages = [r.get("AgeDays") for r in rows if r.get("_kind") == "detail" and r.get("AgeDays") is not None]
+    oldest = max(ages) if ages else 0
+    cards = [Card("Items to order", "{:,}".format(items)),
+             Card("Est. value", _fmt_money2(val)),
+             Card("Oldest release", f"{oldest:,} days", "warn" if oldest > 30 else "neutral")]
+    note = (f"Items engineering has RELEASED in the BOM (ETO release log) that have no purchase order "
+            f"yet on the selected {proj.lower()}s — the buyers' still-to-place worklist, oldest "
+            "release first. Released Qty is the net released quantity; Est. Unit / Est. Value are an "
+            "estimate from the average historical PO price for the item (item last/list cost as "
+            "fallback), so treat them as planning figures, not quotes. Anything already on a PO for "
+            f"the {proj.lower()} is excluded.")
+    return QueryResult("released_toorder", "Purchasing — Released, To Order", cols, rows, cards, note)
 
 
 def _spec_late_result(df, label):
@@ -2898,6 +2984,13 @@ class DemoQueryService(QueryService):
         pdf = etospec.po_prep(raw, today=_dt.date(2026, 7, 24))
         return _spec_po_status_result(pdf, "As at Jul 24, 2026 (demo)")
 
+    def _q_released_toorder(self, project_ids, date_from=None, date_to=None, **kw):
+        import pandas as pd, datetime as _dt
+        sel = set(self._sel(project_ids))
+        raw = pd.DataFrame([r for r in _DEMO_RELTOORDER if r["ProjectID"] in sel],
+                           columns=_DEMO_RELTOORDER_COLS)
+        return _released_toorder_result(raw, _dt.date(2026, 7, 25))
+
     def _q_po_exceptions(self, project_ids, date_from=None, date_to=None, **kw):
         import pandas as pd, datetime as _dt
         sel = set(self._sel(project_ids))
@@ -3157,24 +3250,46 @@ _DEMO_LAB_LIFE = _DEMO_LAB_PERIOD + [
 # PO Status — query_po_status_open output shape
 _DEMO_PO_STATUS_COLS = ["ProjectID", "JobName", "Customer", "MachineCode", "Item", "Description",
                         "PO", "Supplier", "ProjStatus", "Qty", "Received", "Price", "ExtValue",
-                        "Required", "Revised"]
+                        "Required", "Revised", "ReleaseDate"]
 _DEMO_PO_STATUS = [
     {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10.0,
      "Item": "48210", "Description": "Main hydraulic pump A10VSO", "PO": "48210",
      "Supplier": "Bosch Rexroth", "ProjStatus": "Sold", "Qty": 2, "Received": 1,
-     "Price": 92250.0, "ExtValue": 92250.0, "Required": "2026-05-10", "Revised": None},
+     "Price": 92250.0, "ExtValue": 92250.0, "Required": "2026-05-10", "Revised": None,
+     "ReleaseDate": "2026-02-18"},
     {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10.0,
      "Item": "48255", "Description": "Spherical roller bearings (lot)", "PO": "48255",
      "Supplier": "SKF Canada", "ProjStatus": "Sold", "Qty": 40, "Received": 0,
-     "Price": 720.0, "ExtValue": 28800.0, "Required": "2026-06-30", "Revised": None},
+     "Price": 720.0, "ExtValue": 28800.0, "Required": "2026-06-30", "Revised": None,
+     "ReleaseDate": "2026-03-05"},
     {"ProjectID": 230312, "JobName": _D12[0], "Customer": _D12[1], "MachineCode": 10.0,
      "Item": "48120", "Description": "S7-1500 PLC + IO", "PO": "48120",
      "Supplier": "Siemens", "ProjStatus": "Sold", "Qty": 1, "Received": 0,
-     "Price": 47600.0, "ExtValue": 47600.0, "Required": "2026-07-01", "Revised": "2026-08-15"},
+     "Price": 47600.0, "ExtValue": 47600.0, "Required": "2026-07-01", "Revised": "2026-08-15",
+     "ReleaseDate": "2026-04-22"},
     {"ProjectID": 240087, "JobName": _D87[0], "Customer": _D87[1], "MachineCode": 20.0,
      "Item": "48301", "Description": "Servo motors (pair)", "PO": "48301",
      "Supplier": "Nachi", "ProjStatus": "Sold", "Qty": 2, "Received": 0,
-     "Price": 16700.0, "ExtValue": 33400.0, "Required": "2026-08-01", "Revised": None},
+     "Price": 16700.0, "ExtValue": 33400.0, "Required": "2026-08-01", "Revised": None,
+     "ReleaseDate": None},
+]
+
+# Released — To Order — _q_released_toorder output shape (released, no PO yet)
+_DEMO_RELTOORDER_COLS = ["ProjectID", "JobName", "MachineCode", "ItemNo", "ItemID", "Description",
+                         "Qty", "ReleaseDate", "UnitCost"]
+_DEMO_RELTOORDER = [
+    {"ProjectID": 230219, "JobName": _D19[0], "MachineCode": 10.0, "ItemNo": "8094M0.0.0.0-01",
+     "ItemID": 22160, "Description": "Machined tie rod, upper platen", "Qty": 8,
+     "ReleaseDate": "2026-05-12", "UnitCost": 412.50},
+    {"ProjectID": 230219, "JobName": _D19[0], "MachineCode": 10.0, "ItemNo": "E07165",
+     "ItemID": 19191, "Description": "Proximity sensor, inductive M18", "Qty": 24,
+     "ReleaseDate": "2026-06-30", "UnitCost": 58.90},
+    {"ProjectID": 230312, "JobName": _D12[0], "MachineCode": 20.0, "ItemNo": "8156M0.0.0.0-01",
+     "ItemID": 22353, "Description": "Guide bushing, hardened", "Qty": 12,
+     "ReleaseDate": "2026-07-15", "UnitCost": 133.00},
+    {"ProjectID": 240087, "JobName": _D87[0], "MachineCode": 30.0, "ItemNo": "E02206",
+     "ItemID": 15651, "Description": "Mushroom head pushbutton, red", "Qty": 6,
+     "ReleaseDate": "2026-07-20", "UnitCost": 18.99},
 ]
 
 # Lines to Order — _q_po_to_order output shape (draft POs: not printed, not emailed)
