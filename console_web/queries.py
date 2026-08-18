@@ -781,14 +781,43 @@ class LiveQueryService(QueryService):
             result.cards.append(Card("Received (closed)", _fmt_money2(t["ReceivedValue"])))
         return result
 
+    def _item_price_map(self, item_ids):
+        """{ItemID: median historical PO unit price} from the staged Reporting.tblItemPriceRef.
+        Prices are staged (median-picked) by console_seed_itemprice.py rather than re-aggregated from
+        ~160k PO lines per request. Degrades gracefully: if the table isn't seeded yet, returns {} and
+        the caller falls back to the item's last/list cost."""
+        ids = sorted({int(i) for i in item_ids if i is not None})
+        if not ids:
+            return {}
+        out = {}
+        try:
+            cur = self._console_conn().cursor()
+            for i in range(0, len(ids), 900):                    # keep the IN list well under limits
+                chunk = ids[i:i + 900]
+                cur.execute("SELECT ItemID, MedianUnit FROM Reporting.tblItemPriceRef "
+                            "WHERE ItemID IN (" + ",".join(str(x) for x in chunk) + ")")
+                for r in cur.fetchall():
+                    if r[1] is not None:
+                        out[int(r[0])] = float(r[1])
+        except Exception:
+            return {}                                            # not seeded / unreachable → fallback
+        return out
+
     def _q_released_toorder(self, project_ids, date_from=None, date_to=None, **kw):
-        """Released-but-not-ordered worklist — items released in the BOM (tblBOMReleaseHistory) with
-        no PO yet on the project. Estimated cost from historical PO prices. Oldest release first."""
+        """Released-but-not-ordered worklist — items released in the BOM (tblBOMReleaseHistory), still
+        on the current BOM, with no PO yet on the project. Unit cost = staged MEDIAN historical PO
+        price (Reporting.tblItemPriceRef), falling back to the item's last/list cost. Oldest first."""
         import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else []
         if not pids:
             return _released_toorder_result(None, _dt.date.today())
         raw = self._df(etospec.query_released_to_order(pids))
+        if raw is not None and not raw.empty:
+            pmap = self._item_price_map(raw["ItemID"].tolist())
+            fb = raw["UnitCostFallback"] if "UnitCostFallback" in raw.columns else None
+            raw["UnitCost"] = [pmap.get(int(i)) if (i is not None and int(i) in pmap)
+                               else (fb.iloc[k] if fb is not None else None)
+                               for k, i in enumerate(raw["ItemID"])]
         return _released_toorder_result(raw, _dt.date.today())
 
     def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
@@ -1975,9 +2004,9 @@ def _released_toorder_result(df, as_of):
     note = (f"Items engineering has RELEASED in the BOM (ETO release log) that have no purchase order "
             f"yet on the selected {proj.lower()}s — the buyers' still-to-place worklist, oldest "
             "release first. Released Qty is the net released quantity; Est. Unit / Est. Value are an "
-            "estimate from the average historical PO price for the item (item last/list cost as "
+            "estimate from the MEDIAN historical PO price for the item (item last/list cost as "
             "fallback), so treat them as planning figures, not quotes. Anything already on a PO for "
-            f"the {proj.lower()} is excluded."
+            f"the {proj.lower()}, or since removed from the current BOM, is excluded."
             + (f" Note: {unpriced:,} of {items:,} item(s) have no price on record yet, so Est. value "
                "is a lower bound." if unpriced else ""))
     return QueryResult("released_toorder", "Purchasing — Released, To Order", cols, rows, cards, note)

@@ -860,42 +860,50 @@ def _bom_release_join(project_ids, pod_alias="pod", alias="bomrel"):
 
 def query_released_to_order(project_ids=None):
     """Buyers' 'still to place' worklist: items ENGINEERING has released (tblBOMReleaseHistory, net
-    released qty > 0) that have NO purchase order yet on the project. One row per project+item, with
-    the release date and an ESTIMATED unit cost (avg historical PO price → item last-cost → list-cost
-    fallback). Excludes anything already on a PO for the project. Sorted oldest release first."""
+    released qty > 0) that are STILL ON THE CURRENT BOM (vwEngBOM) and have NO purchase order yet on
+    the project. Machine from the release log's SpecID; identity keyed by ItemID (any project's BOM,
+    item-master description fallback). Returns `UnitCostFallback` (item last/list cost) only — the
+    query layer overlays the staged MEDIAN historical PO price (Reporting.tblItemPriceRef) on top,
+    falling back to this. Design-removed releases (no longer on the BOM) are dropped. Oldest first."""
     scope = ""
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
         scope = f" WHERE ProjectID IN ({ids})"
+    # released item set (scoped) — used to bound the identity lookups so they stay cheap
+    relset = f"(SELECT DISTINCT ItemID FROM dbo.tblBOMReleaseHistory{scope})"
     return f"""
     WITH rel AS (
         SELECT ProjectID, ItemID, MIN(ReleasedDateTime) AS ReleaseDate,
-               SUM(CAST(QuantityChange AS float)) AS Qty
+               SUM(CAST(QuantityChange AS float)) AS Qty,
+               MAX(CAST(SpecID AS float)) AS MachineCode          -- machine from the release log itself
         FROM dbo.tblBOMReleaseHistory{scope}
         GROUP BY ProjectID, ItemID
         HAVING SUM(CAST(QuantityChange AS float)) > 0
     ),
-    bom AS (
-        SELECT ProjectID, ItemID, MAX(ItemCompanyID) AS ItemNo, MAX(ItemDescription) AS Description,
-               MAX(CAST(SpecID AS float)) AS MachineCode,
+    itm AS (      -- item identity + cost, keyed by ItemID across ANY project's BOM (identity is
+                  -- item-level, so a part still resolves even if it's off THIS project's current BOM)
+        SELECT ItemID, MAX(ItemCompanyID) AS ItemNo, MAX(ItemDescription) AS Description,
                MAX(CAST(ItemLastCost AS float)) AS LastCost,
                MAX(CAST(ItemListCost AS float)) AS ListCost
-        FROM dbo.vwEngBOM{scope} GROUP BY ProjectID, ItemID
+        FROM dbo.vwEngBOM WHERE ItemID IN {relset} GROUP BY ItemID
     ),
-    hist AS (
-        SELECT ItemID, AVG(CASE WHEN PurchaseQty > 0 THEN ExtendedPrice / PurchaseQty END) AS HistUnit
-        FROM dbo.vwPurchaseOrderDetails WHERE ItemID IS NOT NULL GROUP BY ItemID
+    mast AS (     -- item-master description fallback (covers items on no BOM at all)
+        SELECT ItemID, MAX(ItemDescription) AS Description
+        FROM dbo.tblEngItemMaster WHERE ItemID IN {relset} GROUP BY ItemID
     ),
-    ordered AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails{scope})
-    SELECT rel.ProjectID AS ProjectID, p.DisplayName AS JobName, b.MachineCode AS MachineCode,
-           b.ItemNo AS ItemNo, rel.ItemID AS ItemID, b.Description AS Description,
+    ordered AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails{scope}),
+    curbom AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwEngBOM{scope})   -- items still on the current BOM
+    SELECT rel.ProjectID AS ProjectID, p.DisplayName AS JobName, rel.MachineCode AS MachineCode,
+           itm.ItemNo AS ItemNo, rel.ItemID AS ItemID,
+           COALESCE(itm.Description, mast.Description) AS Description,
            CAST(rel.Qty AS decimal(18,2)) AS Qty,
            CAST(rel.ReleaseDate AS date) AS ReleaseDate,
-           COALESCE(h.HistUnit, NULLIF(b.LastCost, 0), NULLIF(b.ListCost, 0)) AS UnitCost
+           COALESCE(NULLIF(itm.LastCost, 0), NULLIF(itm.ListCost, 0)) AS UnitCostFallback
     FROM rel
+    JOIN curbom cb ON cb.ProjectID = rel.ProjectID AND cb.ItemID = rel.ItemID  -- drop design-removed releases
     LEFT JOIN ordered o ON o.ProjectID = rel.ProjectID AND o.ItemID = rel.ItemID
-    LEFT JOIN bom b     ON b.ProjectID = rel.ProjectID AND b.ItemID = rel.ItemID
-    LEFT JOIN hist h    ON h.ItemID = rel.ItemID
+    LEFT JOIN itm  ON itm.ItemID = rel.ItemID
+    LEFT JOIN mast ON mast.ItemID = rel.ItemID
     LEFT JOIN tblProjects p ON p.ProjectID = rel.ProjectID
     WHERE o.ItemID IS NULL
     ORDER BY rel.ReleaseDate ASC, rel.ProjectID
