@@ -473,15 +473,19 @@ function fmt(v,type){
   if(type==='id') return String(v);
   return v;
 }
-function pctPill(v, thr){
+function pctPill(v, thr, tone){
   if(v===null||v===undefined) return '';
+  // tone: an explicit good|warn|bad from the backend (e.g. material run-out, coloured against
+  // consumption so a 100% floor isn't a false amber) — wins when present.
   // thr set (e.g. NC dashboard): colour purely against that threshold — red over, green under.
   // Otherwise the default budget-consumption scale (red ≥100%, amber ≥90%).
-  const cls = (thr!==null&&thr!==undefined) ? (v>thr?'bad':'good')
+  const cls = tone ? tone
+            : (thr!==null&&thr!==undefined) ? (v>thr?'bad':'good')
                                             : (v>1.0?'bad':(v>=0.9?'warn':'good'));
   return `<span class="pill ${cls}">${(v*100).toFixed(1)}%</span>`;
 }
-function tlClass(v,type){
+function tlClass(v,type,tone){
+  if(tone) return tone==='bad'?'tl-bad':(tone==='warn'?'tl-warn':'');
   if(v===null||v===undefined) return '';
   if(type==='pct') return v>1.0?'tl-bad':(v>=0.9?'tl-warn':'');
   if(type==='days') return v>0?'tl-bad':'';
@@ -583,7 +587,7 @@ function renderPlain(r,rows){
     }
     h+=`<tr${kc?` class="${kc.trim()}"`:''}>`;
     r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':'', c.calc?'calc':''].filter(Boolean).join(' ');
-      const cell=c.type==='pct'?pctPill(row[c.key], row._thr):fmt(row[c.key],c.type);
+      const cell=c.type==='pct'?pctPill(row[c.key], row._thr, row._tone&&row._tone[c.key]):fmt(row[c.key],c.type);
       h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`; });
     if(pad) h+='<td class="filler"></td>';
     h+='</tr>'; });
@@ -607,7 +611,7 @@ function renderExec(r,rows){
     cols.forEach((c,idx)=>{ const v=row[c.key]; const sc=stickClass(idx);
       const drill=canDrill&&(idx===1||idx===2);
       const cls=[sc, c.align==='left'||c.type==='text'?'l':'', c.wrap?'wrap':'', c.calc?'calc':'',
-                 tlClass(v,c.type), sc?'':'zebra', drill?'drillable':''].filter(Boolean).join(' ');
+                 tlClass(v,c.type,row._tone&&row._tone[c.key]), sc?'':'zebra', drill?'drillable':''].filter(Boolean).join(' ');
       const attr=drill?` data-pid="${row.ProjectID}"`:'';
       let content=fmt(v,c.type);
       if(c.key==='Project'&&row.Client) content+=`<div class="csub">${row.Client}</div>`;

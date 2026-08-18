@@ -1200,8 +1200,10 @@ def _scorecard_result(rows):
             f"PM plan; % Done is the CALCULATED roll-up of the per-{L('discipline').lower()} % "
             f"complete (hours-weighted: Σ %C×budget ÷ Σ budget). Run-outs are CALCULATED "
             f"(Carpedia-aligned), not typed: {labour} run-out = Estimate at Completion = actual ÷ "
-            f"% complete; {material} run-out = committed POs floored at budget (commitment-driven, "
-            f"not %-complete driven). Both colour green ≤95% of budget, amber 95–105%, red >105%. "
+            f"% complete; {material} run-out = the greater of committed POs, Resource Consumption "
+            f"and budget, over budget (commitment-driven, not %-complete driven) — so it is never "
+            f"below {material} % (money already consumed). Both colour green ≤95% of budget, amber "
+            f"95–105%, red >105%. "
             f"“Run-out src” shows “manual” only when a PM has entered an optional override. Earning at Completion "
             f"projects what the job will actually return: CPI (earned ÷ actual — under 1.0 = "
             f"trending over), Earning $ = sold price − cost at completion (labour run-out priced "
@@ -1438,10 +1440,10 @@ def _crosswalk_result(rows):
 #   %C(project)      = Σ( %C(discipline) × budget_hrs(discipline) ) ÷ Σ budget_hrs   ( = EV ÷ BAC )
 #   Labour run-out   : EV = %C×BAC ; CPI = EV÷AC ; EAC = AC÷%C ; run-out% = EAC÷BAC = %consumed÷%C
 #                      (early stage %C<15% → EAC = AC + (BAC−EV); see earned_value.compute)
-#   Material run-out : EAC = committed POs (received + open) + remaining-un-ordered
-#                            where remaining-un-ordered = max(0, budget − committed)
-#                            ⇒ EAC = max(committed, budget) ; run-out% = EAC ÷ budget
-#                      Commitment-driven, floored at budget — NOT %-complete driven.
+#   Material run-out : EAC = max(committed POs, resource consumption, budget) ; run-out% = EAC ÷ budget
+#                      Commitment-driven, floored at BOTH budget and consumption — NOT %-complete
+#                      driven. Flooring at consumption guarantees run-out% ≥ Material % (consumed÷
+#                      budget), so the projection is never below money already spent.
 # Both are CALCULATED. The PM's typed run-out is only an optional OVERRIDE (flagged).
 
 def _rollup_pct_complete(disciplines, prog):
@@ -1459,19 +1461,43 @@ def _rollup_pct_complete(disciplines, prog):
     return round(num / den, 4) if den else None
 
 
-def _material_runout(committed, budget):
-    """Carpedia material run-out — commitment-driven, floored at budget.
-    EAC = committed (received + open) + max(0, budget − committed) = max(committed, budget).
-    Returns a dict; run-out % and EAC are None when there's no material budget to run out against."""
+def _material_runout(committed, budget, actual=None):
+    """Carpedia material run-out — commitment-driven, floored at budget AND at what's already been
+    consumed. EAC = max(committed POs, resource consumption, budget): you will spend at least what
+    you've committed on POs, at least what you've already consumed, and at least the budget. Flooring
+    at consumption is what keeps the number credible — a projection can NEVER land below the consumed
+    (Material %, i.e. % of budget already used) figure shown beside it. Returns a dict; run-out % and
+    EAC are None when there's no material budget to run out against."""
     b = _num(budget)
     c = _num(committed) or 0.0
+    a = _num(actual) or 0.0
     if not b:
         return {"eac": None, "runout_pct": None, "committed": (round(c, 2) or None),
                 "unordered": None, "over": False}
-    unordered = max(0.0, b - c)
-    eac = c + unordered                                   # == max(c, b)
+    spent = max(c, a)                                     # greater of committed / consumed so far
+    unordered = max(0.0, b - spent)                       # remaining budget not yet spent/committed
+    eac = max(c, a, b)                                    # == spent + unordered
     return {"eac": round(eac, 2), "runout_pct": round(eac / b, 4),
             "committed": round(c, 2), "unordered": round(unordered, 2), "over": eac > b}
+
+
+def _mat_runout_tone(runout_pct, consumed_pct):
+    """Colour for the MATERIAL run-out %, using run-out AND consumption together. Because material
+    run-out floors at budget (100%), a plain 100% is usually just the floor, NOT a warning — so:
+      • > 105%            → red (real overrun)
+      • 100% < x ≤ 105%   → amber (committed/consumed pushing over budget)
+      • exactly 100%      → amber ONLY if consumption is already at/over budget; otherwise GREEN
+                            (the 100% is the floor, nothing has actually gone over)
+    Keeps the number honest and stops every on-budget job glowing amber. (Vijay 2026-08-14)"""
+    if runout_pct is None:
+        return None
+    r = float(runout_pct)
+    c = float(consumed_pct) if consumed_pct is not None else 0.0
+    if r > 1.05:
+        return "bad"
+    if r > 1.0:
+        return "warn"
+    return "warn" if c >= 1.0 else "good"      # r == 100% floor → amber only if truly consumed to budget
 
 
 def _scorecard_row(pid, f, rec):
@@ -1481,7 +1507,7 @@ def _scorecard_row(pid, f, rec):
     earning, margin = _earning_block(f, _ro)
     # Material run-out — Carpedia commitment basis (committed POs floored at budget), unless the PM
     # has typed an override (kept optional). RunoutMaterial in the overlay is that manual override.
-    _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget)
+    _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget, f.material_actual)
     _mat_ovr = _num(rec.get("RunoutMaterial"))
     runout_mat_pct = _mat_ovr if _mat_ovr is not None else _mr["runout_pct"]
     lab_ovr = _num(rec.get("RunoutLabourPct"))            # optional labour run-out % override
@@ -1518,6 +1544,7 @@ def _scorecard_row(pid, f, rec):
         "RunoutLabour": (_ro.eac if _ro.eac is not None else _num(rec.get("RunoutLabour"))),
         "RunoutPct": runout_lab_pct,
         "RunoutMaterialPct": runout_mat_pct,
+        "_tone": {"RunoutMaterialPct": _mat_runout_tone(runout_mat_pct, f.material_consumed_pct)},
         "MaterialEAC": _mr["eac"],
         "MaterialUnordered": _mr["unordered"],
         "RunoutOverride": ("manual" if overridden else None),
@@ -1638,8 +1665,9 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
     agreed = rec.get("CustAgreedDate")
     _ro = _ev.compute(f.labour_budget_hours if f else None,
                       f.labour_actual_hours if f else None, _frac(rec.get("PctDone")))
-    # Material run-out: Carpedia commitment basis (committed POs floored at budget), PM override wins.
-    _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget if f else None)
+    # Material run-out: Carpedia basis (committed POs floored at budget AND at consumption), override wins.
+    _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget if f else None,
+                           f.material_actual if f else None)
     _mat_ovr = _num(rec.get("RunoutMaterial"))
     row = {
         "Rank": _int(rec.get("Rank")),
@@ -1668,6 +1696,8 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
         "NCOpen": _int(rec.get("NCOpen")),
         "NCCost": _num(rec.get("NCCost")),
     }
+    row["_tone"] = {"RunoutMaterial": _mat_runout_tone(row["RunoutMaterial"],
+                                                        f.material_consumed_pct if f else None)}
     for d in _EXEC_DISC_ORDER:
         row[f"disc::{d}"] = disc_pct.get(d)
     return row
