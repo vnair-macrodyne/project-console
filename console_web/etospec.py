@@ -744,7 +744,7 @@ COLS_EXC = [
     ("RevisedReceipt", "Revised Receipt",  12, "C", False),
     ("ReceiptDate",    "Receipt Date",     11, "C", False),
     ("Status",         "Status",           12, "L", False),
-    ("LastUpdated",    "Last Updated",     11, "C", False),
+    ("LastUpdated",    "Last Activity",    11, "C", False),
     ("DaysToAssembly", "Days to Assembly",  8, "R", True),
     ("RFQDate",        "RFQ Date",         11, "C", False),
     ("PermitDates",    "Permit Dates",     12, "L", False),
@@ -768,6 +768,22 @@ def _spec_code(v):
     if f is None:
         return ""
     return str(int(f)) if float(f).is_integer() else str(f)
+
+
+def _last_activity(today, *raw_dates):
+    """Best 'last activity' date for a PO line = the most recent PAST event we can trust: order date,
+    last receipt, header revision. ETO keeps no edit-audit timestamp, so this is last activity, NOT
+    last edit. Future-dated values are ignored (need-by dates must never inflate it); order date is
+    always present, so this is never blank."""
+    import pandas as pd
+    best = None
+    for v in raw_dates:
+        d = pd.to_datetime(v, errors="coerce")
+        if pd.notna(d):
+            dd = d.date()
+            if dd <= today and (best is None or dd > best):
+                best = dd
+    return best.isoformat() if best else ""
 
 
 def exc_detail(df, today=None):
@@ -803,7 +819,8 @@ def exc_detail(df, today=None):
             "RevisedReceipt": (rev.date().isoformat() if pd.notna(rev) else ""),
             "ReceiptDate": (rcpt.date().isoformat() if pd.notna(rcpt) else ""),
             "Status": status,
-            "LastUpdated": "",                            # no PO-line modified timestamp in ETO
+            "LastUpdated": _last_activity(today, r.get("Ordered"), r.get("ReceiptDate"),
+                                          r.get("HeaderRevised")),   # last activity (not an edit audit)
             "DaysToAssembly": None,                       # no maintained assembly date
             "RFQDate": "",                                # not in ETO
             "PermitDates": "",                            # not in ETO
@@ -916,6 +933,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         CAST(pod.DateRevised  AS date)  AS DateRevised,
         CAST(pdd.LastReceivedDate AS date) AS ReceiptDate,
         CAST(poh.PurchaseDate AS date)  AS Ordered,
+        CAST(poh.PurchaseDateRevised AS date) AS HeaderRevised,
         {lead_sel}                      AS LeadDays,
         {llt_sel}                       AS LLTFlag,
         {over_sel}                      AS OverFlag,
@@ -979,7 +997,8 @@ def po_listing_detail(df, today=None):
             "RevisedReceipt": (rev.date().isoformat() if pd.notna(rev) else ""),
             "ReceiptDate": (rcpt.date().isoformat() if pd.notna(rcpt) else ""),
             "Status": status,
-            "LastUpdated": "",                            # no PO-line modified timestamp in ETO
+            "LastUpdated": _last_activity(today, r.get("Ordered"), r.get("ReceiptDate"),
+                                          r.get("HeaderRevised")),   # last activity (not an edit audit)
             "DaysToAssembly": None,                       # no maintained assembly date
             "RFQDate": "",                                # not in ETO
             "PermitDates": "",                            # not in ETO

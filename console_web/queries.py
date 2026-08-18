@@ -1869,8 +1869,9 @@ def _spec_po_exc_result(items, label, enriched=True):
     note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
             "line. Code = machine/spec; Category = item category; Receipt Date = last receipt; "
             "Release Date = when the item's BOM was released to purchasing (ETO release log, eng date "
-            "as fallback). Status "
-            "is derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates, Last Updated and Lead "
+            "as fallback); Last Activity = latest of order date, last receipt and header revision (a "
+            "last-activity signal, not an edit audit — ETO keeps no PO edit timestamp). Status "
+            "is derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates and Lead "
             "Time are shown for the workbook layout but ETO holds no maintained source for them, so "
             "they read blank."
             + ("" if enriched else " Item details weren't available this run, so LLT / Oversize are blank."))
@@ -1903,8 +1904,10 @@ def _spec_po_listing_result(items, label):
             "and Received) on active — i.e. not cancelled — POs, one row per line, in the same "
             "per-line layout as Procurement Exceptions. Code = machine/spec; Category = item "
             "category; Receipt Date = last receipt; Release Date = when the item's BOM was released "
-            "to purchasing (ETO release log, eng date as fallback); Status is derived. Planned Ship, Days to "
-            "Assembly, RFQ Date, Permit Dates, Last Updated and Lead Time are kept for the workbook "
+            "to purchasing (ETO release log, eng date as fallback); Last Activity = latest of order "
+            "date, last receipt and header revision (a last-activity signal, not an edit audit); "
+            "Status is derived. Planned Ship, Days to "
+            "Assembly, RFQ Date, Permit Dates and Lead Time are kept for the workbook "
             "layout but ETO holds no maintained source, so they read blank. Excel export uses the "
             "same workbook format as the exception report.")
     return QueryResult("po_listing", "Purchasing — PO Listing (all statuses)", qcols, rows, cards, note,
