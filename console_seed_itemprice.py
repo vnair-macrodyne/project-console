@@ -39,18 +39,20 @@ CREATE TABLE Reporting.tblItemPriceRef (
 );
 """
 
-# Median + last + span per item, computed on ETO. Unit = ExtendedPrice / PurchaseQty on real,
-# positive-qty, priced lines. (Currency is as ETO stores ExtendedPrice — same basis the report used
-# before; FX-normalising to CAD is a later refinement, noted in the project doc.)
+# Median + last + span per item, computed on ETO. Unit = the STORED unit price (pod.PurchasePrice —
+# the same field PO Status shows as "Price"), FX-normalised to CAD via the PO's currency rate. We do
+# NOT derive unit = ExtendedPrice/PurchaseQty: that swings ~1000x when an item is bought in different
+# units of measure (each vs box-of-N), which poisons the median. Median is robust to the remaining
+# real price dispersion.
 QUERY = """
 WITH u AS (
     SELECT pod.ItemID,
-           CAST(pod.ExtendedPrice AS float) / NULLIF(CAST(pod.PurchaseQty AS float), 0) AS Unit,
+           CAST(pod.PurchasePrice AS float)
+             * (CASE WHEN poh.PurchaseCurrRate > 0 THEN poh.PurchaseCurrRate ELSE 1 END) AS Unit,
            CAST(poh.PurchaseDate AS date) AS PODate
     FROM dbo.vwPurchaseOrderDetails pod
     JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
-    WHERE pod.ItemID IS NOT NULL AND pod.PurchaseQty > 0
-      AND pod.ExtendedPrice IS NOT NULL AND pod.ExtendedPrice > 0
+    WHERE pod.ItemID IS NOT NULL AND pod.PurchasePrice IS NOT NULL AND pod.PurchasePrice > 0
 ),
 med AS (
     SELECT DISTINCT ItemID,
@@ -104,8 +106,26 @@ def fetch(eto):
 
 def refresh(store, df):
     cur = store.cursor()
-    cur.execute(DDL)
-    store.commit()
+    # Create the table if we can. If the store login lacks CREATE rights (common on the locked-down
+    # Reporting DB), that's fine AS LONG AS the table already exists (create it once via
+    # sql/013_item_price_ref.sql in SSMS + grant INSERT/DELETE to the app login).
+    try:
+        cur.execute(DDL)
+        store.commit()
+    except Exception as e:
+        try:
+            store.rollback()
+        except Exception:
+            pass
+        cur.execute("SELECT OBJECT_ID('Reporting.tblItemPriceRef', 'U')")
+        if cur.fetchone()[0] is None:
+            raise RuntimeError(
+                "Reporting.tblItemPriceRef does not exist and this login cannot CREATE it "
+                f"({type(e).__name__}). Create it once in SSMS with an owner account:\n"
+                "    run sql/013_item_price_ref.sql,  then GRANT INSERT, DELETE ON "
+                "Reporting.tblItemPriceRef TO <app login>;\n"
+                "then re-run this refresh (which only needs INSERT/DELETE).") from e
+        print("note: table exists; skipping CREATE (no CREATE right on this login).")
     cur.execute("DELETE FROM Reporting.tblItemPriceRef;")
     ins = ("INSERT INTO Reporting.tblItemPriceRef "
            "(ItemID, MedianUnit, LastUnit, LastPODate, POLines, MinPODate, MaxPODate) "

@@ -18,3 +18,7 @@ CREATE TABLE Reporting.tblItemPriceRef (
     RefreshedAt  DATETIME       NOT NULL
                  CONSTRAINT DF_tblItemPriceRef_RefreshedAt DEFAULT (GETDATE())
 );
+GO
+-- The nightly refresh (console_seed_itemprice.py) only needs INSERT/DELETE. If the app/store login
+-- is not the table owner, grant it (replace <app login> with the login the store connection uses):
+-- GRANT INSERT, DELETE ON Reporting.tblItemPriceRef TO [<app login>];
