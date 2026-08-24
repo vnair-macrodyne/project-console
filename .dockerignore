@@ -1,0 +1,53 @@
+# Keep the build context small and secret-free. Anything matched here never enters the
+# image (and never invalidates the COPY layer when it changes).
+
+# VCS + local tooling
+.git
+.gitignore
+.github
+
+# Secrets and local env — creds come in at runtime via --env-file, never baked in
+.env
+*.env
+!.env.docker.example
+*.secret
+console_secrets.ps1
+
+# Python scratch
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Diagnostics / probes — not part of the served app
+console_diag_*.py
+console_test.py
+console/_pattern_test.py
+
+# One-off SQL migrations + seeds are run by hand in SSMS, not shipped in the web image
+sql/
+
+# Docs and deploy notes — not needed at runtime
+docs/
+*.md
+DEPLOY_*.md
+README.md
+LICENSE
+
+# Windows launch + TLS helpers — irrelevant in a Linux container
+run_console.ps1
+pfx_to_pem.py
+
+# Rendered outputs / customer data — must never enter an image
+*.pdf
+*.png
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+
+# Real tenant profiles carry connection detail; the committed sample is enough to boot
+tenant_*.json
+!tenant_macrodyne.json

@@ -25,3 +25,7 @@ tenant_*.json
 # Rendered outputs / scratch
 *.pdf
 *.png
+
+# Container secrets file (filled-in copy) — keep the *.example, ignore the real one
+.env.docker
+!.env.docker.example

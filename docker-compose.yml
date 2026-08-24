@@ -1,0 +1,32 @@
+# Project Console — local / on-prem run with Compose.
+#
+#   cp .env.docker.example .env.docker    # fill in secrets
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# TLS is expected in front (reverse proxy / platform). This publishes plain HTTP on 8000;
+# put Caddy/NGINX in front for :443 exactly as the bare-metal deploy does today.
+
+services:
+  console:
+    build: .
+    image: project-console:latest
+    container_name: project-console
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    ports:
+      - "8000:8000"
+    # The ETO/Reporting SQL Server lives on the LAN as a NAMED instance (…\SQLEXPRESS),
+    # which needs the SQL Browser (UDP 1434) to resolve its dynamic port. If the container
+    # host can't resolve MACRO-ETO-SVR by DNS, map it to the server's IP here (and/or point
+    # CONSOLE_STORE_SERVER at host,<static-port> in .env.docker). Edit the IP to match.
+    # extra_hosts:
+    #   - "MACRO-ETO-SVR:10.0.0.10"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/login' % os.environ.get('CONSOLE_PORT','8000'), timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
