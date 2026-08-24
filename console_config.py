@@ -163,6 +163,13 @@ class TenantProfile:
             prof.reporting_database = "Macrodyne_Reporting_Staging"
         prof.reporting_server = os.environ.get("CONSOLE_STORE_SERVER", prof.reporting_server)
         prof.reporting_database = os.environ.get("CONSOLE_STORE_DB", prof.reporting_database)
+        # ETO source is likewise env-selectable so a build running off-box (e.g. Azure App
+        # Service reaching the ETO SQL Server over the VPN, possibly by host,port) can point at
+        # the right address without a profile edit. Unset → the profile/default (unchanged
+        # on-prem). Still read-only; only the address/name move, not the access mode.
+        #   CONSOLE_ETO_SERVER / CONSOLE_ETO_DB -> explicit override (win over the profile)
+        prof.eto_server = os.environ.get("CONSOLE_ETO_SERVER", prof.eto_server)
+        prof.eto_database = os.environ.get("CONSOLE_ETO_DB", prof.eto_database)
         prof.environment = os.environ.get("CONSOLE_ENV", "prod").lower()
         # auth (LDAP) config — env wins over profile
         prof.ldap_server = os.environ.get("CONSOLE_LDAP_SERVER", prof.ldap_server)

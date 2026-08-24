@@ -1,0 +1,14 @@
+# Terraform — never commit state (holds secret values) or local vars/creds.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Variable files carry secrets / connection detail. Commit only the *.example.
+*.tfvars
+*.auto.tfvars
+!*.tfvars.example
+
+# Plan output can embed secrets
+*.tfplan

@@ -1,0 +1,64 @@
+# Copy to terraform.tfvars (non-secret values) and, for secrets, a SEPARATE gitignored file
+# such as secrets.auto.tfvars — or pass them as TF_VAR_* env vars / from CI. NEVER commit secrets.
+#
+#   cp terraform.tfvars.example terraform.tfvars      # edit the non-secret values
+#   # then put the *_secret_key / *_pwd / *_user values in secrets.auto.tfvars (gitignored)
+
+# ── subscription / group / region ────────────────────────────────────────────────
+# subscription_id     = "00000000-0000-0000-0000-000000000000"   # or use `az account set`
+resource_group_name = "rg-project-console"
+location            = "canadacentral"
+app_name_prefix     = "project-console"
+
+# ── registry + image ─────────────────────────────────────────────────────────────
+acr_name          = "acrprojectconsole"   # must be globally unique, 5-50 alphanumerics
+image_name        = "project-console"
+staging_image_tag = "staging"
+prod_image_tag    = "prod"
+
+# ── Azure Relay namespace (holds the Hybrid Connections) ─────────────────────────
+relay_namespace_name = "relay-project-console"   # must be globally unique
+
+# ── on-prem SQL reach (Hybrid Connection endpoint) ───────────────────────────────
+# ETO (Macrodyne_Production) + both Reporting DBs are on this one server. Give SQLEXPRESS a
+# STATIC TCP port (Hybrid Connections can't use the SQL Browser / dynamic named-instance port).
+sql_host = "MACRO-ETO-SVR"
+sql_port = 1433
+
+# ── plan sizing ──────────────────────────────────────────────────────────────────
+staging_plan_sku = "B1"     # supports Hybrid Connections (5 per plan)
+prod_plan_sku    = "P0v3"   # or a B-series if prod load is light
+
+# ── shared runtime config ────────────────────────────────────────────────────────
+console_tenant  = "tenant_macrodyne.json"
+console_threads = 8
+# 'entra' is the target (no on-prem reach needed for login) once the auth.py backend lands.
+# 'ldap' is a stopgap and needs a DC reachable on TCP 389 (add a second Hybrid Connection for it).
+console_auth = "ldap"
+
+# ── per-env Reporting database names (same server, different DB) ──────────────────
+staging_store_db = "Macrodyne_Reporting_Staging"
+prod_store_db    = "Macrodyne_Reporting"
+
+# ── LDAP (interim; only used when console_auth = "ldap") ──────────────────────────
+ldap_server = "dc01.macrodynepress.com"
+ad_domain   = "macrodynepress.com"
+ad_netbios  = "MACR0DYNE"
+
+# ── who administers Key Vault secrets ────────────────────────────────────────────
+# Your Entra object id:  az ad signed-in-user show --query id -o tsv
+kv_admin_object_id = "00000000-0000-0000-0000-000000000000"
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# SECRETS — DO NOT put these here. Place them in secrets.auto.tfvars (gitignored) or
+# export TF_VAR_staging_secret_key=... etc. Generate each secret key with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+# ═════════════════════════════════════════════════════════════════════════════════
+# staging_secret_key = "..."
+# prod_secret_key    = "..."   # DIFFERENT from staging
+# staging_store_user = "MacrodyneConsoleSvcStg"
+# staging_store_pwd  = "..."
+# prod_store_user    = "MacrodyneConsoleSvc"
+# prod_store_pwd     = "..."
+# eto_user           = "TotalETOReportWriter"
+# eto_pwd            = "..."
