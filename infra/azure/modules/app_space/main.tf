@@ -126,11 +126,14 @@ resource "azurerm_key_vault_secret" "entra_client_secret" {
 # ── Hybrid Connection: the app's private path to the on-prem SQL Server ───────────
 # A named channel in the shared Relay namespace...
 resource "azurerm_relay_hybrid_connection" "sql" {
-  name                         = "hc-${var.app_name}-sql"
-  resource_group_name          = var.resource_group_name
-  relay_namespace_name         = var.relay_namespace_name
+  name                          = "hc-${var.app_name}-sql"
+  resource_group_name           = var.resource_group_name
+  relay_namespace_name          = var.relay_namespace_name
   requires_client_authorization = true
-  user_metadata                = "SQL Server for Project Console ${var.env} (${local.sql_server})"
+  # HCM reads the on-prem endpoint (host:port to forward to) from User Metadata, and requires
+  # this exact JSON shape: [{"key":"endpoint","value":"HOST:PORT"}]. A free-text description
+  # here makes HCM reject the connection ("User Metadata must contain an endpoint...").
+  user_metadata = "[{\"key\":\"endpoint\",\"value\":\"${var.sql_host}:${var.sql_port}\"}]"
 }
 
 # ...linked to THIS app with the concrete endpoint. On-prem, add this same connection in HCM and
