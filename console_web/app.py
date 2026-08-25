@@ -136,7 +136,7 @@ def _serve_dashboard(payload):
 
 
 # ── Auth: AD login form → session identity; unauth pages go to /login ─────────
-_EXEMPT = {"/login", "/logout", "/api/login", "/api/me"}
+_EXEMPT = {"/login", "/logout", "/api/login", "/api/me", "/auth/callback"}
 
 
 @app.before_request
@@ -158,6 +158,16 @@ def login_page():
     if not nxt.startswith("/"):
         nxt = "/"
     err = None
+    # Entra SSO: no password form — bounce straight to Entra's sign-in.
+    if auth.is_entra():
+        try:
+            return redirect(auth.entra_begin(nxt))
+        except Exception:
+            app.logger.exception("entra begin")
+            return render_template("login.html", error="Single sign-on is not configured. Contact IT.",
+                                   product=TENANT.product_name, company=TENANT.company_name,
+                                   logo=getattr(TENANT, "logo_path", ""),
+                                   environment=getattr(TENANT, "environment", "prod"), next=nxt)
     if request.method == "POST":
         u = request.form.get("username", "")
         pw = request.form.get("password", "")
@@ -178,9 +188,32 @@ def login_page():
                            environment=getattr(TENANT, "environment", "prod"), next=nxt)
 
 
+@app.route("/auth/callback")
+def auth_callback():
+    """Entra redirect URI — completes the auth-code flow and establishes the session."""
+    try:
+        ok, user, display, nxt = auth.entra_complete(request.args)
+    except Exception:
+        app.logger.exception("entra callback")
+        ok, nxt = False, "/"
+    if not ok:
+        return redirect(url_for("login_page"))
+    session.clear()
+    session["user"] = user
+    session["display"] = display or user
+    return redirect(nxt if nxt.startswith("/") else "/")
+
+
 @app.route("/logout")
 def logout():
+    was_entra = auth.is_entra()
     session.clear()
+    # Optionally end the Entra session too (single logout), not just the app cookie.
+    if was_entra and os.environ.get("CONSOLE_ENTRA_SLO") == "1":
+        try:
+            return redirect(auth.entra_logout_url(request.url_root.rstrip("/") + "/login"))
+        except Exception:
+            app.logger.exception("entra logout")
     return redirect(url_for("login_page"))
 
 

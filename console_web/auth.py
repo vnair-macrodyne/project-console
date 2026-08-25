@@ -67,19 +67,38 @@ def resolve_user():
     return user, (_role_for(user) or "viewer")
 
 
+def auth_mode():
+    """Which backend is active: 'windows' | 'ldap' | 'entra'.
+    From CONSOLE_AUTH if set to a known value, else auto (windows if pywin32 present, else ldap)."""
+    m = (os.environ.get("CONSOLE_AUTH") or "").lower()
+    if m in ("windows", "ldap", "entra"):
+        return m
+    return "windows" if _win_available() else "ldap"
+
+
+def is_entra():
+    """True when Entra SSO is the active backend (redirect flow, not the password form).
+    Never true in demo, which keeps the DB-free password form working for eval/screenshots."""
+    if current_app.config.get("DEMO"):
+        return False
+    return auth_mode() == "entra"
+
+
 def authenticate(username, password):
     """Verify a domain user's (username, password). Returns (ok, username, display_name).
     Method (env CONSOLE_AUTH): 'windows' (pywin32 LogonUser — no LDAP server/cert needed) or
     'ldap' (ldap3 bind). Default: Windows when pywin32 is available, else LDAP.
-    Demo: any non-empty password succeeds so the flow works without a DC."""
+    Demo: any non-empty password succeeds so the flow works without a DC.
+    Entra mode has no password form — sign-in goes through entra_begin()/entra_complete()."""
     username = _norm(username)
     if not username or not password:
         return False, None, None
     if current_app.config.get("DEMO"):
         return True, username, _DEMO_USERS.get(username, {}).get("display", username)
-    method = (os.environ.get("CONSOLE_AUTH") or "").lower()
-    if method not in ("windows", "ldap"):
-        method = "windows" if _win_available() else "ldap"
+    method = auth_mode()
+    if method == "entra":
+        # form login is disabled under Entra; the redirect flow is the only path
+        return False, None, None
     if method == "windows":
         return _win_authenticate(username, password)
     return _ldap_authenticate(username, password)
@@ -176,6 +195,102 @@ def _ldap_authenticate(username, password):
         pass
     conn.unbind()
     return True, username, display
+
+
+# ── Entra ID (Azure AD) SSO — OpenID Connect authorization-code flow ───────────
+# The Azure end-state: users sign in with their Entra ID, so the app needs NO on-prem
+# reach for identity (only the SQL data path remains). This is a redirect flow, not a
+# password form: /login → entra_begin() bounces to Entra; Entra returns to the redirect
+# URI → entra_complete() validates and yields (username, display). Role still comes from
+# Reporting.tblConsoleUser keyed on the normalized username, exactly as for windows/ldap,
+# so the viewer<pm<admin gates and the /admin screen are unchanged.
+#
+# Config (env; secret via Key Vault reference on Azure):
+#   CONSOLE_ENTRA_TENANT_ID       the Entra tenant (directory) id
+#   CONSOLE_ENTRA_CLIENT_ID       the app registration's application (client) id
+#   CONSOLE_ENTRA_CLIENT_SECRET   a client secret on that app registration
+#   CONSOLE_ENTRA_REDIRECT_URI    optional explicit callback URL; else built from the request
+#                                 (ProxyFix gives the real https host) + CONSOLE_ENTRA_REDIRECT_PATH
+#   CONSOLE_ENTRA_REDIRECT_PATH   default /auth/callback
+#   CONSOLE_ENTRA_AUTHORITY       optional override (default https://login.microsoftonline.com/<tenant>)
+#   CONSOLE_ENTRA_SCOPES          optional extra resource scopes (space-separated); default sign-in only
+# msal is imported lazily so windows/ldap deployments without it are unaffected.
+_ENTRA_FLOW_KEY = "_entra_flow"
+_ENTRA_NEXT_KEY = "_entra_next"
+
+
+def _entra_cfg():
+    tid = os.environ.get("CONSOLE_ENTRA_TENANT_ID")
+    cid = os.environ.get("CONSOLE_ENTRA_CLIENT_ID")
+    secret = os.environ.get("CONSOLE_ENTRA_CLIENT_SECRET")
+    if not (tid and cid and secret):
+        raise RuntimeError("Entra not configured — set CONSOLE_ENTRA_TENANT_ID, "
+                           "CONSOLE_ENTRA_CLIENT_ID and CONSOLE_ENTRA_CLIENT_SECRET")
+    authority = os.environ.get("CONSOLE_ENTRA_AUTHORITY") or \
+        f"https://login.microsoftonline.com/{tid}"
+    return cid, secret, authority
+
+
+def _entra_app():
+    import msal  # lazy: only needed under Entra
+    cid, secret, authority = _entra_cfg()
+    return msal.ConfidentialClientApplication(cid, authority=authority, client_credential=secret)
+
+
+def _entra_scopes():
+    return [s for s in (os.environ.get("CONSOLE_ENTRA_SCOPES") or "").split() if s]
+
+
+def entra_redirect_uri():
+    """Absolute callback URL. Explicit override wins; else build from the current request so it
+    works for whichever host (staging vs prod) is serving. Must match a redirect URI registered
+    on the Entra app registration."""
+    uri = os.environ.get("CONSOLE_ENTRA_REDIRECT_URI")
+    if uri:
+        return uri
+    path = os.environ.get("CONSOLE_ENTRA_REDIRECT_PATH", "/auth/callback")
+    return request.url_root.rstrip("/") + path
+
+
+def entra_begin(next_url):
+    """Start the auth-code flow: stash the MSAL flow (state + nonce + PKCE) and the post-login
+    target in the session, and return the Entra authorization URL to redirect the browser to."""
+    flow = _entra_app().initiate_auth_code_flow(_entra_scopes(), redirect_uri=entra_redirect_uri())
+    session[_ENTRA_FLOW_KEY] = flow
+    session[_ENTRA_NEXT_KEY] = next_url if (next_url or "/").startswith("/") else "/"
+    return flow["auth_uri"]
+
+
+def entra_complete(auth_response):
+    """Finish the flow from the redirect query params (auth_response = request.args). MSAL
+    validates state + nonce against the stashed flow. Returns (ok, username, display, next_url)."""
+    flow = session.pop(_ENTRA_FLOW_KEY, None)
+    nxt = session.pop(_ENTRA_NEXT_KEY, "/") or "/"
+    if not nxt.startswith("/"):
+        nxt = "/"
+    if not flow:
+        return False, None, None, nxt
+    result = _entra_app().acquire_token_by_auth_code_flow(flow, dict(auth_response))
+    if not isinstance(result, dict) or "error" in result or "id_token_claims" not in result:
+        return False, None, None, nxt
+    claims = result["id_token_claims"]
+    upn = (claims.get("preferred_username") or claims.get("upn")
+           or claims.get("email") or "")
+    display = claims.get("name") or upn
+    user = _norm(upn)
+    if not user:
+        return False, None, None, nxt
+    return True, user, display, nxt
+
+
+def entra_logout_url(post_logout_redirect=None):
+    """Entra single-logout URL (optional). Clears the Entra session too, not just the app cookie."""
+    _, _, authority = _entra_cfg()
+    url = authority.rstrip("/") + "/oauth2/v2.0/logout"
+    if post_logout_redirect:
+        from urllib.parse import urlencode
+        url += "?" + urlencode({"post_logout_redirect_uri": post_logout_redirect})
+    return url
 
 
 def _role_for(user):

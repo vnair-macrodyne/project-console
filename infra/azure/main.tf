@@ -31,14 +31,11 @@ terraform {
       version = "~> 4.0"
     }
   }
-  # Remote state is strongly recommended (state holds secret values). Uncomment and point at a
-  # storage account you create once, so state isn't a local file. See README.md.
-  # backend "azurerm" {
-  #   resource_group_name  = "rg-tfstate"
-  #   storage_account_name = "sttfstateconsole"
-  #   container_name       = "tfstate"
-  #   key                  = "project-console.tfstate"
-  # }
+  # Remote state (state holds secret values). Config is supplied at init time from backend.hcl
+  # (gitignored) so the globally-unique storage account name isn't hardcoded here:
+  #   terraform init -backend-config=backend.hcl
+  # Run bootstrap-state.sh first to create the storage account. See DEPLOY_AZURE_RUNBOOK.md.
+  backend "azurerm" {}
 }
 
 provider "azurerm" {
@@ -113,6 +110,12 @@ module "staging" {
   eto_user   = var.eto_user
   eto_pwd    = var.eto_pwd
 
+  # Entra SSO (only applied when console_auth = entra)
+  entra_tenant_id     = var.entra_tenant_id
+  entra_client_id     = var.entra_client_id
+  entra_client_secret = var.entra_client_secret
+  entra_slo           = var.entra_slo
+
   # LDAP (interim, only if the app reaches an on-prem DC — see README on preferring Entra)
   ldap_server = var.ldap_server
   ad_domain   = var.ad_domain
@@ -152,6 +155,11 @@ module "prod" {
   store_pwd  = var.prod_store_pwd
   eto_user   = var.eto_user
   eto_pwd    = var.eto_pwd
+
+  entra_tenant_id     = var.entra_tenant_id
+  entra_client_id     = var.entra_client_id
+  entra_client_secret = var.entra_client_secret
+  entra_slo           = var.entra_slo
 
   ldap_server = var.ldap_server
   ad_domain   = var.ad_domain

@@ -1,0 +1,6 @@
+# Copy to backend.hcl (gitignored) and fill in the storage account name from bootstrap-state.sh.
+#   terraform init -backend-config=backend.hcl
+resource_group_name  = "rg-tfstate"
+storage_account_name = "sttfstateconsolemti"   # the globally-unique name you created
+container_name       = "tfstate"
+key                  = "project-console.tfstate"

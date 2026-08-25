@@ -5,5 +5,6 @@ python-dotenv
 flask
 reportlab
 ldap3   # optional: only for CONSOLE_AUTH=ldap (Windows default uses pywin32 instead)
+msal    # optional: only for CONSOLE_AUTH=entra (Entra ID / Azure AD SSO, OIDC auth-code flow)
 waitress   # production WSGI server (no IIS needed): waitress-serve --listen=0.0.0.0:8000 console_web.app:app
 pywin32; platform_system == "Windows"   # Windows LogonUser auth (CONSOLE_AUTH=windows, the default on Windows)

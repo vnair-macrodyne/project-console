@@ -12,3 +12,6 @@ crash.log
 
 # Plan output can embed secrets
 *.tfplan
+
+# Backend config (carries the state storage account name; keep local)
+backend.hcl

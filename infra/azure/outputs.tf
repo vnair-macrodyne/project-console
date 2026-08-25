@@ -28,6 +28,16 @@ output "prod_hybrid_connection" {
   value       = "${module.prod.hybrid_connection_name} -> ${module.prod.sql_endpoint}"
 }
 
+output "staging_callback_url" {
+  description = "Register this on the Entra app registration (staging) when using Entra auth."
+  value       = module.staging.callback_url
+}
+
+output "prod_callback_url" {
+  description = "Register this on the Entra app registration (prod) when using Entra auth."
+  value       = module.prod.callback_url
+}
+
 output "staging_identity_principal_id" {
   description = "Staging web app managed identity (granted AcrPull + Key Vault get)."
   value       = module.staging.identity_principal_id

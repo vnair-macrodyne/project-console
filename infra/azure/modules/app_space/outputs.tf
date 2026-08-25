@@ -3,6 +3,11 @@ output "app_url" {
   value       = "https://${azurerm_linux_web_app.this.default_hostname}"
 }
 
+output "callback_url" {
+  description = "Entra redirect URI to register on the app registration (Entra auth only)."
+  value       = "https://${azurerm_linux_web_app.this.default_hostname}/auth/callback"
+}
+
 output "identity_principal_id" {
   description = "User-assigned managed identity principal id (AcrPull + Key Vault Secrets User)."
   value       = azurerm_user_assigned_identity.app.principal_id

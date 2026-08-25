@@ -104,6 +104,29 @@ variable "eto_pwd" {
   sensitive = true
 }
 
+# ── Entra SSO (only consumed when console_auth = entra) ──
+variable "entra_tenant_id" {
+  type    = string
+  default = ""
+}
+
+variable "entra_client_id" {
+  type    = string
+  default = ""
+}
+
+variable "entra_client_secret" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "entra_slo" {
+  description = "Single-logout: also end the Entra session on /logout (CONSOLE_ENTRA_SLO)."
+  type        = bool
+  default     = false
+}
+
 # ── LDAP (only consumed when console_auth = ldap) ──
 variable "ldap_server" {
   type    = string

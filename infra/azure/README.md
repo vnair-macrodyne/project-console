@@ -120,13 +120,37 @@ push `:<git-sha>` and set `staging_image_tag`/`prod_image_tag` to specific shas.
 - Rotate a secret by updating its value (in `secrets.auto.tfvars` / `TF_VAR_*`) and re-applying, or
   directly in Key Vault; then restart the app so it re-reads the reference.
 
-## Auth: where Entra fits
+## Auth: Entra SSO (built) vs. LDAP (interim)
 
 `console_auth = "ldap"` is the interim setting and needs a DC reachable (a second Hybrid Connection
-on TCP 389). The intended Azure end-state is **Entra SSO** (`console_auth = "entra"`), a new OIDC
-backend in `console_web/auth.py` — not built yet. With Entra the app authenticates users in the
-cloud and needs **no** on-prem reach for login; only the SQL hybrid connection remains. Flipping to
-it is an app-setting change; no infrastructure here changes.
+on TCP 389). The intended Azure end-state is **Entra SSO** (`console_auth = "entra"`) — the OIDC
+authorization-code backend now lives in `console_web/auth.py` (MSAL). With Entra the app
+authenticates users in the cloud and needs **no** on-prem reach for login; only the SQL hybrid
+connection remains. The role model is unchanged: after sign-in the username (from the token's
+`preferred_username`, normalized) is looked up in `Reporting.tblConsoleUser` for viewer/pm/admin.
+
+To switch a space to Entra:
+
+1. **Register an app** in Entra ID (Microsoft Entra admin center → App registrations → New):
+   - Supported accounts: single tenant.
+   - Add a **Web** platform with redirect URIs = the callback URLs Terraform prints
+     (`terraform output staging_callback_url` / `prod_callback_url`, e.g.
+     `https://project-console-prod.azurewebsites.net/auth/callback`). One registration can hold
+     **both** URIs.
+   - Under **Certificates & secrets**, create a **client secret**.
+   - (Optional) Under **Token configuration**, ensure the `email`/`profile` optional claims are
+     present; `preferred_username` is included by default.
+2. **Set the Terraform vars**: `console_auth = "entra"`, `entra_tenant_id`, `entra_client_id`, and
+   `entra_client_secret` (in `secrets.auto.tfvars` / `TF_VAR_entra_client_secret`). `terraform
+   apply` — the module stores the secret in each space's Key Vault and emits the `CONSOLE_ENTRA_*`
+   app settings. No other infrastructure changes; the LDAP settings simply stop being emitted.
+3. Restart the apps. `/login` now bounces to Entra; `/logout` clears the app session (set
+   `entra_slo = true` to also end the Entra session).
+
+`msal` is in `requirements.txt` (imported lazily, so it doesn't affect the on-prem LDAP/Windows
+builds). You can register one app registration per space instead of a shared one if you prefer
+separate secrets — just set the same `entra_client_id`/secret per `terraform.tfvars` workspace, or
+split the vars.
 
 ## Rough cost
 

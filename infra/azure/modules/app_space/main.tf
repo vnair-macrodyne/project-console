@@ -114,6 +114,15 @@ resource "azurerm_key_vault_secret" "eto_pwd" {
   depends_on   = [azurerm_role_assignment.kv_admin]
 }
 
+# Entra client secret — only when Entra SSO is the active backend.
+resource "azurerm_key_vault_secret" "entra_client_secret" {
+  count        = var.console_auth == "entra" ? 1 : 0
+  name         = "CONSOLE-ENTRA-CLIENT-SECRET"
+  value        = var.entra_client_secret
+  key_vault_id = azurerm_key_vault.this.id
+  depends_on   = [azurerm_role_assignment.kv_admin]
+}
+
 # ── Hybrid Connection: the app's private path to the on-prem SQL Server ───────────
 # A named channel in the shared Relay namespace...
 resource "azurerm_relay_hybrid_connection" "sql" {
@@ -210,6 +219,15 @@ resource "azurerm_linux_web_app" "this" {
       "CONSOLE_LDAP_SERVER" = var.ldap_server
       "CONSOLE_AD_DOMAIN"   = var.ad_domain
       "CONSOLE_AD_NETBIOS"  = var.ad_netbios
+    } : {},
+    # Entra SSO settings only when Entra is the active backend. Redirect URI is built by the app
+    # from the request host, so register https://<app-hostname>/auth/callback on the app
+    # registration (see the module's callback_url output). Client secret comes from Key Vault.
+    var.console_auth == "entra" ? {
+      "CONSOLE_ENTRA_TENANT_ID"     = var.entra_tenant_id
+      "CONSOLE_ENTRA_CLIENT_ID"     = var.entra_client_id
+      "CONSOLE_ENTRA_CLIENT_SECRET" = "@Microsoft.KeyVault(SecretUri=${one(azurerm_key_vault_secret.entra_client_secret[*].id)})"
+      "CONSOLE_ENTRA_SLO"           = var.entra_slo ? "1" : "0"
     } : {}
   )
 

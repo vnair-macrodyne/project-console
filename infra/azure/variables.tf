@@ -181,6 +181,34 @@ variable "prod_store_pwd" {
   sensitive   = true
 }
 
+# ── Entra SSO (only used when console_auth = entra) ──────────────────────────────
+# One app registration can serve both spaces — register BOTH callback URLs on it (see the
+# staging_callback_url / prod_callback_url outputs after apply).
+variable "entra_tenant_id" {
+  description = "Entra tenant (directory) id."
+  type        = string
+  default     = ""
+}
+
+variable "entra_client_id" {
+  description = "App registration's application (client) id."
+  type        = string
+  default     = ""
+}
+
+variable "entra_client_secret" {
+  description = "A client secret on the app registration (stored in each space's Key Vault)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "entra_slo" {
+  description = "Single-logout: also end the Entra session on /logout."
+  type        = bool
+  default     = false
+}
+
 # ── LDAP (interim, optional — only used when console_auth = ldap) ─────────────────
 variable "ldap_server" {
   description = "DC hostname reachable from the app (CONSOLE_LDAP_SERVER). Blank if using Entra."
