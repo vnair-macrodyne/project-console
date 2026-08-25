@@ -64,7 +64,13 @@ def resolve_user():
         user = _norm(os.environ.get("CONSOLE_DEV_USER") or "")
     if not user:
         return None, None
-    return user, (_role_for(user) or "viewer")
+    # Role precedence: an Entra App Role captured at sign-in (session["role"]) wins — that's the
+    # governed-in-Entra source. Otherwise fall back to the Reporting.tblConsoleUser mapping
+    # (windows/ldap, or Entra users not assigned an app role), else viewer.
+    role = (session.get("role") or "").lower()
+    if role not in RANK:
+        role = _role_for(user) or "viewer"
+    return user, role
 
 
 def auth_mode():
@@ -261,26 +267,38 @@ def entra_begin(next_url):
     return flow["auth_uri"]
 
 
+def _role_from_entra_claims(claims):
+    """Highest console role (viewer<pm<admin) among the token's App Role assignments, or None.
+    The `roles` claim is a list of the app-role *values* the user is assigned (we name them
+    'viewer'/'pm'/'admin' on the app registration, so they map straight through)."""
+    ranked = [v.lower() for v in (claims.get("roles") or []) if isinstance(v, str) and v.lower() in RANK]
+    if not ranked:
+        return None
+    return max(ranked, key=lambda r: RANK[r])
+
+
 def entra_complete(auth_response):
     """Finish the flow from the redirect query params (auth_response = request.args). MSAL
-    validates state + nonce against the stashed flow. Returns (ok, username, display, next_url)."""
+    validates state + nonce against the stashed flow.
+    Returns (ok, username, display, role, next_url) — role is the Entra App Role (or None, in
+    which case the caller falls back to the tblConsoleUser mapping)."""
     flow = session.pop(_ENTRA_FLOW_KEY, None)
     nxt = session.pop(_ENTRA_NEXT_KEY, "/") or "/"
     if not nxt.startswith("/"):
         nxt = "/"
     if not flow:
-        return False, None, None, nxt
+        return False, None, None, None, nxt
     result = _entra_app().acquire_token_by_auth_code_flow(flow, dict(auth_response))
     if not isinstance(result, dict) or "error" in result or "id_token_claims" not in result:
-        return False, None, None, nxt
+        return False, None, None, None, nxt
     claims = result["id_token_claims"]
     upn = (claims.get("preferred_username") or claims.get("upn")
            or claims.get("email") or "")
     display = claims.get("name") or upn
     user = _norm(upn)
     if not user:
-        return False, None, None, nxt
-    return True, user, display, nxt
+        return False, None, None, None, nxt
+    return True, user, display, _role_from_entra_claims(claims), nxt
 
 
 def entra_logout_url(post_logout_redirect=None):

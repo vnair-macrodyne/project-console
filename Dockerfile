@@ -32,6 +32,15 @@ RUN set -eux; \
     apt-get purge -y --auto-remove curl gnupg apt-transport-https; \
     rm -rf /var/lib/apt/lists/*
 
+# --- unixODBC connection pooling. The app opens a fresh DB connection per request; over the
+#     Hybrid Connection each connect costs several relay round trips before the first query.
+#     With pooling ON, the driver manager hands back a warm physical connection instead, so the
+#     handshake is paid once and reused — a large latency win on the tunneled data path.
+#     Pooling=Yes is global ([ODBC] section); CPTimeout is how long an idle pooled connection
+#     stays reusable (seconds), set on the driver's section.
+RUN printf '\n[ODBC]\nPooling=Yes\n' >> /etc/odbcinst.ini \
+    && sed -i '/^\[ODBC Driver 17 for SQL Server\]/a CPTimeout=120' /etc/odbcinst.ini
+
 # --- Python deps first (own layer, so app-code edits don't re-run the pip install).
 #     pywin32 self-excludes on Linux via its platform marker; ldap3 stays in for the bind.
 WORKDIR /app

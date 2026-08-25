@@ -192,15 +192,19 @@ def login_page():
 def auth_callback():
     """Entra redirect URI — completes the auth-code flow and establishes the session."""
     try:
-        ok, user, display, nxt = auth.entra_complete(request.args)
+        ok, user, display, role, nxt = auth.entra_complete(request.args)
     except Exception:
         app.logger.exception("entra callback")
-        ok, nxt = False, "/"
+        ok, role, nxt = False, None, "/"
     if not ok:
         return redirect(url_for("login_page"))
     session.clear()
     session["user"] = user
     session["display"] = display or user
+    # Store the Entra App Role so resolve_user() uses it (governed in Entra). If the user has no
+    # app-role assignment, role is None and we leave it unset → fall back to tblConsoleUser.
+    if role:
+        session["role"] = role
     return redirect(nxt if nxt.startswith("/") else "/")
 
 

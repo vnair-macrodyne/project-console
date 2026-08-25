@@ -1,0 +1,32 @@
+[
+  {
+    "allowedMemberTypes": [
+      "User"
+    ],
+    "description": "Read all reports and dashboards",
+    "displayName": "Viewer",
+    "isEnabled": true,
+    "value": "viewer",
+    "id": "f22c4f29-d87e-4673-bf04-2a4a246a43f9"
+  },
+  {
+    "allowedMemberTypes": [
+      "User"
+    ],
+    "description": "Bring projects in and add/modify budgets, plus viewer access",
+    "displayName": "PM",
+    "isEnabled": true,
+    "value": "pm",
+    "id": "dfe65350-d57d-4e80-ae70-a038f2904120"
+  },
+  {
+    "allowedMemberTypes": [
+      "User"
+    ],
+    "description": "Manage users and the crosswalk, plus PM access",
+    "displayName": "Admin",
+    "isEnabled": true,
+    "value": "admin",
+    "id": "9bc50b28-36c2-48e5-9a76-0b49f6ee6bf5"
+  }
+]
