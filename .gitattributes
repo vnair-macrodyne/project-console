@@ -1,0 +1,10 @@
+# Normalize line endings so Windows checkouts don't corrupt files that must be LF.
+* text=auto
+
+# Shell scripts MUST be LF even when checked out on Windows: a CRLF shebang makes the
+# container entrypoint exec `bash\r`, which fails with exit code 127 at container start.
+*.sh text eol=lf
+
+# The container entrypoint and state-bootstrap script are the critical ones.
+docker/docker-entrypoint.sh text eol=lf
+infra/azure/bootstrap-state.sh text eol=lf

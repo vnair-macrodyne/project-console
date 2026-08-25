@@ -43,9 +43,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # --- Run as an unprivileged user; the app writes nothing to the image at runtime.
-#     chmod the entrypoint here so the build never depends on git preserving the +x bit
-#     (Windows checkouts don't), then hand the tree to the non-root user.
-RUN chmod +x /app/docker/docker-entrypoint.sh \
+#     Strip any CR from the entrypoint (a Windows CRLF checkout makes the shebang `bash\r`,
+#     which fails to exec with exit 127) and chmod it, so the build never depends on the
+#     checkout's line endings or the +x bit. Then hand the tree to the non-root user.
+RUN sed -i 's/\r$//' /app/docker/docker-entrypoint.sh \
+    && chmod +x /app/docker/docker-entrypoint.sh \
     && useradd --create-home --uid 10001 console \
     && chown -R console:console /app
 USER console
