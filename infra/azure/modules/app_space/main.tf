@@ -228,6 +228,11 @@ resource "azurerm_linux_web_app" "this" {
       "CONSOLE_ENTRA_CLIENT_ID"     = var.entra_client_id
       "CONSOLE_ENTRA_CLIENT_SECRET" = "@Microsoft.KeyVault(SecretUri=${one(azurerm_key_vault_secret.entra_client_secret[*].id)})"
       "CONSOLE_ENTRA_SLO"           = var.entra_slo ? "1" : "0"
+      # Pin the redirect URI explicitly. Behind App Service's TLS proxy the app can misread the
+      # scheme and build an http:// callback, which Entra rejects (AADSTS50011). Built from the
+      # app name (default hostname is <app_name>.azurewebsites.net) — no self-reference. Must
+      # match a redirect URI on the app registration.
+      "CONSOLE_ENTRA_REDIRECT_URI" = "https://${var.app_name}.azurewebsites.net/auth/callback"
     } : {}
   )
 
