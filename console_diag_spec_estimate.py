@@ -88,28 +88,59 @@ def main():
     eto = eto_connect()
     cur = eto.cursor()
 
-    rule("A. Candidate estimate views on this ETO (name + row count)")
-    like = " OR ".join("LOWER(TABLE_NAME) LIKE '%s'" % h for h in VIEW_HINTS)
-    _, cand = rows(cur, "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS "
+    rule("A. Estimate/budget/quote objects on this ETO (tables + views, row counts)")
+    terms = ["estimate", "budget", "quote", "quotation"]
+    like = " OR ".join(f"LOWER(TABLE_NAME) LIKE '%{t}%'" for t in terms)
+    _, cand = rows(cur, "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES "
                         f"WHERE {like} ORDER BY TABLE_NAME")
     if not cand:
-        print("No estimate views matched the hints. Widen VIEW_HINTS / inspect INFORMATION_SCHEMA.VIEWS.")
-    view = None
-    for (name,) in cand:
+        print("Nothing matched estimate/budget/quote. This ETO may not use the estimating module.")
+        # last resort: show spec+labor objects so we can see what estimate-like data exists
+        _, sl = rows(cur, "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES "
+                          "WHERE LOWER(TABLE_NAME) LIKE '%spec%' AND "
+                          "(LOWER(TABLE_NAME) LIKE '%labor%' OR LOWER(TABLE_NAME) LIKE '%hour%') "
+                          "ORDER BY TABLE_NAME")
+        for name, tt in sl:
+            print(f"  {name:55} {tt}")
+        return
+
+    def score(name):
+        n = name.lower(); s = 0
+        if any(k in n for k in ("spec", "machine", "assembly")): s += 3
+        if any(k in n for k in ("hourtype", "hourdescription", "byhour")): s += 3
+        if "estimate" in n: s += 1
+        return s
+
+    scored = []
+    for name, tt in cand:
         try:
             cur.execute(f"SELECT COUNT(*) FROM [{name}]")
             n = cur.fetchone()[0]
         except Exception as e:
             n = f"(error: {e})"
-        flag = ""
-        nl = name.lower()
-        if ("spec" in nl or "hourtype" in nl) and view is None and isinstance(n, int) and n > 0:
-            view = name; flag = "   <-- using this as the spec-by-hourtype view"
-        print(f"  {name:55} rows={n}{flag}")
+        scored.append((name, tt, n))
+        print(f"  {name:55} {tt:11} rows={n}")
+
+    # prefer a POPULATED object scoring high on spec + hourtype
+    ranked = sorted(
+        [(score(nm), (isinstance(n, int) and n > 0), nm) for nm, tt, n in scored],
+        key=lambda x: (x[0], x[1]), reverse=True)
+    view = None
+    for sc, populated, nm in ranked:
+        if sc >= 3 and populated:
+            view = nm; break
     if not view:
-        print("\nNo populated spec/hourtype estimate view found — spec-level ETO estimates may be "
-              "empty on this ETO. Machine-grain budgets would then need manual entry or allocation.")
+        # fall back to any populated estimate object with an hourtype dimension
+        for sc, populated, nm in ranked:
+            if populated and ("hour" in nm.lower()):
+                view = nm; break
+    if not view:
+        print("\nNo populated SPEC-level (machine) by-hourtype estimate object found. Project-level "
+              "estimates may still exist (see the list above) — but machine-grain budgets would "
+              "then need manual entry or allocation. Tell me which object above looks like the "
+              "spec/machine estimate and I'll point the probe at it.")
         return
+    print(f"\n  --> probing '{view}' as the spec-by-hourtype estimate")
 
     rule(f"B. Columns of {view}  (+ auto-detected roles)")
     _, cols_rows = rows(cur, "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
