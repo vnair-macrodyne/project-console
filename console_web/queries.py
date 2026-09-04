@@ -91,7 +91,7 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
-_QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "crosswalk",
+_QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "spec_budget", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "released_toorder", "item_location", "inventory_value",
@@ -131,6 +131,11 @@ def catalogue():
         {"id": "budget_actual", "menu": "Dashboards", "label": "Budget vs Actual",
          "desc": f"{labour}-hours and {material.lower()}-$ budget, actual, variance and "
                  f"consumed % per {proj.lower()}.",
+         "needs_projects": True},
+        {"id": "spec_budget", "menu": "Dashboards", "label": f"Machine {disc} Budget",
+         "desc": f"Machine × {disc.lower()} labour budget vs actual, in $, from ETO's spec "
+                 f"estimate — {proj.lower()} → machine → {disc.lower()}. Overhead/contingency "
+                 f"specs shown separately.",
          "needs_projects": True},
         {"id": "crosswalk", "menu": "Dashboards", "label": f"{L('crosswalk')} (map)",
          "desc": f"The {L('hour_description')} → {disc.lower()} mapping (reference).",
@@ -704,6 +709,27 @@ class LiveQueryService(QueryService):
         fin = self._financials(project_ids)
         rows = [_budget_actual_row(pid, fin[pid]) for pid in sorted(fin)]
         return _budget_actual_result(rows)
+
+    def _q_spec_budget(self, project_ids, **kw):
+        """Machine × discipline labour budget vs actual, in $, sourced live from ETO's spec
+        estimate (vwSpecLaborActualsVSEstimatesByHourType). HourType→discipline via the shared
+        map; SpecID >= _OVERHEAD_SPEC_MIN is Macrodyne overhead/contingency, shown separately."""
+        pids = [int(p) for p in project_ids] if project_ids else None
+        if not pids:
+            return _spec_budget_result(None, {})
+        sql = f"""
+        SELECT a.ProjectID AS ProjectID, a.SpecID AS MachineCode, a.HourType AS HourType,
+               CAST(a.TotalBudgetLabor AS decimal(20,2)) AS Budget,
+               CAST(a.TotalActualLabor AS decimal(20,2)) AS Actual,
+               p.DisplayName AS JobName, pcust.CName AS Customer
+        FROM vwSpecLaborActualsVSEstimatesByHourType a
+        LEFT JOIN tblProjects p     ON p.ProjectID = a.ProjectID
+        LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
+        WHERE a.ProjectID IN ({_ids_sql(pids)})
+          AND (a.TotalBudgetLabor <> 0 OR a.TotalActualLabor <> 0)
+        ORDER BY a.ProjectID, a.SpecID, a.HourType
+        """
+        return _spec_budget_result(self._df(sql), self._hourtype_map())
 
     def _q_crosswalk(self, project_ids, **kw):
         rows = [{"HourDescription": hd, "Discipline": disc}
@@ -2225,6 +2251,123 @@ def _po_to_order_result(df, window_label=""):
                        _po_to_order_rows(df), cards, note)
 
 
+# ---- Machine × Discipline Budget vs Actual (ETO spec estimate, in $) ------------
+# ETO holds labour estimates per SPEC (machine) per HourType. vwSpecLaborActualsVSEstimatesByHourType
+# gives budget ($ TotalBudgetLabor) AND actual ($ TotalActualLabor) at that grain. We map HourType →
+# discipline (the same rule the rest of the console uses) and roll up Project → Machine → Discipline,
+# all in dollars (self-consistent: budget and actual share one basis, no rate conversion).
+# High-numbered specs (>= _OVERHEAD_SPEC_MIN) are Macrodyne's reserved overhead/contingency buckets
+# (e.g. 899 "Management Contingency", 999 rework) — NOT real machines — so they get a separate
+# "Overhead / Contingency" band and never masquerade as a machine. A contingency line above
+# _OVERHEAD_FLAG_BUDGET is flagged (a data-entry check) rather than silently inflating the total
+# (one job carried a $4.2M / $0-actual contingency — a keying error, not real overhead).
+_OVERHEAD_SPEC_MIN = 700          # SpecID at/above this = overhead/contingency, not a machine
+_OVERHEAD_FLAG_BUDGET = 1_000_000.0
+_OVERHEAD_LABEL = "Overhead / Contingency"
+
+
+def _spec_budget_detail(disc, b, a, flagged=False):
+    cons = (a / b) if b else None
+    tone = {"ConsumedPct": _pct_tone(cons)}
+    if flagged:
+        tone["Budget"] = "bad"
+    return {"_kind": "detail", "Discipline": disc,
+            "Budget": round(b, 2), "Actual": round(a, 2),
+            "Variance": round(b - a, 2), "ConsumedPct": cons, "_tone": tone}
+
+
+def _spec_budget_subtotal(kind, label, b, a):
+    cons = (a / b) if b else None
+    return {"_kind": kind, "Discipline": label,
+            "Budget": round(b, 2), "Actual": round(a, 2),
+            "Variance": round(b - a, 2), "ConsumedPct": cons,
+            "_tone": {"ConsumedPct": _pct_tone(cons)}}
+
+
+def _spec_budget_rows(df, htmap):
+    """Banded rows Project → Machine → Discipline (+ overhead band), $ budget/actual. Returns
+    (rows, flagged_count)."""
+    if df is None or df.empty:
+        return [], 0
+    rows, gtb, gta, flagged = [], 0.0, 0.0, 0
+    for pid in sorted(df["ProjectID"].dropna().unique(), key=lambda x: int(x)):
+        psub = df[df["ProjectID"] == pid]
+        job = _s(psub["JobName"].iloc[0]) if "JobName" in psub.columns else ""
+        cust = psub["Customer"].iloc[0] if "Customer" in psub.columns else ""
+        head = f"Project: {int(pid)} — {job or ''}".rstrip(" —")
+        if cust:
+            head += f"   ·   {cust}"
+        rows.append({"_kind": "l3_sub", "Machine": head})
+        mach_agg, oh_agg = {}, {}     # {spec:{disc:[b,a]}} , {disc:[b,a]}
+        for _, r in psub.iterrows():
+            b = float(r.get("Budget") or 0)
+            a = float(r.get("Actual") or 0)
+            try:
+                spec = int(r.get("MachineCode"))
+            except (TypeError, ValueError):
+                spec = None
+            try:
+                disc = htmap.get(int(r.get("HourType")), "Other")
+            except (TypeError, ValueError):
+                disc = "Other"
+            if spec is None or spec >= _OVERHEAD_SPEC_MIN:
+                cur = oh_agg.get(disc, [0.0, 0.0]); cur[0] += b; cur[1] += a; oh_agg[disc] = cur
+            else:
+                dd = mach_agg.setdefault(spec, {})
+                cur = dd.get(disc, [0.0, 0.0]); cur[0] += b; cur[1] += a; dd[disc] = cur
+        ptb = pta = 0.0
+        for spec in sorted(mach_agg):
+            rows.append({"_kind": "l2_sub", "Machine": f"Machine {spec}"})
+            for disc in sorted(mach_agg[spec]):
+                b, a = mach_agg[spec][disc]
+                rows.append(_spec_budget_detail(disc, b, a))
+                ptb += b; pta += a
+        if oh_agg:
+            rows.append({"_kind": "l2_sub", "Machine": _OVERHEAD_LABEL})
+            for disc in sorted(oh_agg):
+                b, a = oh_agg[disc]
+                flag = b >= _OVERHEAD_FLAG_BUDGET
+                flagged += 1 if flag else 0
+                rows.append(_spec_budget_detail(disc, b, a, flagged=flag))
+                ptb += b; pta += a
+        rows.append(_spec_budget_subtotal("l1_sub", f"Project {int(pid)} — Budget vs Actual", ptb, pta))
+        gtb += ptb; gta += pta
+    rows.append(_spec_budget_subtotal("grand", "GRAND TOTAL", gtb, gta))
+    return rows, flagged
+
+
+def _spec_budget_result(df, htmap):
+    disc = L("discipline")
+    proj = L("project")
+    cols = [
+        QueryColumn("Machine", "Machine", "id", "left"),
+        QueryColumn("Discipline", disc, "text", "left", wrap=True),
+        QueryColumn("Budget", "Budget $", "money", "right"),
+        QueryColumn("Actual", "Actual $", "money", "right"),
+        QueryColumn("Variance", "Variance $", "money", "right"),
+        QueryColumn("ConsumedPct", "Consumed %", "pct", "right", calc=True),
+    ]
+    rows, flagged = _spec_budget_rows(df, htmap)
+    grand = next((r for r in rows if r.get("_kind") == "grand"), {})
+    tb = float(grand.get("Budget") or 0.0)
+    ta = float(grand.get("Actual") or 0.0)
+    over = sum(1 for r in rows if r.get("_kind") == "detail" and (r.get("ConsumedPct") or 0) > 1.0)
+    cards = [Card("Budget", _fmt_money2(tb)),
+             Card("Actual", _fmt_money2(ta)),
+             Card("Variance", _fmt_money2(tb - ta), "good" if tb - ta >= 0 else "bad"),
+             Card("Over-budget lines", "{:,}".format(over), "warn" if over else "good"),
+             Card("Flagged (check)", "{:,}".format(flagged), "bad" if flagged else "good")]
+    note = (f"Machine × {disc.lower()} labour budget vs actual, in dollars, sourced live from ETO's "
+            "spec estimate (vwSpecLaborActualsVSEstimatesByHourType): Budget = TotalBudgetLabor, "
+            "Actual = TotalActualLabor, Variance = Budget − Actual (negative = over budget), "
+            f"Consumed % = Actual ÷ Budget. Grouped {proj.lower()} → machine → {disc.lower()}. "
+            f"Specs numbered ≥ {_OVERHEAD_SPEC_MIN} are overhead/contingency buckets (e.g. 899 "
+            f"“Management Contingency”), shown as “{_OVERHEAD_LABEL}”, not as machines. A "
+            f"contingency line over {_fmt_money2(_OVERHEAD_FLAG_BUDGET)} is flagged as a likely "
+            "estimate-entry error.")
+    return QueryResult("spec_budget", f"Machine {disc} — Budget vs Actual", cols, rows, cards, note)
+
+
 # ---- Inventory — Item Location (on-hand by item & location, project-scoped) ----
 def _item_location_rows(df):
     """Grouped rows (project → stocked line) with a per-project count band. No numeric
@@ -2953,6 +3096,27 @@ class DemoQueryService(QueryService):
     def _q_budget_actual(self, project_ids, **kw):
         rows = [_budget_actual_row(pid, _DemoFin(_DEMO[pid])) for pid in self._sel(project_ids)]
         return _budget_actual_result(rows)
+
+    def _q_spec_budget(self, project_ids, **kw):
+        import pandas as pd
+        htmap = {8: "Project Management", 20: "Electrical Engineering",
+                 23: "Hydraulic Engineering", 25: "Mechanical Engineering",
+                 46: "Manufacturing", 50: "Manufacturing"}
+        recs = []
+        for pid in self._sel(project_ids):
+            base = _DEMO_MACH.get(pid, 10)
+            job, cust = f"Demo Job {pid}", "Demo Customer"
+            for mc, scale in ((base, 1.0), (base + 10, 0.6)):
+                for ht, bud, act in ((25, 60000, 66000), (20, 30000, 28000), (23, 12000, 15000),
+                                     (46, 50000, 72000), (50, 18000, 6000), (8, 8000, 7500)):
+                    recs.append({"ProjectID": pid, "MachineCode": mc, "HourType": ht,
+                                 "Budget": round(bud * scale, 2), "Actual": round(act * scale, 2),
+                                 "JobName": job, "Customer": cust})
+            recs.append({"ProjectID": pid, "MachineCode": 899, "HourType": 8,
+                         "Budget": 40000, "Actual": 0, "JobName": job, "Customer": cust})
+        df = pd.DataFrame(recs, columns=["ProjectID", "MachineCode", "HourType",
+                                         "Budget", "Actual", "JobName", "Customer"])
+        return _spec_budget_result(df, htmap)
 
     def _q_crosswalk(self, project_ids, **kw):
         rows = [{"HourDescription": hd, "Discipline": disc}
