@@ -91,7 +91,7 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
-_QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "spec_budget", "crosswalk",
+_QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "spec_budget", "data_completeness", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "released_toorder", "item_location", "inventory_value",
@@ -137,6 +137,10 @@ def catalogue():
                  f"(tblSpecHours / vwTimecards) — {proj.lower()} → machine → {disc.lower()}. "
                  f"Overhead/contingency specs shown separately.",
          "needs_projects": True},
+        {"id": "data_completeness", "menu": "Dashboards", "label": "Data Completeness",
+         "desc": "How well teams are maintaining key ETO fields — population rate per field on "
+                 "active jobs, sparsest first. A low rate means the field isn't being entered.",
+         "needs_projects": False},
         {"id": "crosswalk", "menu": "Dashboards", "label": f"{L('crosswalk')} (map)",
          "desc": f"The {L('hour_description')} → {disc.lower()} mapping (reference).",
          "needs_projects": False},
@@ -748,6 +752,25 @@ class LiveQueryService(QueryService):
         ORDER BY ProjectID, MachineCode, HourType
         """
         return _spec_budget_result(self._df(sql), self._hourtype_map())
+
+    def _q_data_completeness(self, project_ids, **kw):
+        """Population rate of the tracked team-maintained fields, scoped to ACTIVE projects
+        (last charge within 12 months). One UNION-ALL count per field → the generic builder."""
+        parts = []
+        for owner, table, col, label, scope, kind in _COMPLETENESS_FIELDS:
+            if scope == "self":
+                where = f"WHERE {_ACTIVE_SELF}"
+            elif scope == "proj":
+                where = f"WHERE ProjectID IN ({_ACTIVE_IDS})"
+            else:
+                where = ""
+            parts.append(
+                f"SELECT {_sql_str(owner)} AS Owner, {_sql_str(label)} AS Field, "
+                f"{_sql_str(table + '.' + col)} AS Source, COUNT(*) AS Total, "
+                f"SUM(CASE WHEN {_filled_pred(col, kind)} THEN 1 ELSE 0 END) AS Filled "
+                f"FROM dbo.[{table}] {where}")
+        sql = "\nUNION ALL\n".join(parts)
+        return _data_completeness_result(self._df(sql))
 
     def _q_crosswalk(self, project_ids, **kw):
         rows = [{"HourDescription": hd, "Discipline": disc}
@@ -2392,6 +2415,96 @@ def _spec_budget_result(df, htmap):
     return QueryResult("spec_budget", f"Machine {disc} — Budget vs Actual", cols, rows, cards, note)
 
 
+# ---- Data Completeness (are teams maintaining key ETO fields?) ------------------
+# Population rate (filled / total, %) for a curated set of fields teams are supposed to enter,
+# scoped to ACTIVE projects (last charge within 12 months) so dead history doesn't hide a live gap.
+# A LOW rate is the point — it means the field isn't being entered, and the owning team can see it.
+# "Filled" is type-aware: dates → not null; numbers → not null & <> 0; text → not null & non-blank.
+_ACTIVE_SELF = "PLast >= DATEADD(month, -12, GETDATE())"
+_ACTIVE_IDS = f"SELECT ProjectID FROM dbo.tblProjects WHERE {_ACTIVE_SELF}"
+_COMPLETENESS_OWNER_ORDER = ["Project Mgmt", "Engineering", "Purchasing", "Production"]
+
+# owner, table, column, label, scope ('self' tblProjects | 'proj' project-scoped | 'all'), kind
+_COMPLETENESS_FIELDS = [
+    ("Project Mgmt", "tblProjects",              "PDelivery",           "Project delivery date",         "self", "date"),
+    ("Project Mgmt", "tblProjects",              "PercentCompleteDate", "Project %-complete date",        "self", "date"),
+    ("Engineering",  "tblSpec",                  "BudgetShipRelease",   "Machine ship-release (budget)",  "proj", "date"),
+    ("Engineering",  "tblSpec",                  "BudgetEngRelease",    "Machine eng-release (budget)",   "proj", "date"),
+    ("Engineering",  "tblSpec",                  "BudgetMfgRelease",    "Machine mfg-release (budget)",   "proj", "date"),
+    ("Engineering",  "tblSpec",                  "MfgBegin",            "Machine mfg begin",              "proj", "date"),
+    ("Engineering",  "tblSpec",                  "PercentCompleteDate", "Machine %-complete date",        "proj", "date"),
+    ("Engineering",  "tblEngItemMaster",         "EstimatedLeadTime",   "Item lead time (days)",          "all",  "num"),
+    ("Purchasing",   "tblPurchaseOrderDetails",  "DateRequired",        "PO line need-by date",           "proj", "date"),
+    ("Production",   "tblProcessScheduleHeader", "StartDate",           "Schedule start",                 "proj", "date"),
+    ("Production",   "tblProcessScheduleHeader", "FinalRequiredDate",   "Schedule final-required",        "proj", "date"),
+]
+
+
+def _sql_str(s):
+    """Quote a Python string as a SQL literal (labels/owners are code constants, never user input)."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def _filled_pred(col, kind):
+    if kind == "num":
+        return f"[{col}] IS NOT NULL AND [{col}] <> 0"
+    if kind == "text":
+        return f"[{col}] IS NOT NULL AND LTRIM(RTRIM(CAST([{col}] AS nvarchar(4000)))) <> ''"
+    return f"[{col}] IS NOT NULL"                 # date / default
+
+
+def _completeness_tone(pct):
+    """Population %: HIGH is good (inverted from the consumed-% convention)."""
+    if pct is None:
+        return "neutral"
+    if pct >= 0.9:
+        return "good"
+    if pct >= 0.5:
+        return "warn"
+    return "bad"
+
+
+def _data_completeness_result(df):
+    cols = [
+        QueryColumn("Field", "Field", "text", "left", wrap=True),
+        QueryColumn("Source", "ETO source", "text", "left", wrap=True),
+        QueryColumn("Filled", "Filled", "int", "right"),
+        QueryColumn("Total", "Of", "int", "right"),
+        QueryColumn("PopPct", "Populated %", "pct", "right"),
+    ]
+    rows, tracked, gaps, wellkept = [], 0, 0, 0
+    if df is not None and not df.empty:
+        recs = df.to_dict("records")
+        owners = sorted({r["Owner"] for r in recs},
+                        key=lambda o: (_COMPLETENESS_OWNER_ORDER.index(o)
+                                       if o in _COMPLETENESS_OWNER_ORDER else 99, o))
+        for owner in owners:
+            og = [r for r in recs if r["Owner"] == owner]
+            og.sort(key=lambda r: (_num(r.get("Filled")) or 0) / (_num(r.get("Total")) or 1))
+            rows.append({"_kind": "l2_sub", "Field": owner})
+            for r in og:
+                total = int(_num(r.get("Total")) or 0)
+                filled = int(_num(r.get("Filled")) or 0)
+                pct = (filled / total) if total else None
+                tracked += 1
+                if pct is not None and pct < 0.5:
+                    gaps += 1
+                if pct is not None and pct >= 0.9:
+                    wellkept += 1
+                rows.append({"_kind": "detail", "Field": r.get("Field"), "Source": r.get("Source"),
+                             "Filled": filled, "Total": total, "PopPct": pct,
+                             "_tone": {"PopPct": _completeness_tone(pct)}})
+    cards = [Card("Fields tracked", "{:,}".format(tracked)),
+             Card("Gaps (<50%)", "{:,}".format(gaps), "bad" if gaps else "good"),
+             Card("Well-kept (≥90%)", "{:,}".format(wellkept), "good" if wellkept else "warn")]
+    note = ("How completely teams are entering key ETO fields, scoped to ACTIVE projects (a charge in "
+            "the last 12 months) so long-closed jobs don't mask a current gap. Populated % = rows with "
+            "the field filled ÷ rows in scope; a LOW rate means the field isn't being maintained, not "
+            "that it's missing from ETO. Grouped by the owning team, sparsest first. Item lead time is "
+            "measured across all items (not project-scoped).")
+    return QueryResult("data_completeness", "Data Completeness — field population", cols, rows, cards, note)
+
+
 # ---- Inventory — Item Location (on-hand by item & location, project-scoped) ----
 def _item_location_rows(df):
     """Grouped rows (project → stocked line) with a per-project count band. No numeric
@@ -3141,6 +3254,26 @@ class DemoQueryService(QueryService):
         df = pd.DataFrame(recs, columns=["ProjectID", "MachineCode", "HourType",
                                          "Budget", "Actual", "JobName", "Customer"])
         return _spec_budget_result(df, htmap)
+
+    def _q_data_completeness(self, project_ids, **kw):
+        import pandas as pd
+        # canned figures mirroring the real audit shape (gaps + well-kept baselines)
+        demo = [
+            ("Project Mgmt", "Project delivery date",        "tblProjects.PDelivery",                 487, 0),
+            ("Project Mgmt", "Project %-complete date",      "tblProjects.PercentCompleteDate",       487, 0),
+            ("Engineering",  "Machine ship-release (budget)", "tblSpec.BudgetShipRelease",            594, 1),
+            ("Engineering",  "Machine eng-release (budget)",  "tblSpec.BudgetEngRelease",             594, 1),
+            ("Engineering",  "Machine mfg-release (budget)",  "tblSpec.BudgetMfgRelease",             594, 1),
+            ("Engineering",  "Machine mfg begin",             "tblSpec.MfgBegin",                     594, 3),
+            ("Engineering",  "Machine %-complete date",       "tblSpec.PercentCompleteDate",          594, 0),
+            ("Engineering",  "Item lead time (days)",         "tblEngItemMaster.EstimatedLeadTime", 87266, 114),
+            ("Purchasing",   "PO line need-by date",          "tblPurchaseOrderDetails.DateRequired", 4772, 4586),
+            ("Production",   "Schedule start",                "tblProcessScheduleHeader.StartDate",     85, 81),
+            ("Production",   "Schedule final-required",       "tblProcessScheduleHeader.FinalRequiredDate", 85, 82),
+        ]
+        df = pd.DataFrame([{"Owner": o, "Field": f, "Source": s, "Total": t, "Filled": fl}
+                           for o, f, s, t, fl in demo])
+        return _data_completeness_result(df)
 
     def _q_crosswalk(self, project_ids, **kw):
         rows = [{"HourDescription": hd, "Discipline": disc}
