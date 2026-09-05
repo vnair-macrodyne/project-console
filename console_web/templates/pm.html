@@ -32,6 +32,10 @@
   table.bud td{padding:8px 12px;border-bottom:1px solid var(--line)}
   table.bud tr:last-child td{border-bottom:0}
   table.bud tr.tot td{font-weight:800;background:#f2f6ff;border-top:2px solid var(--line)}
+  table.bud tr.mh td{background:#eef3ff;color:var(--brand);font-weight:700}
+  table.bud tr.ms td{font-weight:700;background:#fafbff;border-top:1px solid var(--line)}
+  table.bud td.over{color:#b3261e;font-weight:700}
+  table.bud td.warn{color:#8a5a00;font-weight:600}
   .totrow{display:flex;gap:26px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:2px solid var(--line)}
   .tot{display:flex;flex-direction:column}
   .tot .v{font-size:22px;font-weight:800}
@@ -81,6 +85,13 @@
         <div class="tot"><div class="v" id="totLabour">0</div><div class="l">Total Labour Hours</div></div>
         <div class="tot"><div class="v" id="totMaterial">$0</div><div class="l">Materials Budget</div></div>
       </div>
+    </div>
+    <div class="card" id="machineCard" style="margin-top:14px;display:none">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <h2 style="margin:0">By Machine &times; Discipline</h2>
+        <span class="src">SOURCE: ETO &middot; hours</span>
+      </div>
+      <table class="bud" id="machineTable"></table>
     </div>
   </div>
 </div>
@@ -138,6 +149,7 @@ function renderBudget(b){
   if(!b.exists || !(b.disciplines||[]).length){
     t.innerHTML='<tr><td>No ETO budget found for this project.</td></tr>';
     el('totLabour').textContent='0'; el('totMaterial').textContent='—';
+    el('machineCard').style.display='none';
     el('view').style.display='block'; return;
   }
   let rows='<tr><th>Discipline</th><th class="num">Budget Hours</th></tr>';
@@ -146,7 +158,39 @@ function renderBudget(b){
   t.innerHTML=rows;
   el('totLabour').textContent=fmt(b.labour_hours);
   el('totMaterial').textContent=money(b.material_total);
+  renderMachines(b);
   el('view').style.display='block';
+}
+
+function pctClass(p){ return p==null?'':(p>1.0?'over':(p>=0.9?'warn':'')); }
+function pctTxt(p){ return p==null?'—':(p*100).toFixed(0)+'%'; }
+
+function renderMachines(b){
+  const card=el('machineCard'), t=el('machineTable');
+  const ms=b.machines||[];
+  if(!ms.length){ card.style.display='none'; return; }
+  let rows='<tr><th>Machine</th><th>Discipline</th><th class="num">Budget (hrs)</th>'+
+           '<th class="num">Actual (hrs)</th><th class="num">Variance</th><th class="num">Consumed</th></tr>';
+  let gB=0,gA=0;
+  ms.forEach(m=>{
+    rows+=`<tr class="mh"><td colspan="6">${m.machine}</td></tr>`;
+    (m.disciplines||[]).forEach(d=>{
+      const p=d.budget_hours?d.actual_hours/d.budget_hours:null;
+      rows+=`<tr><td></td><td>${d.discipline}</td><td class="num">${fmt(d.budget_hours)}</td>`+
+            `<td class="num">${fmt(d.actual_hours)}</td><td class="num">${fmt(d.budget_hours-d.actual_hours)}</td>`+
+            `<td class="num ${pctClass(p)}">${pctTxt(p)}</td></tr>`;
+    });
+    const mp=m.budget_hours?m.actual_hours/m.budget_hours:null;
+    rows+=`<tr class="ms"><td></td><td>Subtotal</td><td class="num">${fmt(m.budget_hours)}</td>`+
+          `<td class="num">${fmt(m.actual_hours)}</td><td class="num">${fmt(m.budget_hours-m.actual_hours)}</td>`+
+          `<td class="num ${pctClass(mp)}">${pctTxt(mp)}</td></tr>`;
+    gB+=m.budget_hours||0; gA+=m.actual_hours||0;
+  });
+  const gp=gB?gA/gB:null;
+  rows+=`<tr class="tot"><td></td><td>All Machines</td><td class="num">${fmt(gB)}</td>`+
+        `<td class="num">${fmt(gA)}</td><td class="num">${fmt(gB-gA)}</td>`+
+        `<td class="num ${pctClass(gp)}">${pctTxt(gp)}</td></tr>`;
+  t.innerHTML=rows; card.style.display='block';
 }
 
 el('addBtn').onclick=async()=>{

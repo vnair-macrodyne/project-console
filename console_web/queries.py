@@ -133,9 +133,9 @@ def catalogue():
                  f"consumed % per {proj.lower()}.",
          "needs_projects": True},
         {"id": "spec_budget", "menu": "Dashboards", "label": f"Machine {disc} Budget",
-         "desc": f"Machine × {disc.lower()} labour budget vs actual, in $, from ETO's spec "
-                 f"estimate — {proj.lower()} → machine → {disc.lower()}. Overhead/contingency "
-                 f"specs shown separately.",
+         "desc": f"Machine × {disc.lower()} labour budget vs actual, in hours, from ETO "
+                 f"(tblSpecHours / vwTimecards) — {proj.lower()} → machine → {disc.lower()}. "
+                 f"Overhead/contingency specs shown separately.",
          "needs_projects": True},
         {"id": "crosswalk", "menu": "Dashboards", "label": f"{L('crosswalk')} (map)",
          "desc": f"The {L('hour_description')} → {disc.lower()} mapping (reference).",
@@ -711,23 +711,41 @@ class LiveQueryService(QueryService):
         return _budget_actual_result(rows)
 
     def _q_spec_budget(self, project_ids, **kw):
-        """Machine × discipline labour budget vs actual, in $, sourced live from ETO's spec
-        estimate (vwSpecLaborActualsVSEstimatesByHourType). HourType→discipline via the shared
-        map; SpecID >= _OVERHEAD_SPEC_MIN is Macrodyne overhead/contingency, shown separately."""
+        """Machine × discipline labour budget vs actual, in HOURS, sourced live from ETO:
+        budget = SUM(tblSpecHours.Hours), actual = SUM(vwTimecards.HourTime), both per
+        ProjectID × SpecID (machine) × HourType. These are the same tables the PM Budgets page
+        sources from, so machine rows reconcile to the per-discipline totals there. HourType→
+        discipline via the shared map; SpecID >= _OVERHEAD_SPEC_MIN is overhead/contingency."""
         pids = [int(p) for p in project_ids] if project_ids else None
         if not pids:
             return _spec_budget_result(None, {})
+        idlist = _ids_sql(pids)
         sql = f"""
-        SELECT a.ProjectID AS ProjectID, a.SpecID AS MachineCode, a.HourType AS HourType,
-               CAST(a.TotalBudgetLabor AS decimal(20,2)) AS Budget,
-               CAST(a.TotalActualLabor AS decimal(20,2)) AS Actual,
+        WITH bud AS (
+            SELECT ProjectID, SpecID, ISNULL(HourType, 0) AS HourType, SUM(Hours) AS Budget
+            FROM dbo.tblSpecHours
+            WHERE ProjectID IN ({idlist})
+            GROUP BY ProjectID, SpecID, ISNULL(HourType, 0)
+        ),
+        act AS (
+            SELECT ProjectID, SpecID, ISNULL(HourType, 0) AS HourType, SUM(HourTime) AS Actual
+            FROM dbo.vwTimecards
+            WHERE ProjectID IN ({idlist})
+            GROUP BY ProjectID, SpecID, ISNULL(HourType, 0)
+        )
+        SELECT COALESCE(b.ProjectID, a.ProjectID) AS ProjectID,
+               COALESCE(b.SpecID, a.SpecID)       AS MachineCode,
+               COALESCE(b.HourType, a.HourType)   AS HourType,
+               CAST(ISNULL(b.Budget, 0) AS decimal(20,2)) AS Budget,
+               CAST(ISNULL(a.Actual, 0) AS decimal(20,2)) AS Actual,
                p.DisplayName AS JobName, pcust.CName AS Customer
-        FROM vwSpecLaborActualsVSEstimatesByHourType a
-        LEFT JOIN tblProjects p     ON p.ProjectID = a.ProjectID
+        FROM bud b
+        FULL OUTER JOIN act a
+          ON a.ProjectID = b.ProjectID AND a.SpecID = b.SpecID AND a.HourType = b.HourType
+        LEFT JOIN tblProjects p     ON p.ProjectID = COALESCE(b.ProjectID, a.ProjectID)
         LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
-        WHERE a.ProjectID IN ({_ids_sql(pids)})
-          AND (a.TotalBudgetLabor <> 0 OR a.TotalActualLabor <> 0)
-        ORDER BY a.ProjectID, a.SpecID, a.HourType
+        WHERE (ISNULL(b.Budget, 0) <> 0 OR ISNULL(a.Actual, 0) <> 0)
+        ORDER BY ProjectID, MachineCode, HourType
         """
         return _spec_budget_result(self._df(sql), self._hourtype_map())
 
@@ -2251,18 +2269,19 @@ def _po_to_order_result(df, window_label=""):
                        _po_to_order_rows(df), cards, note)
 
 
-# ---- Machine × Discipline Budget vs Actual (ETO spec estimate, in $) ------------
-# ETO holds labour estimates per SPEC (machine) per HourType. vwSpecLaborActualsVSEstimatesByHourType
-# gives budget ($ TotalBudgetLabor) AND actual ($ TotalActualLabor) at that grain. We map HourType →
+# ---- Machine × Discipline Budget vs Actual (ETO labour, in HOURS) ---------------
+# ETO holds labour ESTIMATES per SPEC (machine) per HourType in tblSpecHours (Hours), and ACTUALS
+# per SPEC per HourType in vwTimecards (HourTime). We sum both to machine × HourType, map HourType →
 # discipline (the same rule the rest of the console uses) and roll up Project → Machine → Discipline,
-# all in dollars (self-consistent: budget and actual share one basis, no rate conversion).
+# all in HOURS. These are the SAME tables the PM Budgets page (EtoBudgetDAO) sources from, so the
+# machine rows reconcile to its per-discipline totals by construction.
 # High-numbered specs (>= _OVERHEAD_SPEC_MIN) are Macrodyne's reserved overhead/contingency buckets
 # (e.g. 899 "Management Contingency", 999 rework) — NOT real machines — so they get a separate
-# "Overhead / Contingency" band and never masquerade as a machine. A contingency line above
-# _OVERHEAD_FLAG_BUDGET is flagged (a data-entry check) rather than silently inflating the total
-# (one job carried a $4.2M / $0-actual contingency — a keying error, not real overhead).
+# "Overhead / Contingency" band and never masquerade as a machine. An overhead line whose budget
+# hours exceed the project's ENTIRE real-machine budget (a relative test, not a fixed threshold) is
+# flagged as a likely estimate-entry error rather than silently inflating the total.
 _OVERHEAD_SPEC_MIN = 700          # SpecID at/above this = overhead/contingency, not a machine
-_OVERHEAD_FLAG_BUDGET = 1_000_000.0
+_OVERHEAD_FLAG_MIN_HOURS = 1000   # floor: don't flag outsized contingency on very small projects
 _OVERHEAD_LABEL = "Overhead / Contingency"
 
 
@@ -2285,8 +2304,9 @@ def _spec_budget_subtotal(kind, label, b, a):
 
 
 def _spec_budget_rows(df, htmap):
-    """Banded rows Project → Machine → Discipline (+ overhead band), $ budget/actual. Returns
-    (rows, flagged_count)."""
+    """Banded rows Project → Machine → Discipline (+ overhead band), budget/actual in HOURS.
+    Returns (rows, flagged_count). An overhead line whose budget hours exceed the project's entire
+    real-machine budget (and a floor) is flagged as a likely estimate-entry error."""
     if df is None or df.empty:
         return [], 0
     rows, gtb, gta, flagged = [], 0.0, 0.0, 0
@@ -2315,6 +2335,8 @@ def _spec_budget_rows(df, htmap):
             else:
                 dd = mach_agg.setdefault(spec, {})
                 cur = dd.get(disc, [0.0, 0.0]); cur[0] += b; cur[1] += a; dd[disc] = cur
+        # the project's real-machine budget total — yardstick for flagging an outsized contingency
+        mtb = sum(v[0] for dd in mach_agg.values() for v in dd.values())
         ptb = pta = 0.0
         for spec in sorted(mach_agg):
             rows.append({"_kind": "l2_sub", "Machine": f"Machine {spec}"})
@@ -2326,7 +2348,7 @@ def _spec_budget_rows(df, htmap):
             rows.append({"_kind": "l2_sub", "Machine": _OVERHEAD_LABEL})
             for disc in sorted(oh_agg):
                 b, a = oh_agg[disc]
-                flag = b >= _OVERHEAD_FLAG_BUDGET
+                flag = b > mtb and b > _OVERHEAD_FLAG_MIN_HOURS
                 flagged += 1 if flag else 0
                 rows.append(_spec_budget_detail(disc, b, a, flagged=flag))
                 ptb += b; pta += a
@@ -2342,9 +2364,9 @@ def _spec_budget_result(df, htmap):
     cols = [
         QueryColumn("Machine", "Machine", "id", "left"),
         QueryColumn("Discipline", disc, "text", "left", wrap=True),
-        QueryColumn("Budget", "Budget $", "money", "right"),
-        QueryColumn("Actual", "Actual $", "money", "right"),
-        QueryColumn("Variance", "Variance $", "money", "right"),
+        QueryColumn("Budget", "Budget (hrs)", "num", "right"),
+        QueryColumn("Actual", "Actual (hrs)", "num", "right"),
+        QueryColumn("Variance", "Variance (hrs)", "num", "right"),
         QueryColumn("ConsumedPct", "Consumed %", "pct", "right", calc=True),
     ]
     rows, flagged = _spec_budget_rows(df, htmap)
@@ -2352,18 +2374,20 @@ def _spec_budget_result(df, htmap):
     tb = float(grand.get("Budget") or 0.0)
     ta = float(grand.get("Actual") or 0.0)
     over = sum(1 for r in rows if r.get("_kind") == "detail" and (r.get("ConsumedPct") or 0) > 1.0)
-    cards = [Card("Budget", _fmt_money2(tb)),
-             Card("Actual", _fmt_money2(ta)),
-             Card("Variance", _fmt_money2(tb - ta), "good" if tb - ta >= 0 else "bad"),
+    _h = lambda x: "{:,.0f}".format(x)
+    cards = [Card("Budget hrs", _h(tb)),
+             Card("Actual hrs", _h(ta)),
+             Card("Variance hrs", _h(tb - ta), "good" if tb - ta >= 0 else "bad"),
              Card("Over-budget lines", "{:,}".format(over), "warn" if over else "good"),
              Card("Flagged (check)", "{:,}".format(flagged), "bad" if flagged else "good")]
-    note = (f"Machine × {disc.lower()} labour budget vs actual, in dollars, sourced live from ETO's "
-            "spec estimate (vwSpecLaborActualsVSEstimatesByHourType): Budget = TotalBudgetLabor, "
-            "Actual = TotalActualLabor, Variance = Budget − Actual (negative = over budget), "
-            f"Consumed % = Actual ÷ Budget. Grouped {proj.lower()} → machine → {disc.lower()}. "
-            f"Specs numbered ≥ {_OVERHEAD_SPEC_MIN} are overhead/contingency buckets (e.g. 899 "
-            f"“Management Contingency”), shown as “{_OVERHEAD_LABEL}”, not as machines. A "
-            f"contingency line over {_fmt_money2(_OVERHEAD_FLAG_BUDGET)} is flagged as a likely "
+    note = (f"Machine × {disc.lower()} labour budget vs actual, in HOURS, sourced live from ETO: "
+            "Budget = SUM(tblSpecHours.Hours), Actual = SUM(vwTimecards.HourTime), per machine × "
+            f"{disc.lower()}; Variance = Budget − Actual (negative = over budget), Consumed % = "
+            "Actual ÷ Budget. These are the same tables the PM Budgets page uses, so machine rows "
+            f"reconcile to its per-{disc.lower()} totals. Grouped {proj.lower()} → machine → "
+            f"{disc.lower()}. Specs numbered ≥ {_OVERHEAD_SPEC_MIN} are overhead/contingency buckets "
+            f"(e.g. 899 “Management Contingency”), shown as “{_OVERHEAD_LABEL}”, not as machines. An "
+            "overhead line larger than the project’s entire machine budget is flagged as a likely "
             "estimate-entry error.")
     return QueryResult("spec_budget", f"Machine {disc} — Budget vs Actual", cols, rows, cards, note)
 
@@ -3107,13 +3131,13 @@ class DemoQueryService(QueryService):
             base = _DEMO_MACH.get(pid, 10)
             job, cust = f"Demo Job {pid}", "Demo Customer"
             for mc, scale in ((base, 1.0), (base + 10, 0.6)):
-                for ht, bud, act in ((25, 60000, 66000), (20, 30000, 28000), (23, 12000, 15000),
-                                     (46, 50000, 72000), (50, 18000, 6000), (8, 8000, 7500)):
+                for ht, bud, act in ((25, 600, 660), (20, 300, 280), (23, 120, 150),
+                                     (46, 500, 720), (50, 180, 60), (8, 80, 75)):
                     recs.append({"ProjectID": pid, "MachineCode": mc, "HourType": ht,
                                  "Budget": round(bud * scale, 2), "Actual": round(act * scale, 2),
                                  "JobName": job, "Customer": cust})
             recs.append({"ProjectID": pid, "MachineCode": 899, "HourType": 8,
-                         "Budget": 40000, "Actual": 0, "JobName": job, "Customer": cust})
+                         "Budget": 400, "Actual": 0, "JobName": job, "Customer": cust})
         df = pd.DataFrame(recs, columns=["ProjectID", "MachineCode", "HourType",
                                          "Budget", "Actual", "JobName", "Customer"])
         return _spec_budget_result(df, htmap)

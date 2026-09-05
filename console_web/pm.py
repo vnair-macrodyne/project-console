@@ -23,6 +23,31 @@ import datetime as _dt
 DISCIPLINE_ORDER = ["Project Management", "Mechanical Engineering", "Electrical Engineering",
                     "Hydraulic Engineering", "Manufacturing", "Other"]
 
+# Machine × discipline breakdown (same rule as the Machine Asset Re-Code report):
+# SpecID >= this is overhead/contingency (899 "Management Contingency", 999 rework), not a machine.
+_OVERHEAD_SPEC_MIN = 700
+_OVERHEAD_LABEL = "Overhead / Contingency"
+
+
+def _machines_payload(agg):
+    """agg = {machine-key: {discipline: [budget_hrs, actual_hrs]}} → ordered list for the UI
+    (real machines numeric-sorted, overhead last)."""
+    def _mkey(k):
+        return (1, 0) if k == _OVERHEAD_LABEL else (0, int(k))
+    out = []
+    for key in sorted(agg, key=_mkey):
+        dh = agg[key]
+        discs = [{"discipline": d, "budget_hours": round(dh[d][0], 2), "actual_hours": round(dh[d][1], 2)}
+                 for d in sorted(dh)]
+        out.append({
+            "machine": (_OVERHEAD_LABEL if key == _OVERHEAD_LABEL else f"Machine {key}"),
+            "overhead": key == _OVERHEAD_LABEL,
+            "budget_hours": round(sum(v[0] for v in dh.values()), 2),
+            "actual_hours": round(sum(v[1] for v in dh.values()), 2),
+            "disciplines": discs,
+        })
+    return out
+
 SHEET_GROUPING = {
     "Project Management": ["Customer Support", "Management", "Project Coordination", "Training",
                            "Boring Mill Maintenance", "Electrical Procurement", "Housekeeping",
@@ -155,9 +180,49 @@ class LivePMService(PMService):
         dao = HourTypeDisciplineDAO(self._cc())
         return dao.load_map() or HourTypeDisciplineDAO.derive_from_eto(self._ec())
 
+    def _machine_discipline(self, pid):
+        """Machine × discipline hours (budget + actual) for one project, from the SAME ETO tables
+        as the Machine Asset Re-Code report — budget = SUM(tblSpecHours.Hours), actual =
+        SUM(vwTimecards.HourTime), per SpecID × HourType→discipline — so the machine rows reconcile
+        to the per-discipline totals above. Best-effort: returns [] on any error."""
+        try:
+            htmap = self._hourtype_map()
+            cur = self._ec().cursor()
+            cur.execute("""
+                WITH bud AS (SELECT SpecID, ISNULL(HourType,0) AS HourType, SUM(Hours) AS Budget
+                             FROM dbo.tblSpecHours WHERE ProjectID = ? GROUP BY SpecID, ISNULL(HourType,0)),
+                     act AS (SELECT SpecID, ISNULL(HourType,0) AS HourType, SUM(HourTime) AS Actual
+                             FROM dbo.vwTimecards WHERE ProjectID = ? GROUP BY SpecID, ISNULL(HourType,0))
+                SELECT COALESCE(b.SpecID, a.SpecID) AS SpecID,
+                       COALESCE(b.HourType, a.HourType) AS HourType,
+                       CAST(ISNULL(b.Budget,0) AS decimal(20,2)) AS Budget,
+                       CAST(ISNULL(a.Actual,0) AS decimal(20,2)) AS Actual
+                FROM bud b FULL OUTER JOIN act a ON a.SpecID = b.SpecID AND a.HourType = b.HourType
+                WHERE (ISNULL(b.Budget,0) <> 0 OR ISNULL(a.Actual,0) <> 0)
+            """, pid, pid)
+            agg = {}
+            for spec, ht, b, a in cur.fetchall():
+                b = float(b or 0); a = float(a or 0)
+                try:
+                    s = int(spec)
+                except (TypeError, ValueError):
+                    s = None
+                key = _OVERHEAD_LABEL if (s is None or s >= _OVERHEAD_SPEC_MIN) else s
+                try:
+                    disc = htmap.get(int(ht), "Other")
+                except (TypeError, ValueError):
+                    disc = "Other"
+                slot = agg.setdefault(key, {}).get(disc, [0.0, 0.0])
+                slot[0] += b; slot[1] += a
+                agg[key][disc] = slot
+            return _machines_payload(agg)
+        except Exception:
+            return []
+
     def get_budget(self, project_id):
-        """Read-only budget straight from ETO — per-discipline hours + material + total.
-        (Budgets are ETO-sourced; the manual store is no longer authored here.)"""
+        """Read-only budget straight from ETO — per-discipline hours + material + total, plus a
+        machine × discipline breakdown. (Budgets are ETO-sourced; the manual store is no longer
+        authored here.)"""
         from console.domain.eto_budget import EtoBudgetDAO
         pid = int(project_id)
         name = self._eto_names([pid]).get(pid, "")
@@ -165,7 +230,7 @@ class LivePMService(PMService):
         b = EtoBudgetDAO(self._ec(), self._hourtype_map()).get_current(pid)
         if b is None or not b.discipline_hours:
             return {"project_id": pid, "name": name, "exists": False, "tracked": tracked,
-                    "source": "ETO", "disciplines": [], "material_total": None,
+                    "source": "ETO", "disciplines": [], "machines": [], "material_total": None,
                     "labour_hours": None}
         dh = b.discipline_hours
         disciplines = [{"discipline": d, "hours": dh[d]} for d in DISCIPLINE_ORDER if dh.get(d)]
@@ -173,7 +238,8 @@ class LivePMService(PMService):
                         if d not in DISCIPLINE_ORDER and h]
         return {"project_id": pid, "name": name, "exists": True, "tracked": tracked,
                 "source": "ETO", "read_only": True, "material_total": b.material_budget,
-                "labour_hours": b.labour_budget_hours, "disciplines": disciplines}
+                "labour_hours": b.labour_budget_hours, "disciplines": disciplines,
+                "machines": self._machine_discipline(pid)}
 
     def add_project(self, project_id, entered_by=None):
         """Bring an ETO project into the Console: bank its ETO budget as a versioned row
@@ -265,10 +331,18 @@ class DemoPMService(PMService):
                     "Manufacturing": 3000}
             mat = 1500000.0
         disciplines = [{"discipline": d, "hours": disc[d]} for d in DISCIPLINE_ORDER if disc.get(d)]
+        # canned machine × discipline split (two machines 60/40 + a small overhead line), actuals
+        # ~5% over budget, so the breakdown reconciles to the discipline totals above.
+        agg = {}
+        for d, hrs in disc.items():
+            for m, share in ((10, 0.6), (20, 0.4)):
+                agg.setdefault(m, {})[d] = [round(hrs * share, 2), round(hrs * share * 1.05, 2)]
+        if disc:
+            agg[_OVERHEAD_LABEL] = {"Project Management": [round(0.05 * sum(disc.values()), 2), 0.0]}
         return {"project_id": pid, "name": name, "exists": bool(disc), "tracked": tracked,
                 "source": "ETO", "read_only": True, "material_total": mat,
                 "labour_hours": round(sum(disc.values()), 2) if disc else None,
-                "disciplines": disciplines}
+                "disciplines": disciplines, "machines": _machines_payload(agg)}
 
     def add_project(self, project_id, entered_by=None):
         pid = int(project_id)
