@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Project Console</title>
+<title>Sextant — The Data Console</title>
 <style>
   :root{
     --brand:#1F3864; --brand-2:#2f4f8f; --ink:#1a1f2b; --muted:#6b7280;
@@ -19,6 +19,7 @@
     display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
   header .logoimg{height:42px;width:auto;border-radius:6px;display:block}
   header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .tag{opacity:.65;font-size:12px;font-style:italic;margin-left:-8px}
   header .co{opacity:.8;font-size:12.5px;margin-left:2px}
   header .badge{margin-left:auto;background:#ffd25e;color:#5c4300;font-weight:700;font-size:11px;
     padding:3px 9px;border-radius:20px;letter-spacing:.4px;display:none}
@@ -161,9 +162,10 @@
 </head>
 <body>
 <header>
-  <div class="logo" id="logo">PC</div>
+  <div class="logo" id="logo">SX</div>
   <img class="logoimg" id="logoImg" alt="" style="display:none">
-  <h1 id="product">Project Console</h1>
+  <h1 id="product">Sextant</h1>
+  <span class="tag" id="tagline">The Data Console</span>
   <span class="co" id="company"></span>
   <span class="badge" id="envBadge" style="display:none;background:#8a5a00">STAGING</span>
   <span class="badge" id="demoBadge">DEMO DATA</span>
@@ -198,7 +200,7 @@
   <div class="main">
     <div class="err" id="err"></div>
     <div class="toolbar">
-      <h2 id="rtitle">Project Console</h2>
+      <h2 id="rtitle">Sextant</h2>
       <span id="asof" style="display:none;margin-left:10px;font-size:12px;color:#6b7280;font-weight:500;white-space:nowrap"></span>
       <div class="sp"></div>
       <button class="exp" id="expx" disabled>
@@ -246,8 +248,10 @@ async function boot(){
   const b = await br.json();
   state.cfg = b;
   el('product').textContent = b.product;
+  if(el('tagline')) el('tagline').textContent = b.tagline || '';
+  document.title = b.product + (b.tagline ? ' — ' + b.tagline : '');
   el('company').textContent = b.company;
-  el('logo').textContent = (b.product||'PC').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+  el('logo').textContent = (()=>{const p=(b.product||'').trim();const w=p.split(/\s+/);return (w.length>1?w.map(x=>x[0]).join(''):p.slice(0,2)).slice(0,2).toUpperCase()||'SX';})();
   if(b.logo){
     const _img = el('logoImg');
     _img.alt = b.company || b.product || 'logo';

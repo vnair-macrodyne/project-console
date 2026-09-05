@@ -30,7 +30,8 @@ except ImportError:
 @dataclass
 class TenantProfile:
     # ── identity / branding ────────────────────────────────────────────────
-    product_name: str = "Project Console"     # white-labelable per tenant/reseller
+    product_name: str = "Sextant"             # white-labelable per tenant/reseller
+    product_tagline: str = "The Data Console"  # descriptor shown beside the wordmark
     tenant_id: str = "macrodyne"
     environment: str = "prod"                 # prod | staging (set from $CONSOLE_ENV)
     company_name: str = "Macrodyne Technologies Inc."

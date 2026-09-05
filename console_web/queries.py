@@ -3816,6 +3816,7 @@ def make_service(demo=False) -> QueryService:
 
 def branding():
     return {"product": TENANT.product_name, "company": TENANT.company_name,
+            "tagline": getattr(TENANT, "product_tagline", ""),
             "color": TENANT.header_color, "logo": getattr(TENANT, "logo_path", ""),
             "lexicon": dict(TENANT.lexicon),
             "fiscal_year_start_month": getattr(TENANT, "fiscal_year_start_month", 1),

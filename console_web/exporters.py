@@ -102,106 +102,192 @@ def _spec_xlsx(exp) -> bytes:
     raise ValueError(f"unknown spec export kind '{kind}'")
 
 
+class _Col:
+    """Lightweight column descriptor for the flattened export (decoupled from QueryColumn)."""
+    __slots__ = ("key", "label", "type", "align", "calc")
+
+    def __init__(self, key, label, ctype="text", align="left", calc=False):
+        self.key, self.label, self.type, self.align, self.calc = key, label, ctype, align, calc
+
+
+# Row kinds: bands we CARRY DOWN into leading columns, and subtotal/total rows we DROP.
+_CARRY_BANDS = ("l3_sub", "l2_sub")          # outer → inner grouping levels
+_DROP_KINDS = ("l1_sub", "grand", "l2_sub", "l3_sub")
+
+# Band-label prefixes we recognise, so a leading column gets a real name and a clean value
+# (e.g. "Machine 12" → header "Machine", value "12"). Job names etc. never match, so they're
+# left whole under a generic header rather than being mis-split.
+_KNOWN_PREFIXES = ("Project", "Machine", "Vendor", "Supplier", "Buyer", "Discipline", "Category")
+
+
+def _band_label(row, cols):
+    """The visible label carried by a band row = first non-empty cell (skipping helper keys)."""
+    for c in cols:
+        v = row.get(c.key)
+        if v not in (None, ""):
+            return v.strip() if isinstance(v, str) else str(v)
+    for k, v in row.items():
+        if not k.startswith("_") and v not in (None, ""):
+            return str(v)
+    return ""
+
+
+def _derive_group_header(label, default):
+    """('Project: 240088' → 'Project', ':'), ('Machine 12' → 'Machine', ' '), else (default, None)."""
+    if ":" in label:
+        pre = label.split(":", 1)[0].strip()
+        if pre:
+            return pre, ":"
+    first = label.split(" ", 1)[0].strip()
+    if first in _KNOWN_PREFIXES and " " in label:
+        return first, " "
+    return default, None
+
+
+def _flatten(result):
+    """Turn a (possibly banded / block-grouped) QueryResult into a flat, pivot-friendly
+    (columns, rows) pair: one row per detail line, every column populated, grouping context
+    carried into leading columns, and subtotal/total rows removed. No column merges, no
+    subheads — so users can sort, subtotal and pivot freely."""
+    cols = result.columns
+    rows = result.rows or []
+
+    present = [lv for lv in _CARRY_BANDS if any(r.get("_kind") == lv for r in rows)]
+    # Decide each carried level's leading-column header once, from its first band label.
+    meta = {}   # level -> (synthetic_key, header, separator)
+    group_cols = []
+    for i, lv in enumerate(present):
+        first = next((_band_label(r, cols) for r in rows if r.get("_kind") == lv), "")
+        hdr, sep = _derive_group_header(first, "Group" if i == 0 else f"Group {i + 1}")
+        key = f"_grp{i}"
+        meta[lv] = (key, hdr, sep)
+        group_cols.append(_Col(key, hdr, "text", "left"))
+
+    ctx = {lv: "" for lv in present}
+    flat_rows = []
+    for r in rows:
+        kind = r.get("_kind", "detail")
+        if kind in present:
+            key, hdr, sep = meta[kind]
+            lbl = _band_label(r, cols)
+            if sep and sep in lbl:
+                lbl = lbl.split(sep, 1)[1].strip()
+            ctx[kind] = lbl
+            for deeper in present[present.index(kind) + 1:]:   # reset inner levels
+                ctx[deeper] = ""
+            continue
+        if kind in _DROP_KINDS:                                 # subtotal / grand — dropped
+            continue
+        nr = {meta[lv][0]: ctx[lv] for lv in present}
+        nr.update({c.key: r.get(c.key) for c in cols})
+        flat_rows.append(nr)
+
+    # Detail columns keep their key/type; block name (if any) is folded into the label so a
+    # single header row stays unambiguous ("Labour — Budget"). A grouping column that was
+    # hoisted into a leading column (and is now blank on every detail row) is dropped as noise.
+    group_headers = {meta[lv][1] for lv in present}
+    detail_cols = []
+    for c in cols:
+        if c.label in group_headers and all(r.get(c.key) in (None, "") for r in flat_rows):
+            continue
+        detail_cols.append(_Col(c.key,
+                                (f"{c.block} — {c.label}" if getattr(c, "block", "") else c.label),
+                                c.type, c.align, getattr(c, "calc", False)))
+    return group_cols + detail_cols, flat_rows
+
+
+def _put_cell(cell, raw, ctype):
+    """Write a value with the right number format so numbers stay numeric (pivot-friendly)."""
+    if raw is None or raw == "":
+        cell.value = ""
+        return
+    if ctype in ("hours", "int", "days") and isinstance(raw, (int, float)):
+        cell.value = raw
+        cell.number_format = "#,##0"
+    elif ctype == "num" and isinstance(raw, (int, float)):
+        cell.value = raw
+        cell.number_format = "#,##0.##"
+    elif ctype == "id" and isinstance(raw, (int, float)):
+        cell.value = int(raw)
+        cell.number_format = "0"
+    elif ctype in ("money", "money2") and isinstance(raw, (int, float)):
+        cell.value = raw
+        cell.number_format = '"$"#,##0.00'
+    elif ctype == "pct" and isinstance(raw, (int, float)):
+        cell.value = raw
+        cell.number_format = "0.0%"
+    else:
+        cell.value = raw if ctype in ("text", "date") else _fmt(raw, ctype)
+
+
 def to_xlsx(result) -> bytes:
-    exp = getattr(result, "export", None)
-    if exp:
-        return _spec_xlsx(exp)
+    """Flat, pivot-friendly workbook. Sheet 'Data' is a single clean table (headers in row 1,
+    one row per line, grouping carried into leading columns, no subheads or subtotals, with an
+    AutoFilter); sheet 'Info' carries the title, source and summary cards. This intentionally
+    does NOT mimic the on-screen banded layout — it's built for sorting, subtotalling and pivots.
+    (The faithful on-prem workbook writers remain in _spec_xlsx / etospec if ever needed.)"""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
     b = branding()
     hexcolor = (b["color"] or "1F3864").lstrip("#")
+    cols, rows = _flatten(result)
+
     wb = Workbook()
     ws = wb.active
-    ws.title = result.query_id[:31] or "Result"
+    ws.title = "Data"
 
     head_fill = PatternFill("solid", fgColor=hexcolor)
-    head_font = Font(name="Helvetica", bold=True, color="FFFFFF", size=9)
-    group_fill = PatternFill("solid", fgColor=C_GROUP)
-    group_font = Font(name="Helvetica", bold=True, color="FFFFFF", size=9)
-    title_font = Font(name="Helvetica", bold=True, size=14, color=hexcolor)
-    sub_font = Font(name="Helvetica", size=9, color="808080")
-    zebra_fill = PatternFill("solid", fgColor=C_ZEBRA)
+    head_font = Font(name="Helvetica", bold=True, color="FFFFFF", size=10)
     thin = Side(style="thin", color="D9D9D9")
     border = Border(bottom=thin)
 
-    cols = result.columns
-    grouped = any(c.block for c in cols)
-    ncols = max(len(cols), 1)
-    ws.cell(1, 1, f"{b['product']} — {result.title}").font = title_font
-    ws.cell(2, 1, f"{b['company']}   ·   generated {_ts()}").font = sub_font
-    line3 = result.note or ("   ".join(f"{c.label}: {c.value}" for c in result.cards))
-    if line3:
-        ws.cell(3, 1, line3).font = sub_font
-
-    # ── group band (Executive Dashboard only) ──────────────────────────────
-    group_row = 5 if grouped else None
-    header_row = 6 if grouped else 5
-    if grouped:
-        for blk, start, span in _blocks(cols):
-            c = ws.cell(group_row, start + 1, blk or "")
-            c.font = group_font
-            c.alignment = Alignment(horizontal="center", vertical="center")
-            if blk:
-                c.fill = group_fill
-                if span > 1:
-                    ws.merge_cells(start_row=group_row, start_column=start + 1,
-                                   end_row=group_row, end_column=start + span)
-                    for k in range(1, span):
-                        ws.cell(group_row, start + 1 + k).fill = group_fill
-
     for j, col in enumerate(cols, start=1):
-        c = ws.cell(header_row, j, col.label)
+        c = ws.cell(1, j, col.label)
         c.fill = head_fill
         c.font = head_font
-        c.alignment = Alignment(horizontal=col.align, vertical="center", wrap_text=grouped)
+        c.alignment = Alignment(horizontal=col.align, vertical="center")
         c.border = border
 
-    for i, row in enumerate(result.rows, start=header_row + 1):
-        zebra = grouped and (i - header_row) % 2 == 0
+    for i, row in enumerate(rows, start=2):
         for j, col in enumerate(cols, start=1):
-            raw = row.get(col.key)
             cell = ws.cell(i, j)
-            if col.type in ("hours", "int", "days") and isinstance(raw, (int, float)):
-                cell.value = raw
-                cell.number_format = "#,##0"
-            elif col.type == "num" and isinstance(raw, (int, float)):
-                cell.value = raw
-                cell.number_format = "#,##0.##"
-            elif col.type == "id" and isinstance(raw, (int, float)):
-                cell.value = int(raw)
-                cell.number_format = "0"
-            elif col.type in ("money", "money2") and isinstance(raw, (int, float)):
-                cell.value = raw
-                cell.number_format = '"$"#,##0.00'
-            elif col.type == "pct" and isinstance(raw, (int, float)):
-                cell.value = raw
-                cell.number_format = "0.0%"
-            else:
-                cell.value = _fmt(raw, col.type) if col.type not in ("text", "date") else (raw or "")
+            _put_cell(cell, row.get(col.key), col.type)
             cell.alignment = Alignment(horizontal=col.align)
-            calc = getattr(col, "calc", False)      # calculated-live cells render italic
-            if grouped or calc:
-                cell.font = Font(name="Helvetica", size=9, italic=calc)
-            tl = _tl_hex(col.type, raw)
-            if tl:
-                cell.fill = PatternFill("solid", fgColor=tl)
-            elif zebra:
-                cell.fill = zebra_fill
 
     for j, col in enumerate(cols, start=1):
-        if grouped:
-            w = {"text": 22, "date": 12, "pct": 11, "money": 14, "money2": 14, "int": 9, "days": 10}.get(col.type, 11)
-        else:
-            w = min(max(len(col.label) + 2, 12), 34)
+        w = {"text": 20, "date": 12, "pct": 10, "money": 14, "money2": 14,
+             "int": 10, "days": 10, "hours": 11, "num": 11, "id": 10}.get(col.type, 12)
+        w = max(w, min(len(col.label) + 3, 34))
         ws.column_dimensions[get_column_letter(j)].width = w
-    # freeze header (+ the 3 leading id columns for the exec board)
-    ws.freeze_panes = ws.cell(header_row + 1, 4 if grouped else 1)
-    if grouped:
-        ws.page_setup.orientation = "landscape"
-        ws.page_setup.fitToWidth = 1
-        ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    last_col = get_column_letter(max(len(cols), 1))
+    last_row = max(len(rows) + 1, 1)
+    ws.auto_filter.ref = f"A1:{last_col}{last_row}"
+    ws.freeze_panes = "A2"
+
+    # ── Info sheet: title, source, generated stamp, notes, summary cards ────────
+    info = wb.create_sheet("Info")
+    title_font = Font(name="Helvetica", bold=True, size=14, color=hexcolor)
+    sub_font = Font(name="Helvetica", size=10, color="808080")
+    lbl_font = Font(name="Helvetica", bold=True, size=10)
+    info.cell(1, 1, f"{b['product']} — {result.title}").font = title_font
+    info.cell(2, 1, f"{b['company']}   ·   generated {_ts()}").font = sub_font
+    r = 4
+    if result.cards:
+        for card in result.cards:
+            info.cell(r, 1, card.label).font = lbl_font
+            info.cell(r, 2, str(card.value))
+            r += 1
+        r += 1
+    if result.note:
+        c = info.cell(r, 1, result.note)
+        c.font = sub_font
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        info.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+    info.column_dimensions["A"].width = 22
+    info.column_dimensions["B"].width = 40
 
     buf = io.BytesIO()
     wb.save(buf)

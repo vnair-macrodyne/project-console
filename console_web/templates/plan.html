@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Project Console — Project Plan</title>
+<title>Sextant — Project Plan</title>
 <style>
   :root{--brand:#1F3864;--brand-2:#2f4f8f;--ink:#1a1f2b;--muted:#6b7280;--line:#e3e7ee;
         --panel:#f7f9fc;--entry:#FFF7DB;--good:#137333;--good-bg:#e6f4ea;--bad:#b3261e;--bad-bg:#fce8e6;}
@@ -41,8 +41,9 @@
 </head>
 <body>
 <header>
-  <div class="logo" id="logo">PC</div>
-  <h1 id="product">Project Console</h1>
+  <div class="logo" id="logo">SX</div>
+  <h1 id="product">Sextant</h1>
+  <span id="tagline" style="opacity:.65;font-size:12px;font-style:italic;margin-left:-8px">The Data Console</span>
   <span class="co" id="company"></span>
   <span class="demo" id="demoBadge" style="display:none">DEMO DATA</span>
   <a class="back" href="/">← Dashboard</a>
@@ -125,8 +126,10 @@ async function boot(){
     el('by').value=state.me.user; }
   state.readonly = ({viewer:1,pm:2,admin:3}[role]||1) < 2;
   try{ const b=await (await fetch('/api/branding')).json();
-    el('product').textContent=b.product||'Project Console'; el('company').textContent=b.company||'';
-    el('logo').textContent=(b.product||'PC').slice(0,2).toUpperCase();
+    el('product').textContent=b.product||'Sextant'; el('company').textContent=b.company||'';
+    if(el('tagline')) el('tagline').textContent=b.tagline||'';
+    document.title=(b.product||'Sextant')+' — Project Plan';
+    el('logo').textContent=(b.product||'SX').slice(0,2).toUpperCase();
     if(b.demo) el('demoBadge').style.display='inline-block'; }catch(e){}
   buildDiscInputs();
   await loadProjects();

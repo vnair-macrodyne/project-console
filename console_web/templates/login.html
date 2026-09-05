@@ -34,6 +34,7 @@
       {% if logo %}<img class="logoimg" src="{{ logo }}" alt="{{ company }}">{% else %}<div class="logo">{{ product[:2]|upper }}</div>{% endif %}
       <h1>{{ product }}{% if environment == 'staging' %}<span class="env">STAGING</span>{% endif %}</h1>
     </div>
+    {% if tagline %}<div class="co" style="font-style:italic;opacity:.7">{{ tagline }}</div>{% endif %}
     {% if not logo %}<div class="co">{{ company }}</div>{% endif %}
     <label for="u">Domain username</label>
     <input id="u" name="username" autocomplete="username" autofocus placeholder="e.g. jsmith">

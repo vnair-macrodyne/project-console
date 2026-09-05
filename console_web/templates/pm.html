@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Project Console — Budgets</title>
+<title>Sextant — Budgets</title>
 <style>
   :root{--brand:#1F3864;--brand-2:#2f4f8f;--ink:#1a1f2b;--muted:#6b7280;--line:#e3e7ee;
         --panel:#f7f9fc;--good:#137333;--good-bg:#e6f4ea;--bad:#b3261e;--bad-bg:#fce8e6;}
@@ -48,8 +48,9 @@
 </head>
 <body>
 <header>
-  <div class="logo" id="logo">PC</div>
-  <h1 id="product">Project Console</h1>
+  <div class="logo" id="logo">SX</div>
+  <h1 id="product">Sextant</h1>
+  <span id="tagline" style="opacity:.65;font-size:12px;font-style:italic;margin-left:-8px">The Data Console</span>
   <span class="co" id="company"></span>
   <span class="demo" id="demoBadge" style="display:none">DEMO DATA</span>
   <a class="back" href="/">← Dashboard</a>
@@ -95,8 +96,10 @@ async function boot(){
     `<span style="color:#c7d4ee;font-size:13px;margin-left:8px">${state.me.user} · ${role} · <a href="/logout" style="color:#fff;text-decoration:underline">Sign out</a></span>`); }
   state.canAdd = ({viewer:1,pm:2,admin:3}[role]||1) >= 2;
   const s=await (await fetch('/api/pm/scaffold')).json();
-  if(s.branding){ el('product').textContent=s.branding.product||'Project Console';
-    el('company').textContent=s.branding.company||''; el('logo').textContent=(s.branding.product||'PC').slice(0,2).toUpperCase(); }
+  if(s.branding){ el('product').textContent=s.branding.product||'Sextant';
+    if(el('tagline')) el('tagline').textContent=s.branding.tagline||'';
+    document.title=(s.branding.product||'Sextant')+' — Budgets';
+    el('company').textContent=s.branding.company||''; el('logo').textContent=(s.branding.product||'SX').slice(0,2).toUpperCase(); }
   if(s.demo) el('demoBadge').style.display='inline-block';
   await loadProjects();
 }

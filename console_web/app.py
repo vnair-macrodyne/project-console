@@ -166,6 +166,7 @@ def login_page():
             app.logger.exception("entra begin")
             return render_template("login.html", error="Single sign-on is not configured. Contact IT.",
                                    product=TENANT.product_name, company=TENANT.company_name,
+                                   tagline=getattr(TENANT, "product_tagline", ""),
                                    logo=getattr(TENANT, "logo_path", ""),
                                    environment=getattr(TENANT, "environment", "prod"), next=nxt)
     if request.method == "POST":
@@ -184,6 +185,7 @@ def login_page():
         err = err or "Invalid username or password."
     return render_template("login.html", error=err, product=TENANT.product_name,
                            company=TENANT.company_name,
+                           tagline=getattr(TENANT, "product_tagline", ""),
                            logo=getattr(TENANT, "logo_path", ""),
                            environment=getattr(TENANT, "environment", "prod"), next=nxt)
 
