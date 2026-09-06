@@ -49,6 +49,11 @@
   .msg.err{background:var(--bad-bg);color:var(--bad);display:block}
   .hint{font-size:12px;color:var(--muted);margin:2px 0 0}
   .demo{background:#ffce44;color:#3a2f00;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
+  .utag{display:inline-block;margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.03em;
+        background:#fff3d6;color:#8a5a00;border:1px solid #e7c766;border-radius:20px;padding:1px 8px}
+  .ubanner{background:#fff8e6;border:1px solid #e7c766;color:#8a5a00;border-radius:9px;
+           padding:9px 12px;font-size:12.5px;margin-bottom:10px}
+  table.bud tr.unb td{background:#fffaf0}
 </style>
 </head>
 <body>
@@ -93,6 +98,7 @@
         <h2 style="margin:0">By Machine &times; Discipline</h2>
         <span class="src">SOURCE: ETO &middot; hours</span>
       </div>
+      <p class="ubanner" id="ubanner" style="display:none"></p>
       <table class="bud" id="machineTable"></table>
     </div>
   </div>
@@ -158,9 +164,21 @@ function renderBudget(b){
     el('machineCard').style.display='none';
     el('view').style.display='block'; return;
   }
-  let rows='<tr><th>Discipline</th><th class="num">Budget Hours</th></tr>';
-  (b.disciplines||[]).forEach(d=>{ rows+=`<tr><td>${d.discipline}</td><td class="num">${fmt(d.hours)}</td></tr>`; });
-  rows+=`<tr class="tot"><td>Total Labour</td><td class="num">${fmt(b.labour_hours)}</td></tr>`;
+  let rows='<tr><th>Discipline</th><th class="num">Budget (hrs)</th><th class="num">% Done</th>'+
+           '<th class="num">Earned (hrs)</th><th class="num">Actual (hrs)</th><th class="num">CPI</th></tr>';
+  let tE=0,tA=0;
+  (b.disciplines||[]).forEach(d=>{
+    rows+=`<tr><td>${d.discipline}</td><td class="num">${fmt(d.hours)}</td>`+
+          `<td class="num">${pctTxt(d.pct_done)}</td>`+
+          `<td class="num">${d.earned_hours!=null?fmt(d.earned_hours):'—'}</td>`+
+          `<td class="num">${d.actual_hours!=null?fmt(d.actual_hours):'—'}</td>`+
+          `<td class="num ${cpiClass(d.cpi)}">${cpiTxt(d.cpi)}</td></tr>`;
+    tE+=d.earned_hours||0; tA+=d.actual_hours||0;
+  });
+  const tcpi=tA?tE/tA:null;
+  rows+=`<tr class="tot"><td>Total Labour</td><td class="num">${fmt(b.labour_hours)}</td><td class="num"></td>`+
+        `<td class="num">${fmt(tE)}</td><td class="num">${fmt(tA)}</td>`+
+        `<td class="num ${cpiClass(tcpi)}">${cpiTxt(tcpi)}</td></tr>`;
   t.innerHTML=rows;
   el('totLabour').textContent=fmt(b.labour_hours);
   el('totMaterial').textContent=money(b.material_total);
@@ -170,33 +188,54 @@ function renderBudget(b){
 
 function pctClass(p){ return p==null?'':(p>1.0?'over':(p>=0.9?'warn':'')); }
 function pctTxt(p){ return p==null?'—':(p*100).toFixed(0)+'%'; }
+// CPI = earned ÷ actual: >=1 on plan, <1 burning faster than earning (amber <1, red <0.9).
+function cpiClass(c){ return c==null?'':(c<0.9?'over':(c<1.0?'warn':'')); }
+function cpiTxt(c){ return c==null?'—':Number(c).toFixed(2); }
 
 function renderMachines(b){
   const card=el('machineCard'), t=el('machineTable');
   const ms=b.machines||[];
   if(!ms.length){ card.style.display='none'; return; }
   let rows='<tr><th>Machine</th><th>Discipline</th><th class="num">Budget (hrs)</th>'+
-           '<th class="num">Actual (hrs)</th><th class="num">Variance</th><th class="num">Consumed</th></tr>';
-  let gB=0,gA=0;
+           '<th class="num">Actual (hrs)</th><th class="num">Variance</th><th class="num">Consumed</th>'+
+           '<th class="num">% Done</th><th class="num">Earned (hrs)</th><th class="num">CPI</th></tr>';
+  let gB=0,gA=0,gE=0,nUnb=0;
   ms.forEach(m=>{
-    rows+=`<tr class="mh"><td colspan="6">${m.machine}</td></tr>`;
+    const mtag = m.unbudgeted ? '<span class="utag">⚠ unbudgeted — add to plan</span>' : '';
+    rows+=`<tr class="mh"><td colspan="9">${m.machine}${mtag}</td></tr>`;
     (m.disciplines||[]).forEach(d=>{
       const p=d.budget_hours?d.actual_hours/d.budget_hours:null;
-      rows+=`<tr><td></td><td>${d.discipline}</td><td class="num">${fmt(d.budget_hours)}</td>`+
+      if(d.unbudgeted) nUnb++;
+      const dtag = d.unbudgeted ? ' <span class="utag">unbudgeted</span>' : '';
+      rows+=`<tr class="${d.unbudgeted?'unb':''}"><td></td><td>${d.discipline}${dtag}</td><td class="num">${fmt(d.budget_hours)}</td>`+
             `<td class="num">${fmt(d.actual_hours)}</td><td class="num">${fmt(d.budget_hours-d.actual_hours)}</td>`+
-            `<td class="num ${pctClass(p)}">${pctTxt(p)}</td></tr>`;
+            `<td class="num ${pctClass(p)}">${pctTxt(p)}</td>`+
+            `<td class="num">${pctTxt(d.pct_done)}</td>`+
+            `<td class="num">${d.earned_hours!=null?fmt(d.earned_hours):'—'}</td>`+
+            `<td class="num ${cpiClass(d.cpi)}">${cpiTxt(d.cpi)}</td></tr>`;
     });
     const mp=m.budget_hours?m.actual_hours/m.budget_hours:null;
     rows+=`<tr class="ms"><td></td><td>Subtotal</td><td class="num">${fmt(m.budget_hours)}</td>`+
           `<td class="num">${fmt(m.actual_hours)}</td><td class="num">${fmt(m.budget_hours-m.actual_hours)}</td>`+
-          `<td class="num ${pctClass(mp)}">${pctTxt(mp)}</td></tr>`;
-    gB+=m.budget_hours||0; gA+=m.actual_hours||0;
+          `<td class="num ${pctClass(mp)}">${pctTxt(mp)}</td>`+
+          `<td class="num">${pctTxt(m.pct_done)}</td>`+
+          `<td class="num">${m.earned_hours!=null?fmt(m.earned_hours):'—'}</td>`+
+          `<td class="num ${cpiClass(m.cpi)}">${cpiTxt(m.cpi)}</td></tr>`;
+    gB+=m.budget_hours||0; gA+=m.actual_hours||0; gE+=m.earned_hours||0;
   });
-  const gp=gB?gA/gB:null;
+  const gp=gB?gA/gB:null, gcpi=gA?gE/gA:null;
   rows+=`<tr class="tot"><td></td><td>All Machines</td><td class="num">${fmt(gB)}</td>`+
         `<td class="num">${fmt(gA)}</td><td class="num">${fmt(gB-gA)}</td>`+
-        `<td class="num ${pctClass(gp)}">${pctTxt(gp)}</td></tr>`;
+        `<td class="num ${pctClass(gp)}">${pctTxt(gp)}</td>`+
+        `<td class="num"></td><td class="num">${fmt(gE)}</td>`+
+        `<td class="num ${cpiClass(gcpi)}">${cpiTxt(gcpi)}</td></tr>`;
   t.innerHTML=rows; card.style.display='block';
+  const ub=el('ubanner');
+  if(nUnb>0){ ub.style.display='block';
+    ub.innerHTML=`⚠ ${nUnb} machine&times;discipline ${nUnb===1?'line has':'lines have'} hours logged but no budget — `+
+      `the plan changed and these were never budgeted. They still count toward completeness (weighted by actual hours), `+
+      `but should be added to the budget in ETO. Earned/CPI can't be computed until they are.`; }
+  else { ub.style.display='none'; }
 }
 
 el('addBtn').onclick=async()=>{

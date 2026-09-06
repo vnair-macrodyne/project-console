@@ -38,6 +38,19 @@
   .hint{font-size:12px;color:var(--muted);margin:2px 0 0}
   .demo{background:#ffce44;color:#3a2f00;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
   .note{background:#eef3ff;border:1px solid #d5e0f6;border-radius:9px;padding:10px 12px;font-size:12.5px;color:#33415c;margin-top:8px}
+  .mdmach{margin-bottom:8px}
+  .mdmach .mh{font-weight:700;color:var(--brand);margin:12px 0 4px}
+  table.mdt{width:100%;border-collapse:collapse;font-size:13px}
+  table.mdt th{text-align:left;background:#eef3ff;color:var(--brand);padding:6px 10px;font-weight:600;font-size:12px}
+  table.mdt th.num,table.mdt td.num{text-align:right;font-variant-numeric:tabular-nums}
+  table.mdt td{padding:6px 10px;border-bottom:1px solid var(--line)}
+  table.mdt input{width:80px;text-align:right;border:1px solid var(--line);border-radius:6px;padding:5px 7px;background:var(--entry)}
+  td.cpi.bad{color:#b3261e;font-weight:700}td.cpi.warn{color:#8a5a00;font-weight:600}
+  table.mdt tr.unb td{background:#fffaf0}
+  .utag{display:inline-block;margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.03em;
+        background:#fff3d6;color:#8a5a00;border:1px solid #e7c766;border-radius:20px;padding:1px 8px}
+  .mdbanner{background:#fff8e6;border:1px solid #e7c766;color:#8a5a00;border-radius:9px;
+            padding:9px 12px;font-size:12.5px;margin:0 0 10px}
 </style>
 </head>
 <body>
@@ -76,12 +89,15 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>% Complete per Discipline</h2>
-      <p class="hint">Declare progress for each discipline — this is the one judgement the plan
-        needs. The dashboard then <b>calculates</b> the run-out from it (Carpedia: Estimate at
-        Completion = actual hours ÷ % complete); you no longer type run-out by hand.</p>
-      <div class="row" id="discGrid" style="margin-top:10px"></div>
+    <div class="card" id="mdCard">
+      <h2>Progress — Machine &times; Discipline</h2>
+      <p class="hint">Declare % complete for each machine &times; discipline cell, with its budget and
+        actual hours shown. Earned hours (= % &times; budget) and CPI (earned &divide; actual) update
+        live. This is the one judgement the plan needs: the per-discipline % the dashboard run-out
+        uses is <b>rolled up</b> from these cells — no separate entry. A machine worked but never
+        budgeted is flagged so the plan can be corrected.</p>
+      <p class="mdbanner" id="mdBanner" style="display:none"></p>
+      <div id="mdGrid" style="margin-top:10px"></div>
     </div>
 
     <div class="card">
@@ -111,13 +127,59 @@
 <script>
 const el=id=>document.getElementById(id);
 const state={};
-const DISCIPLINES=["Project Management","Mechanical Engineering","Electrical Engineering",
-                   "Hydraulic Engineering","Manufacturing","Other"];
-function buildDiscInputs(){
-  el('discGrid').innerHTML = DISCIPLINES.map((d,i)=>
-    `<div class="fld"><label>${d}</label><div class="suffix">`+
-    `<input type="number" step="1" min="0" max="100" id="disc_${i}" class="entry" style="width:110px">`+
-    `<span class="u">%</span></div></div>`).join('');
+function fmtN(n){ return (n==null?0:n).toLocaleString(undefined,{maximumFractionDigits:0}); }
+
+// Machine × Discipline grid — a % input per cell, with budget & actual shown; earned/CPI live.
+function buildMDGrid(machines){
+  state.cells=[];
+  const host=el('mdGrid');
+  if(!machines || !machines.length){ host.innerHTML='<p class="hint">No budgeted machines found for this project.</p>'; return; }
+  let html='', nUnb=0;
+  machines.forEach(m=>{
+    const munb = m.disciplines.some(d=>(!d.budget_hours && d.actual_hours>0));
+    const mtag = munb ? '<span class="utag">⚠ unbudgeted — add to plan</span>' : '';
+    html+=`<div class="mdmach"><div class="mh">${m.machine}${mtag}</div>`+
+      `<table class="mdt"><tr><th>Discipline</th><th class="num">Budget (hrs)</th>`+
+      `<th class="num">Actual (hrs)</th><th class="num">% Complete</th>`+
+      `<th class="num">Earned (hrs)</th><th class="num">CPI</th></tr>`;
+    (m.disciplines||[]).forEach((d,i)=>{
+      const iid=`md_${m.spec}_${i}`;
+      state.cells.push({spec:m.spec, discipline:d.discipline, id:iid});
+      const v=(d.pct!=null?d.pct:'');
+      const unb=(!d.budget_hours && d.actual_hours>0);
+      if(unb) nUnb++;
+      const dtag = unb ? ' <span class="utag">unbudgeted</span>' : '';
+      html+=`<tr class="${unb?'unb':''}"><td>${d.discipline}${dtag}</td>`+
+        `<td class="num">${fmtN(d.budget_hours)}</td>`+
+        `<td class="num">${fmtN(d.actual_hours)}</td>`+
+        `<td class="num"><input type="number" step="1" min="0" max="100" id="${iid}" value="${v}" `+
+        `data-b="${d.budget_hours||0}" data-a="${d.actual_hours||0}" oninput="recalc('${iid}')"></td>`+
+        `<td class="num" id="${iid}_e">—</td><td class="num cpi" id="${iid}_c">—</td></tr>`;
+    });
+    html+=`</table></div>`;
+  });
+  el('mdBanner').style.display = nUnb ? 'block' : 'none';
+  if(nUnb) el('mdBanner').innerHTML=`⚠ ${nUnb} machine&times;discipline ${nUnb===1?'line has':'lines have'} `+
+    `hours logged but no budget — the plan changed and these were never budgeted. Enter their % to `+
+    `count them toward completeness; add the budget in ETO so earned/CPI can be computed.`;
+  host.innerHTML=html;
+  (state.cells||[]).forEach(c=>recalc(c.id));
+}
+
+function recalc(iid){
+  const inp=el(iid); if(!inp) return;
+  const b=parseFloat(inp.dataset.b||'0'), a=parseFloat(inp.dataset.a||'0');
+  const v=inp.value!==''?parseFloat(inp.value):null;
+  const eCell=el(iid+'_e'), cCell=el(iid+'_c');
+  cCell.className='num cpi';
+  // No budget → nothing to earn against; earned/CPI are N/A (the cell is flagged unbudgeted).
+  if(!b){ eCell.textContent='—'; cCell.textContent='—'; return; }
+  if(v==null||isNaN(v)){ eCell.textContent='—'; cCell.textContent='—'; return; }
+  const earned=(v/100)*b;
+  eCell.textContent=earned.toLocaleString(undefined,{maximumFractionDigits:0});
+  if(a>0){ const cpi=earned/a; cCell.textContent=cpi.toFixed(2);
+    cCell.className='num cpi '+(cpi<0.9?'bad':(cpi<1.0?'warn':'')); }
+  else { cCell.textContent='—'; }
 }
 
 async function boot(){
@@ -137,7 +199,6 @@ async function boot(){
       _img.onerror=()=>{ _img.style.display='none'; el('logo').style.display=''; };
       _img.src=b.logo; }
     if(b.demo) el('demoBadge').style.display='inline-block'; }catch(e){}
-  buildDiscInputs();
   await loadProjects();
   if(state.readonly){
     el('by').closest('.card').insertAdjacentHTML('beforeend',
@@ -172,8 +233,7 @@ el('proj').onchange=async()=>{
   el('labour_runout').value=(b.labour_runout!=null?b.labour_runout:'');
   el('material_runout').value=(b.material_runout!=null?b.material_runout:'');
   el('rework_threshold').value=(b.rework_threshold!=null?b.rework_threshold:'');
-  const dp=b.discipline_progress||{};
-  DISCIPLINES.forEach((d,i)=>{ const v=dp[d]; el('disc_'+i).value=(v!=null?v:''); });
+  buildMDGrid(b.machines||[]);
   el('form').style.display='block';
 };
 
@@ -182,11 +242,11 @@ el('saveBtn').onclick=async()=>{
   const by=el('by').value.trim();
   if(!by){ showMsg('err','Enter your name in “Entered by” before saving.'); return; }
   const val=id=>{ const v=el(id).value; return v!==''?parseFloat(v):null; };
-  const dp={}; DISCIPLINES.forEach((d,i)=>{ dp[d]=val('disc_'+i); });
+  const cells=(state.cells||[]).map(c=>({spec:c.spec, discipline:c.discipline, pct:val(c.id)}));
   const payload={ project_id:Number(pid), entered_by:by,
     planned_ship:el('planned_ship').value||null,
     labour_runout:val('labour_runout'), material_runout:val('material_runout'),
-    rework_threshold:val('rework_threshold'), discipline_progress:dp };
+    rework_threshold:val('rework_threshold'), machine_discipline_progress:cells };
   el('saveBtn').disabled=true; showMsg('', 'Saving…');
   try{
     const r=await fetch('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

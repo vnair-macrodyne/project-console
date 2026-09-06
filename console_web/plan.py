@@ -23,6 +23,10 @@ import datetime as _dt
 DISCIPLINES = ["Project Management", "Mechanical Engineering", "Electrical Engineering",
                "Hydraulic Engineering", "Manufacturing", "Other"]
 
+# SpecID >= this is overhead/contingency (not a real machine) — same rule as pm.py / the
+# Machine Asset Re-Code report. Machines below it get a per-machine % complete input.
+_OVERHEAD_SPEC_MIN = 700
+
 
 # ── week keying (matches the workbook's Year-Week convention, e.g. 202629) ──────
 def excel_weeknum(d):
@@ -118,7 +122,8 @@ class LivePlanService(PlanService):
                 "planned_ship": None, "planned_ship_default": False,
                 "labour_runout": None, "material_runout": None,   # optional PM overrides only
                 "rework_threshold": None, "week": None,
-                "discipline_progress": {d: None for d in DISCIPLINES}}
+                "discipline_progress": {d: None for d in DISCIPLINES},
+                "machines": []}
         try:
             cur = self._cc().cursor()
             cur.execute("SELECT TOP 1 PlannedShipDate, LabourRunout, "
@@ -166,7 +171,99 @@ class LivePlanService(PlanService):
                         base["planned_ship_default"] = True
             except Exception:
                 pass
+        # MACHINE × DISCIPLINE grid — every budgeted cell (machine + overhead group) with its
+        # budget & actual hours from ETO and the latest week's entered % complete. This is the
+        # superset of the budget-vs-actual breakdown; the PM declares progress at the cell.
+        agg = self._md_agg(pid)
+        prog = self._md_progress(pid)          # {(SpecID, discipline): form %}
+        base["machines"] = self._grid(agg, prog)
+        if any(d["pct"] is not None for m in base["machines"] for d in m["disciplines"]):
+            base["exists"] = True
         return base
+
+    def _hourtype_map(self):
+        """{HourType: discipline} — store table if seeded, else derived from ETO."""
+        from console.domain.hourtype_map import HourTypeDisciplineDAO
+        dao = HourTypeDisciplineDAO(self._cc())
+        return dao.load_map() or HourTypeDisciplineDAO.derive_from_eto(self._ec())
+
+    def _md_agg(self, pid):
+        """{SpecID_key: {discipline: [budget_hrs, actual_hrs]}} from ETO — budget =
+        SUM(tblSpecHours.Hours), actual = SUM(vwTimecards.HourTime), per SpecID × HourType→
+        discipline (SAME tables as the Budgets machine breakdown, so they reconcile). Overhead
+        specs (>= 700) are folded into the sentinel key 0 (the Overhead / Contingency group)."""
+        agg = {}
+        try:
+            htmap = self._hourtype_map()
+            cur = self._ec().cursor()
+            cur.execute("""
+                WITH bud AS (SELECT SpecID, ISNULL(HourType,0) AS HourType, SUM(Hours) AS Budget
+                             FROM dbo.tblSpecHours WHERE ProjectID = ? GROUP BY SpecID, ISNULL(HourType,0)),
+                     act AS (SELECT SpecID, ISNULL(HourType,0) AS HourType, SUM(HourTime) AS Actual
+                             FROM dbo.vwTimecards WHERE ProjectID = ? GROUP BY SpecID, ISNULL(HourType,0))
+                SELECT COALESCE(b.SpecID, a.SpecID) AS SpecID,
+                       COALESCE(b.HourType, a.HourType) AS HourType,
+                       CAST(ISNULL(b.Budget,0) AS decimal(20,2)) AS Budget,
+                       CAST(ISNULL(a.Actual,0) AS decimal(20,2)) AS Actual
+                FROM bud b FULL OUTER JOIN act a ON a.SpecID = b.SpecID AND a.HourType = b.HourType
+                WHERE (ISNULL(b.Budget,0) <> 0 OR ISNULL(a.Actual,0) <> 0)
+            """, pid, pid)
+            for spec, ht, b, a in cur.fetchall():
+                b = float(b or 0); a = float(a or 0)
+                try:
+                    s = int(spec)
+                except (TypeError, ValueError):
+                    s = None
+                key = 0 if (s is None or s >= _OVERHEAD_SPEC_MIN) else s
+                try:
+                    disc = htmap.get(int(ht), "Other")
+                except (TypeError, ValueError):
+                    disc = "Other"
+                slot = agg.setdefault(key, {}).get(disc, [0.0, 0.0])
+                slot[0] += b; slot[1] += a
+                agg[key][disc] = slot
+        except Exception:
+            pass
+        return agg
+
+    @staticmethod
+    def _grid(agg, prog):
+        """Shape the agg + entered % into the ordered machine grid (real machines numeric-sorted,
+        overhead group last)."""
+        def _mkey(k):
+            return (1, 0) if k == 0 else (0, k)
+        out = []
+        for spec in sorted(agg, key=_mkey):
+            dh = agg[spec]
+            discs = [{"discipline": d, "budget_hours": round(dh[d][0], 2),
+                      "actual_hours": round(dh[d][1], 2), "pct": prog.get((spec, d))}
+                     for d in sorted(dh)]
+            out.append({
+                "spec": spec,
+                "machine": ("Overhead / Contingency" if spec == 0 else f"Machine {spec}"),
+                "overhead": spec == 0,
+                "budget_hours": round(sum(v[0] for v in dh.values()), 2),
+                "actual_hours": round(sum(v[1] for v in dh.values()), 2),
+                "disciplines": discs,
+            })
+        return out
+
+    def _md_progress(self, pid):
+        """{(SpecID(int), discipline): %complete as a form percentage} — latest week per cell."""
+        out = {}
+        try:
+            cur = self._cc().cursor()
+            cur.execute(
+                "SELECT SpecID, Discipline, PercentComplete FROM ("
+                "  SELECT SpecID, Discipline, PercentComplete,"
+                "         ROW_NUMBER() OVER (PARTITION BY SpecID, Discipline ORDER BY YearWeekKey DESC) rn"
+                "  FROM Reporting.tblProjectMachineDisciplineProgress"
+                "  WHERE ProjectID = ? AND PercentComplete IS NOT NULL) t WHERE rn = 1", pid)
+            for s, d, pct in cur.fetchall():
+                out[(int(s), str(d))] = _pct_out(pct)
+        except Exception:
+            pass
+        return out
 
     def save_plan(self, payload):
         pid = int(payload["project_id"])
@@ -204,8 +301,13 @@ class LivePlanService(PlanService):
                 carry.get("LLTPReleasedLate"), carry.get("LLTPOrderedLate"),
                 carry.get("LLTPDeliveredLate"), carry.get("PartsReleasedLate"),
                 carry.get("PartsOrderedLate"), carry.get("Rank"), carry.get("ReRank"))
+        # % complete is captured at the MACHINE × DISCIPLINE cell (the finest budgeted unit).
+        cells = payload.get("machine_discipline_progress") or []
+        self._save_md_progress(cur, pid, fy, wk, key, by, cells)
+        # The per-discipline % the dashboard / scorecard run-out reads is DERIVED (budget-weighted)
+        # from those cells and written here, so the PM enters progress once — at the cell.
         self._save_discipline_progress(cur, pid, fy, wk, key, by,
-                                       payload.get("discipline_progress") or {})
+                                       self._derive_discipline_pct(pid, cells))
         conn.commit()
         return {"ok": True, "project_id": pid, "week": key,
                 "planned_ship": _iso(ship)}
@@ -228,6 +330,60 @@ class LivePlanService(PlanService):
                             "(ProjectID, FiscalYear, WeekNo, YearWeekKey, Discipline, "
                             " PercentComplete, EnteredBy, CapturedAt) VALUES (?,?,?,?,?,?,?,GETDATE())",
                             pid, fy, wk, key, disc, frac, by)
+
+    def _save_md_progress(self, cur, pid, fy, wk, key, by, cells):
+        """Upsert per machine×discipline % complete for the current week. cells is a list of
+        {spec, discipline, pct}; a blank pct clears that cell (NULL)."""
+        for c in cells:
+            try:
+                spec = int(c.get("spec"))
+            except (TypeError, ValueError):
+                continue
+            disc = str(c.get("discipline") or "").strip()
+            if not disc:
+                continue
+            frac = _frac_pct(c.get("pct"))
+            cur.execute("SELECT ProgressID FROM Reporting.tblProjectMachineDisciplineProgress "
+                        "WHERE ProjectID = ? AND YearWeekKey = ? AND SpecID = ? AND Discipline = ?",
+                        pid, key, spec, disc)
+            r = cur.fetchone()
+            if r:
+                cur.execute("UPDATE Reporting.tblProjectMachineDisciplineProgress "
+                            "SET PercentComplete = ?, EnteredBy = ?, CapturedAt = GETDATE() "
+                            "WHERE ProgressID = ?", frac, by, int(r[0]))
+            else:
+                cur.execute("INSERT INTO Reporting.tblProjectMachineDisciplineProgress "
+                            "(ProjectID, FiscalYear, WeekNo, YearWeekKey, SpecID, Discipline, "
+                            " PercentComplete, EnteredBy, CapturedAt) VALUES (?,?,?,?,?,?,?,?,GETDATE())",
+                            pid, fy, wk, key, spec, disc, frac, by)
+
+    def _derive_discipline_pct(self, pid, cells):
+        """Roll the cell %s UP to a per-discipline % — COMPLETENESS-weighted (Σ %×weight ÷ Σ weight),
+        where a cell's weight is its budget, or its actual hours when the cell is unbudgeted
+        (worked but never budgeted) — so off-plan work still counts. Matches the Budgets-page
+        roll-up. Written to tblProjectDisciplineProgress (the run-out source) so the PM enters
+        progress once, at the cell. Returns {discipline: 0..1 fraction}."""
+        agg = self._md_agg(pid)                        # {spec: {disc: [budget, actual]}}
+        cell_frac = {}
+        for c in cells:
+            try:
+                spec = int(c.get("spec"))
+            except (TypeError, ValueError):
+                continue
+            disc = str(c.get("discipline") or "").strip()
+            f = _frac_pct(c.get("pct"))
+            if disc and f is not None:
+                cell_frac[(spec, disc)] = f
+        num, den = {}, {}
+        for spec, dh in agg.items():
+            for disc, (b, a) in dh.items():
+                f = cell_frac.get((spec, disc))
+                w = b if b > 0 else a               # budget, else actual for unbudgeted off-plan work
+                if f is None or not w:
+                    continue
+                num[disc] = num.get(disc, 0.0) + f * w
+                den[disc] = den.get(disc, 0.0) + w
+        return {disc: round(num[disc] / den[disc], 4) for disc in num if den.get(disc)}
 
     def _carry_forward(self, cur, pid):
         """Latest prior week's procurement/material values, so a new week doesn't blank them."""
@@ -256,12 +412,19 @@ _DEMO_NAMES = {230219: "230219 - 5500 Ton Forging Press", 230312: "230312 - 2500
 
 
 class DemoPlanService(PlanService):
-    _store = {   # persists across requests within the process
+    # canned machine × discipline budget/actual per demo project: {spec: {disc: [budget, actual]}}
+    # (spec 0 = the Overhead / Contingency group), so the grid + earned/CPI are exercisable.
+    _DEMO_GRID = {230219: {
+        10: {"Mechanical Engineering": [1800.0, 1700.0], "Manufacturing": [1400.0, 1500.0]},
+        20: {"Electrical Engineering": [1200.0, 1100.0], "Manufacturing": [900.0, 950.0]},
+        0:  {"Project Management": [300.0, 280.0]},
+    }}
+    _store = {   # persists across requests within the process; cells: {(spec, disc): 0..1 fraction}
         230219: {"planned_ship": "2026-10-02",
                  "labour_runout": None, "material_runout": None, "rework_threshold": 0.015,
-                 "discipline_progress": {"Project Management": 0.95, "Mechanical Engineering": 0.88,
-                                         "Electrical Engineering": 0.90, "Hydraulic Engineering": 0.92,
-                                         "Manufacturing": 0.80, "Other": 0.85}},
+                 "cells": {(10, "Mechanical Engineering"): 0.9, (10, "Manufacturing"): 0.8,
+                           (20, "Electrical Engineering"): 0.85, (20, "Manufacturing"): 0.75,
+                           (0, "Project Management"): 0.95}},
     }
 
     def list_projects(self):
@@ -276,25 +439,36 @@ class DemoPlanService(PlanService):
                 "planned_ship": None, "planned_ship_default": False,
                 "labour_runout": None, "material_runout": None, "rework_threshold": None,
                 "week": week_key(_dt.date.today())[2],
-                "discipline_progress": {d: None for d in DISCIPLINES}}
+                "machines": []}
+        cells = (rec or {}).get("cells", {})
+        grid = DemoPlanService._DEMO_GRID.get(pid, {})
+        prog = {k: _pct_out(v) for k, v in cells.items()}
+        base["machines"] = LivePlanService._grid(grid, prog)
         if rec:
             base.update(planned_ship=rec["planned_ship"],
                         labour_runout=_ratio_out(rec["labour_runout"]),
                         material_runout=_ratio_out(rec["material_runout"]),
-                        rework_threshold=_pct_out(rec.get("rework_threshold")),
-                        discipline_progress={d: _pct_out(rec.get("discipline_progress", {}).get(d))
-                                             for d in DISCIPLINES})
+                        rework_threshold=_pct_out(rec.get("rework_threshold")))
         return base
 
     def save_plan(self, payload):
         pid = int(payload["project_id"])
-        prog = payload.get("discipline_progress") or {}
+        cells = {}
+        for c in (payload.get("machine_discipline_progress") or []):
+            try:
+                spec = int(c.get("spec"))
+            except (TypeError, ValueError):
+                continue
+            disc = str(c.get("discipline") or "").strip()
+            f = _frac_pct(c.get("pct"))
+            if disc:
+                cells[(spec, disc)] = f
         DemoPlanService._store[pid] = {
             "planned_ship": (payload.get("planned_ship") or None),
             "labour_runout": _ratio_pct(payload.get("labour_runout")),
             "material_runout": _ratio_pct(payload.get("material_runout")),
             "rework_threshold": _thr_in(payload.get("rework_threshold")),
-            "discipline_progress": {d: _frac_pct(prog.get(d)) for d in DISCIPLINES},
+            "cells": cells,
         }
         return {"ok": True, "project_id": pid, "week": week_key(_dt.date.today())[2],
                 "planned_ship": DemoPlanService._store[pid]["planned_ship"]}

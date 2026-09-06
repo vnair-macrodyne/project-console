@@ -6,6 +6,7 @@ by column type (hours / money / pct / date / int / text), so a new query needs n
 exporter changes. Output is tenant-branded (product + company + header colour).
 """
 import io
+import re
 from datetime import datetime
 
 from console_web.queries import branding
@@ -144,11 +145,71 @@ def _derive_group_header(label, default):
     return default, None
 
 
+# Matrix wing: a set of columns that spread ONE category dimension across the header row
+# (the on-screen "wide" look). Two shapes occur:
+#   (a) explicit keys "<dim>::<category>"  — e.g. disc::Mechanical Engineering (exec dashboard);
+#   (b) >=2 blocks sharing an identical sub-label set — the same measures repeated per category.
+# Unpivoting a wing turns the category into its OWN column (values repeating down the rows) and
+# the measure(s) into value columns — one row per (line × category) — which is what makes the
+# sheet sliceable.
+_MATRIX_KEY = re.compile(r"^([A-Za-z]\w*)::(.+)$")
+_PREFIX_DIM = {"disc": "Discipline"}
+
+
+def _detect_matrix(cols):
+    """Find at most ONE matrix wing among the columns. Returns None, or a dict:
+    {dim_header, member_keys(set), categories:[(display, [member_col_per_measure])],
+     measures:[(label, type, align)]}. Path (a) '::' keys win over path (b) repeated blocks;
+    only one wing is unpivoted so independent dimensions never cross-multiply."""
+    # ── path (a): "<dim>::<category>" keys ───────────────────────────────────────
+    by_prefix = {}   # prefix -> [(col, category)]
+    for c in cols:
+        m = _MATRIX_KEY.match(c.key)
+        if m:
+            by_prefix.setdefault(m.group(1), []).append((c, m.group(2)))
+    a_groups = {p: g for p, g in by_prefix.items() if len(g) >= 2}
+    if a_groups:
+        prefix = max(a_groups, key=lambda p: len(a_groups[p]))
+        group = a_groups[prefix]
+        member_keys = {c.key for c, _ in group}
+        # single measure per category; its column header comes from the shared block, else "Value"
+        blk = next((getattr(c, "block", "") for c, _ in group), "") or "Value"
+        mtype = next((c.type for c, _ in group), "text")
+        malign = next((c.align for c, _ in group), "right")
+        categories = [(c.label, [c]) for c, _ in group]   # display = the (short) column label
+        return {"dim_header": _PREFIX_DIM.get(prefix, prefix.title()),
+                "member_keys": member_keys, "categories": categories,
+                "measures": [(blk, mtype, malign)]}
+    # ── path (b): >=2 blocks with the SAME ordered sub-label signature ───────────
+    by_block = {}
+    order = []
+    for c in cols:
+        b = getattr(c, "block", "") or ""
+        if not b:
+            continue
+        if b not in by_block:
+            order.append(b)
+        by_block.setdefault(b, []).append(c)
+    sig_groups = {}
+    for b in order:
+        sig = tuple(c.label for c in by_block[b])
+        sig_groups.setdefault(sig, []).append(b)
+    for sig, blocks in sig_groups.items():
+        if len(blocks) >= 2 and len(sig) >= 1:
+            member_keys = {c.key for b in blocks for c in by_block[b]}
+            categories = [(b, list(by_block[b])) for b in blocks]      # per-block columns, in order
+            measures = [(lbl, by_block[blocks[0]][j].type, by_block[blocks[0]][j].align)
+                        for j, lbl in enumerate(sig)]
+            return {"dim_header": "Category", "member_keys": member_keys,
+                    "categories": categories, "measures": measures}
+    return None
+
+
 def _flatten(result):
-    """Turn a (possibly banded / block-grouped) QueryResult into a flat, pivot-friendly
-    (columns, rows) pair: one row per detail line, every column populated, grouping context
-    carried into leading columns, and subtotal/total rows removed. No column merges, no
-    subheads — so users can sort, subtotal and pivot freely."""
+    """Turn a (possibly banded / block-grouped / matrix) QueryResult into a flat, pivot-friendly
+    (columns, rows) pair: subtotal/total rows removed, band grouping carried into leading columns,
+    and any wide matrix wing UNPIVOTED into a category column + measure columns (one row per
+    line × category). No column merges, no subheads — so users can sort, subtotal and pivot."""
     cols = result.columns
     rows = result.rows or []
 
@@ -164,14 +225,18 @@ def _flatten(result):
         group_cols.append(_Col(key, hdr, "text", "left"))
 
     ctx = {lv: "" for lv in present}
-    flat_rows = []
+    base_rows = []
     for r in rows:
         kind = r.get("_kind", "detail")
         if kind in present:
             key, hdr, sep = meta[kind]
             lbl = _band_label(r, cols)
-            if sep and sep in lbl:
-                lbl = lbl.split(sep, 1)[1].strip()
+            # Strip the group prefix ONLY when this label carries it, so a same-level band that
+            # doesn't ("Overhead / Contingency" under a "Machine" level) is left intact.
+            if sep == ":" and ":" in lbl:
+                lbl = lbl.split(":", 1)[1].strip()
+            elif sep == " " and lbl.split(" ", 1)[0] == hdr:
+                lbl = lbl.split(" ", 1)[1].strip()
             ctx[kind] = lbl
             for deeper in present[present.index(kind) + 1:]:   # reset inner levels
                 ctx[deeper] = ""
@@ -180,20 +245,46 @@ def _flatten(result):
             continue
         nr = {meta[lv][0]: ctx[lv] for lv in present}
         nr.update({c.key: r.get(c.key) for c in cols})
-        flat_rows.append(nr)
+        base_rows.append(nr)
 
-    # Detail columns keep their key/type; block name (if any) is folded into the label so a
-    # single header row stays unambiguous ("Labour — Budget"). A grouping column that was
-    # hoisted into a leading column (and is now blank on every detail row) is dropped as noise.
+    matrix = _detect_matrix(cols)
     group_headers = {meta[lv][1] for lv in present}
+
+    # Non-matrix detail columns keep their key/type; block name (if any) is folded into the label
+    # so a single header row stays unambiguous ("Labour — Budget"). A grouping column hoisted into
+    # a leading column (blank on every detail row now) is dropped as noise.
+    mkeys = matrix["member_keys"] if matrix else set()
     detail_cols = []
     for c in cols:
-        if c.label in group_headers and all(r.get(c.key) in (None, "") for r in flat_rows):
+        if c.key in mkeys:
+            continue
+        if c.label in group_headers and all(r.get(c.key) in (None, "") for r in base_rows):
             continue
         detail_cols.append(_Col(c.key,
                                 (f"{c.block} — {c.label}" if getattr(c, "block", "") else c.label),
                                 c.type, c.align, getattr(c, "calc", False)))
-    return group_cols + detail_cols, flat_rows
+
+    if not matrix:
+        return group_cols + detail_cols, base_rows
+
+    # ── unpivot the matrix wing: one row per (base row × category with data) ──────
+    dim_col = _Col("_dim", matrix["dim_header"], "text", "left")
+    measure_cols = [_Col(f"_m{j}", lbl, mtype, malign)
+                    for j, (lbl, mtype, malign) in enumerate(matrix["measures"])]
+    out_rows = []
+    for br in base_rows:
+        base_vals = {c.key: br.get(c.key) for c in detail_cols}
+        base_vals.update({gc.key: br.get(gc.key) for gc in group_cols})
+        for display, member_cols in matrix["categories"]:
+            vals = [br.get(mc.key) for mc in member_cols]
+            if all(v in (None, "") for v in vals):        # no data for this category on this line
+                continue
+            nr = dict(base_vals)
+            nr["_dim"] = display
+            for j, v in enumerate(vals):
+                nr[f"_m{j}"] = v
+            out_rows.append(nr)
+    return group_cols + detail_cols + [dim_col] + measure_cols, out_rows
 
 
 def _put_cell(cell, raw, ctype):

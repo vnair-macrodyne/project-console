@@ -41,12 +41,80 @@ def _machines_payload(agg):
                  for d in sorted(dh)]
         out.append({
             "machine": (_OVERHEAD_LABEL if key == _OVERHEAD_LABEL else f"Machine {key}"),
+            "spec": (0 if key == _OVERHEAD_LABEL else int(key)),   # 0 = overhead group (matches plan store)
             "overhead": key == _OVERHEAD_LABEL,
             "budget_hours": round(sum(v[0] for v in dh.values()), 2),
             "actual_hours": round(sum(v[1] for v in dh.values()), 2),
             "disciplines": discs,
         })
     return out
+
+
+def _earned_cpi(budget, pct, actual):
+    """Earned value in HOURS = %complete × budget; CPI = earned ÷ actual (>1 = ahead of the burn,
+    <1 = burning faster than earning). Returns (earned, cpi), each None where undefined."""
+    if pct is None or budget in (None, 0):
+        return None, None
+    earned = round(float(pct) * float(budget), 2)
+    cpi = round(earned / float(actual), 3) if actual else None
+    return earned, cpi
+
+
+def _enrich_efficacy(disciplines, machines, cell_pct):
+    """Attach pct_done / earned_hours / cpi (and actual_hours on disciplines) in place, plus an
+    `unbudgeted` flag, from the MACHINE × DISCIPLINE cell %s (cell_pct keyed (SpecID, discipline)
+    → 0..1 fraction):
+
+      * each machine×discipline CELL: earned = cell% × cell budget; cpi = earned ÷ cell actual.
+        A cell with actual hours but NO budget (`unbudgeted`) is off-plan work — the machine was
+        worked but never budgeted (plan changed). Earned/CPI stay None (nothing to earn against);
+        it's flagged so the PM can add it to the budget.
+      * each machine SUBTOTAL / DISCIPLINE roll-up: %done is a COMPLETENESS-weighted roll-up where a
+        cell's weight is its budget, or its actual hours when unbudgeted — so off-plan work still
+        counts toward completeness without a rebudget. earned/cpi come only from budgeted hours.
+    """
+    roll = {}   # discipline -> [Σ(cell%×weight), Σweight, Σactual]
+    for m in machines:
+        mE = mPW = mW = mB = mA = 0.0
+        entered = False
+        m_unbudgeted = False
+        for d in m.get("disciplines", []):
+            b = d.get("budget_hours") or 0.0
+            a = d.get("actual_hours") or 0.0
+            unb = (b == 0 and a > 0)
+            d["unbudgeted"] = unb
+            m_unbudgeted = m_unbudgeted or unb
+            pct = cell_pct.get((m.get("spec"), d["discipline"]))
+            earned, cpi = _earned_cpi(b, pct, a)          # None when unbudgeted (b == 0)
+            d["pct_done"] = pct
+            d["earned_hours"] = earned
+            d["cpi"] = cpi
+            w = b if b > 0 else a                          # completeness weight (budget, else actual)
+            mB += b; mA += a
+            r = roll.setdefault(d["discipline"], [0.0, 0.0, 0.0])
+            r[2] += a
+            if pct is not None:
+                entered = True
+                mE += earned or 0.0
+                mPW += pct * w; mW += w
+                r[0] += pct * w; r[1] += w
+        m["unbudgeted"] = m_unbudgeted or (mB == 0 and mA > 0)
+        m["pct_done"] = round(mPW / mW, 4) if (entered and mW) else None
+        m["earned_hours"] = round(mE, 2) if (entered and mB) else None    # only meaningful with budget
+        m["cpi"] = round(mE / mA, 3) if (entered and mB and mA) else None
+    for d in disciplines:
+        r = roll.get(d["discipline"])
+        if not r:
+            d["pct_done"] = d["earned_hours"] = d["cpi"] = None
+            d["actual_hours"] = 0.0
+            continue
+        pctw, wsum, act = r
+        d["actual_hours"] = round(act, 2)
+        pct = round(pctw / wsum, 4) if wsum else None
+        d["pct_done"] = pct
+        earned, cpi = _earned_cpi(d.get("hours"), pct, act)
+        d["earned_hours"] = earned
+        d["cpi"] = cpi
 
 SHEET_GROUPING = {
     "Project Management": ["Customer Support", "Management", "Project Coordination", "Training",
@@ -219,10 +287,31 @@ class LivePMService(PMService):
         except Exception:
             return []
 
+    def _md_progress(self, pid):
+        """{(SpecID(int), discipline): %complete fraction} — latest week per machine×discipline
+        cell, from the plan store (tblProjectMachineDisciplineProgress)."""
+        out = {}
+        try:
+            cur = self._cc().cursor()
+            cur.execute(
+                "SELECT SpecID, Discipline, PercentComplete FROM ("
+                "  SELECT SpecID, Discipline, PercentComplete,"
+                "         ROW_NUMBER() OVER (PARTITION BY SpecID, Discipline ORDER BY YearWeekKey DESC) rn"
+                "  FROM Reporting.tblProjectMachineDisciplineProgress"
+                "  WHERE ProjectID = ? AND PercentComplete IS NOT NULL) t WHERE rn = 1", pid)
+            for s, d, p in cur.fetchall():
+                if p is not None:
+                    out[(int(s), str(d))] = float(p)
+        except Exception:
+            pass
+        return out
+
     def get_budget(self, project_id):
         """Read-only budget straight from ETO — per-discipline hours + material + total, plus a
-        machine × discipline breakdown. (Budgets are ETO-sourced; the manual store is no longer
-        authored here.)"""
+        machine × discipline breakdown. Each budgeted unit (discipline AND machine) also carries
+        the PM-declared %complete and the CALCULATED earned hours (=%×budget) and CPI (earned÷
+        actual), so hours consumed can be squared against hours budgeted. (Budgets are ETO-sourced;
+        the manual store is no longer authored here.)"""
         from console.domain.eto_budget import EtoBudgetDAO
         pid = int(project_id)
         name = self._eto_names([pid]).get(pid, "")
@@ -236,10 +325,12 @@ class LivePMService(PMService):
         disciplines = [{"discipline": d, "hours": dh[d]} for d in DISCIPLINE_ORDER if dh.get(d)]
         disciplines += [{"discipline": d, "hours": h} for d, h in dh.items()
                         if d not in DISCIPLINE_ORDER and h]
+        machines = self._machine_discipline(pid)
+        _enrich_efficacy(disciplines, machines, self._md_progress(pid))
         return {"project_id": pid, "name": name, "exists": True, "tracked": tracked,
                 "source": "ETO", "read_only": True, "material_total": b.material_budget,
                 "labour_hours": b.labour_budget_hours, "disciplines": disciplines,
-                "machines": self._machine_discipline(pid)}
+                "machines": machines}
 
     def add_project(self, project_id, entered_by=None):
         """Bring an ETO project into the Console: bank its ETO budget as a versioned row
@@ -339,10 +430,20 @@ class DemoPMService(PMService):
                 agg.setdefault(m, {})[d] = [round(hrs * share, 2), round(hrs * share * 1.05, 2)]
         if disc:
             agg[_OVERHEAD_LABEL] = {"Project Management": [round(0.05 * sum(disc.values()), 2), 0.0]}
+            agg[30] = {"Manufacturing": [0.0, 240.0]}   # worked but never budgeted (plan changed) — flagged
+        machines = _machines_payload(agg)
+        # canned cell %complete so earned/CPI are exercisable in demo (machine 10 @0.85, 20 @0.70,
+        # overhead group @0.95), keyed (spec, discipline)
+        cell_pct = {}
+        for m in machines:
+            base_pct = {10: 0.85, 20: 0.70}.get(m["spec"], 0.95)
+            for d in m.get("disciplines", []):
+                cell_pct[(m["spec"], d["discipline"])] = base_pct
+        _enrich_efficacy(disciplines, machines, cell_pct)
         return {"project_id": pid, "name": name, "exists": bool(disc), "tracked": tracked,
                 "source": "ETO", "read_only": True, "material_total": mat,
                 "labour_hours": round(sum(disc.values()), 2) if disc else None,
-                "disciplines": disciplines, "machines": _machines_payload(agg)}
+                "disciplines": disciplines, "machines": machines}
 
     def add_project(self, project_id, entered_by=None):
         pid = int(project_id)
