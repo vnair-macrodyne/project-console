@@ -54,7 +54,7 @@ resource "azurerm_key_vault" "this" {
   location                   = var.location
   tenant_id                  = data.azurerm_client_config.current.tenant_id
   sku_name                   = "standard"
-  enable_rbac_authorization  = true  # RBAC, not legacy access policies
+  rbac_authorization_enabled = true  # RBAC, not legacy access policies (renamed from enable_rbac_authorization)
   purge_protection_enabled   = true
   soft_delete_retention_days = 7
   tags                       = var.tags
@@ -245,4 +245,11 @@ resource "azurerm_linux_web_app" "this" {
     azurerm_role_assignment.kv_read,
     azurerm_role_assignment.acr_pull,
   ]
+
+  lifecycle {
+    # DEPLOY_NONCE is set out-of-band via `az webapp config appsettings set` on each deploy to force
+    # a fresh image pull; it's a deploy artifact, not real config. Ignore it so it doesn't show as
+    # drift on every plan (and so `apply` never strips the nonce mid-deploy).
+    ignore_changes = [app_settings["DEPLOY_NONCE"]]
+  }
 }
