@@ -60,14 +60,17 @@ class EtoBudgetDAO:
         for pid, a, e, m, matv in cur.fetchall():
             view[int(pid)] = (float(a or 0), float(e or 0), float(m or 0), _f(matv))
 
-        # 2) tblSpecHours line-detail, mapped to buckets (fallback totals + Eng split)
-        det = {}   # pid -> {"pm","eng","mfg", "Mechanical..","Hydraulic..","Electrical.."}
+        # 2) tblSpecHours line-detail, mapped to buckets via the HourType→discipline crosswalk.
+        # This is the AUTHORITATIVE discipline split (see the loop below): it honors the deliberate
+        # re-codes — notably shop-floor Start-Up → Manufacturing (sql/012) — that ETO's own
+        # HourDepartment bucketing in the rolled-up view does NOT.
+        det = {}   # pid -> {"pm","eng","mfg","other", "Mechanical..","Hydraulic..","Electrical.."}
         cur.execute(f"SELECT ProjectID, ISNULL(HourType,0), SUM(Hours) FROM dbo.tblSpecHours "
                     f"WHERE ProjectID IN ({idlist}) GROUP BY ProjectID, HourType")
         for pid, ht, hrs in cur.fetchall():
             d = self._map.get(int(ht))
             h = float(hrs or 0)
-            slot = det.setdefault(int(pid), {"pm": 0.0, "eng": 0.0, "mfg": 0.0})
+            slot = det.setdefault(int(pid), {"pm": 0.0, "eng": 0.0, "mfg": 0.0, "other": 0.0})
             if d == "Project Management":
                 slot["pm"] += h
             elif d in _ENG:
@@ -75,17 +78,25 @@ class EtoBudgetDAO:
                 slot[d] = slot.get(d, 0.0) + h
             elif d == "Manufacturing":
                 slot["mfg"] += h
-            # 'Other'/residue: ignored (folded into view buckets)
+            else:
+                slot["other"] += h        # NC / rework / unmapped — a real 6th bucket, kept not dropped
 
         out = {}
         for pid in set(ids):
             a, e, m, matv = view.get(pid, (0.0, 0.0, 0.0, None))
             d = det.get(pid, {})
-            # view wins per bucket; fall back to line-detail where the view is empty
-            admin = a if a > 0 else d.get("pm", 0.0)
-            eng = e if e > 0 else d.get("eng", 0.0)
-            mfg = m if m > 0 else d.get("mfg", 0.0)
-            # split Eng by line-detail proportions (default all to Mechanical if no detail)
+            have_detail = any(d.get(k) for k in ("pm", "eng", "mfg", "other"))
+            # Spec-hour DETAIL drives the discipline split (it honors the crosswalk re-codes, e.g.
+            # Start-Up → Manufacturing). ETO's rolled-up view is used ONLY as a fallback for projects
+            # that carry no spec-hour detail — this is what makes /pm, the machine × discipline report
+            # and the dashboard all agree on the Eng/Mfg line, instead of the view silently reverting
+            # start-up hours back into Engineering.
+            if have_detail:
+                admin = d.get("pm", 0.0); eng = d.get("eng", 0.0)
+                mfg = d.get("mfg", 0.0);  other = d.get("other", 0.0)
+            else:
+                admin, eng, mfg, other = a, e, m, 0.0
+            # split Eng into Mech/Elec/Hyd by the detail proportions (all → Mechanical if no detail)
             es = {k: d.get(k, 0.0) for k in _ENG}
             tot = sum(es.values())
             if tot > 0:
@@ -101,9 +112,10 @@ class EtoBudgetDAO:
                 "Hydraulic Engineering": round(hyd, 2),
                 "Electrical Engineering": round(elec, 2),
                 "Manufacturing": round(mfg, 2),
+                "Other": round(other, 2),
             }
             dh = {k: v for k, v in dh.items() if v}
-            total = admin + eng + mfg
+            total = admin + eng + mfg + other
             out[pid] = Budget(
                 project_id=pid,
                 is_current=True,
@@ -111,7 +123,7 @@ class EtoBudgetDAO:
                 labour_budget_hours=(round(total, 2) if total else None),
                 discipline_hours=dh,
             )
-        log.info("built %d ETO budgets (view-anchored, detail fallback)", len(out))
+        log.info("built %d ETO budgets (detail-driven split, view fallback)", len(out))
         return out
 
     def get_current(self, project_id):
