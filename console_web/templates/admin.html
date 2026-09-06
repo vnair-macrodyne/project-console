@@ -11,6 +11,7 @@
   body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:#eef1f6}
   header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:14px}
   header .logo{width:34px;height:34px;border-radius:8px;background:#33518c;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  header .logoimg{height:40px;width:auto;border-radius:6px;display:block}
   header h1{font-size:16px;margin:0}
   header .who{margin-left:auto;font-size:13px;color:#c7d4ee}
   header a.back{color:#fff;text-decoration:none;font-size:13px;border:1px solid #4a67a0;padding:6px 12px;border-radius:8px}
@@ -37,6 +38,7 @@
 <body>
 <header>
   <div class="logo" id="logo">SX</div>
+  <img class="logoimg" id="logoImg" alt="" style="display:none">
   <h1>Users &amp; Roles</h1>
   <span class="who" id="who"></span>
   <a class="back" href="/">← Dashboard</a>
@@ -68,7 +70,12 @@ const el=id=>document.getElementById(id);
 let me=null;
 async function boot(){
   me=await (await fetch('/api/me'+location.search)).json();
-  el('logo').textContent='PC';
+  try{ const b=await (await fetch('/api/branding')).json();
+    el('logo').textContent=(b.product||'SX').slice(0,2).toUpperCase();
+    if(b.logo){ const _img=el('logoImg'); _img.alt=b.company||b.product||'logo';
+      _img.onload=()=>{ _img.style.display='block'; el('logo').style.display='none'; };
+      _img.onerror=()=>{ _img.style.display='none'; el('logo').style.display=''; };
+      _img.src=b.logo; } }catch(e){ el('logo').textContent='SX'; }
   el('who').innerHTML = (me.user ? `${me.user} · ${me.role}${me.demo?' · DEMO':''}` : 'not signed in')
     + ' · <a href="/logout" style="color:#fff;text-decoration:underline">Sign out</a>';
   if(me.role!=='admin'){ el('denied').style.display='block'; return; }
