@@ -1,5 +1,6 @@
 {
-  "product_name": "Project Console",
+  "product_name": "Sextant",
+  "product_tagline": "The Data Console",
   "tenant_id": "macrodyne",
   "company_name": "Macrodyne Technologies Inc.",
   "header_color": "1F3864",

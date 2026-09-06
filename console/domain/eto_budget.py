@@ -85,37 +85,35 @@ class EtoBudgetDAO:
         for pid in set(ids):
             a, e, m, matv = view.get(pid, (0.0, 0.0, 0.0, None))
             d = det.get(pid, {})
-            have_detail = any(d.get(k) for k in ("pm", "eng", "mfg", "other"))
-            # Spec-hour DETAIL drives the discipline split (it honors the crosswalk re-codes, e.g.
-            # Start-Up → Manufacturing). ETO's rolled-up view is used ONLY as a fallback for projects
-            # that carry no spec-hour detail — this is what makes /pm, the machine × discipline report
-            # and the dashboard all agree on the Eng/Mfg line, instead of the view silently reverting
-            # start-up hours back into Engineering.
-            if have_detail:
-                admin = d.get("pm", 0.0); eng = d.get("eng", 0.0)
-                mfg = d.get("mfg", 0.0);  other = d.get("other", 0.0)
-            else:
-                admin, eng, mfg, other = a, e, m, 0.0
-            # split Eng into Mech/Elec/Hyd by the detail proportions (all → Mechanical if no detail)
-            es = {k: d.get(k, 0.0) for k in _ENG}
-            tot = sum(es.values())
-            if tot > 0:
-                mech = eng * es["Mechanical Engineering"] / tot
-                hyd = eng * es["Hydraulic Engineering"] / tot
-                elec = eng * es["Electrical Engineering"] / tot
-            else:
-                mech, hyd, elec = eng, 0.0, 0.0
-
-            dh = {
-                "Project Management": round(admin, 2),
-                "Mechanical Engineering": round(mech, 2),
-                "Hydraulic Engineering": round(hyd, 2),
-                "Electrical Engineering": round(elec, 2),
-                "Manufacturing": round(mfg, 2),
-                "Other": round(other, 2),
+            # TOTAL is anchored to ETO's rolled-up estimate — the authoritative magnitude, so a
+            # project whose spec-hour detail is thin/incomplete is never understated (fall back to
+            # detail only when the estimate is empty). But the Eng/Mfg BOUNDARY is taken from the
+            # spec-hour detail via the crosswalk, so the deliberate re-codes (e.g. shop-floor
+            # Start-Up → Manufacturing, sql/012) are honored instead of ETO's own HourDepartment
+            # bucketing. Net: correct totals AND correct Eng/Mfg line — what the old view-anchored
+            # code and a pure detail sum each got only half-right.
+            admin = a if a > 0 else d.get("pm", 0.0)
+            pool = (e + m) if (e + m) > 0 else (d.get("eng", 0.0) + d.get("mfg", 0.0))
+            prod = {
+                "Mechanical Engineering": d.get("Mechanical Engineering", 0.0),
+                "Electrical Engineering": d.get("Electrical Engineering", 0.0),
+                "Hydraulic Engineering": d.get("Hydraulic Engineering", 0.0),
+                "Manufacturing": d.get("mfg", 0.0),
             }
+            ptot = sum(prod.values())
+            if ptot > 0:
+                split = {k: pool * v / ptot for k, v in prod.items()}   # crosswalk proportions
+            else:
+                # no productive spec detail — keep ETO's own Eng/Mfg split (all Eng → Mechanical)
+                split = {"Mechanical Engineering": e, "Electrical Engineering": 0.0,
+                         "Hydraulic Engineering": 0.0, "Manufacturing": m}
+
+            dh = {"Project Management": round(admin, 2)}
+            for k in ("Mechanical Engineering", "Electrical Engineering",
+                      "Hydraulic Engineering", "Manufacturing"):
+                dh[k] = round(split[k], 2)
             dh = {k: v for k, v in dh.items() if v}
-            total = admin + eng + mfg + other
+            total = admin + pool
             out[pid] = Budget(
                 project_id=pid,
                 is_current=True,
@@ -123,7 +121,7 @@ class EtoBudgetDAO:
                 labour_budget_hours=(round(total, 2) if total else None),
                 discipline_hours=dh,
             )
-        log.info("built %d ETO budgets (detail-driven split, view fallback)", len(out))
+        log.info("built %d ETO budgets (estimate total, crosswalk Eng/Mfg split)", len(out))
         return out
 
     def get_current(self, project_id):

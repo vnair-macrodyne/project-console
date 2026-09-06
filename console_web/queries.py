@@ -489,11 +489,15 @@ class LiveQueryService(QueryService):
         from console.domain.discipline_actuals import DisciplineActualsDAO
         from console.domain.project_financials import ProjectFinancialsService
         from console.domain.eto_budget import EtoBudgetDAO
-        # BUDGET now comes from ETO's estimate (was the manual store); ACTUALS are
-        # classified with the SAME rule (58 controlled hour types) so the per-discipline
-        # blocks compare like-for-like. See PROJECT_CONSOLE_ETO_BUDGET_SOURCE_2026-07-27.md.
-        bdao = EtoBudgetDAO(self._eto_conn(), self._hourtype_map())
-        adao = DisciplineActualsDAO(self._eto_conn(), self._hourdesc_map())
+        # BUDGET comes from ETO's estimate (was the manual store). BUDGET and ACTUALS are
+        # classified through the SAME {HourType: discipline} map object — the single source
+        # of truth (Reporting.tlkpHourTypeDiscipline, with manual overrides). HourType is the
+        # controlled key on BOTH tblSpecHours (budget) and vwTimecards (actual), so the two
+        # sides reconcile line-for-line and every re-code/override (e.g. Start-Up→Manufacturing,
+        # sql/012) applies to both automatically. See PROJECT_CONSOLE_ETO_BUDGET_SOURCE_2026-07-27.md.
+        htmap = self._hourtype_map()
+        bdao = EtoBudgetDAO(self._eto_conn(), htmap)
+        adao = DisciplineActualsDAO(self._eto_conn(), htmap)
         svc = ProjectFinancialsService(bdao, adao)
         # MATERIAL: the headline actual is Resource Consumption (ETO ActTotalMaterials =
         # purchased + inventory + payables), so the dashboard ties to ETO's "Material Costs
