@@ -92,10 +92,11 @@ class QueryResult:
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
 _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "spec_budget", "data_completeness", "crosswalk",
-              "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
+              "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum", "lab_util",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "released_toorder", "item_location", "inventory_value",
-              "inventory_by_site", "inventory_alloc", "inventory_contention", "packing_slip",
+              "inventory_by_site", "inventory_alloc", "inventory_contention", "inventory_returns",
+              "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail", "nc_rework", "nc_dashboard"}
 
@@ -171,6 +172,13 @@ def catalogue():
                  "using the same crosswalk as the dashboard; rework (task 999) shown as its own "
                  "Re-work line.",
          "needs_projects": True},
+        {"id": "lab_util", "menu": labour, "label": "Capacity & Utilization",
+         "desc": "Department → employee capacity vs booked hours for the selected window. "
+                 "Availability baseline is 40 hrs/week × 50 weeks = 2,000 net hrs/employee/"
+                 "year, pro-rated to the window by business days. Utilization = timecard hours "
+                 "booked ÷ available. Portfolio-wide (the whole workforce), independent of the "
+                 "project selection.",
+         "needs_projects": False},
         # ── Purchasing (the deployed PO reports) ───────────────────────────
         {"id": "po_all", "menu": "Purchasing", "label": "PO Report",
          "desc": f"All purchases per {proj.lower()} — total purchase value with the received "
@@ -241,6 +249,12 @@ def catalogue():
                  "it (outstanding pulls), plus the FREE / unallocated remainder. Items where the "
                  f"{proj.lower()} claims exceed on-hand are flagged OVER-COMMITTED. Shows where "
                  "jobs compete for limited stock. Shared stock, live from ETO.",
+         "needs_projects": False},
+        {"id": "inventory_returns", "menu": "Inventory", "label": "Pending Returns",
+         "desc": f"Material being RETURNED to stock — {proj.lower()} pulls posted as ETO 'Return' "
+                 "lines that haven't been received back yet. Per site: which item, how much, its "
+                 f"value and reason, by {proj.lower()}. The flip side of allocation (stock coming "
+                 "back in). Live from ETO.",
          "needs_projects": False},
         # ── Shipping ──────────────────────────────────────────────────────
         {"id": "packing_slip", "menu": "Shipping", "label": "Packing Slips",
@@ -832,6 +846,15 @@ class LiveQueryService(QueryService):
     def _q_lab_dsum(self, project_ids, date_from=None, date_to=None, **kw):
         return self._labour(project_ids, "lab_dsum", date_from, date_to)
 
+    def _q_lab_util(self, project_ids, date_from=None, date_to=None, **kw):
+        """Departmental capacity & utilization — PORTFOLIO-WIDE (ignores the project selection,
+        since availability is a workforce property, not a project one). Booked hours come from the
+        same live timecard feed as the labour reports; availability is the 2,000 hr/yr baseline
+        pro-rated to the window by business days. See PROJECT_CONSOLE labour-capacity design."""
+        dfrom, dto = _util_window(date_from, date_to)
+        df = self._df(etospec.query_daily_labour(dfrom, dto, None))   # whole workforce, no proj scope
+        return _labour_util_result(df, dfrom, dto)
+
     def _po_totals(self, pids, dfrom, dto):
         """Grand purchase totals (closed + open) across the selection, for context/cards."""
         try:
@@ -1112,6 +1135,32 @@ class LiveQueryService(QueryService):
         ORDER BY MAX(loc.LocationName), up.ItemCompanyID, up.ProjectID
         """
         return _inventory_contention_result(self._df(sql))
+
+    def _q_inventory_returns(self, project_ids, **kw):
+        """Material being RETURNED to stock — the flip side of allocation. Source =
+        vwInventoryUnfulfilledPulls WHERE PullQty < 0 (ETO 'Return' pull lines not yet received
+        back). Per site × project × item: quantity and value coming back, with the return reason.
+        Portfolio-wide (optional project filter). Quantities/values are shown as POSITIVE magnitudes
+        (amount returning). See PROJECT_CONSOLE_INVENTORY_NEGATIVE_REQUIRED_RETURNS_2026-09-07.md."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        where = "WHERE up.PullQty < 0" + (f" AND up.ProjectID IN ({_ids_sql(pids)})" if pids else "")
+        sql = f"""
+        SELECT MAX(loc.LocationName) AS Location, up.ProjectID AS ProjectID,
+               MAX(p.DisplayName) AS JobName, up.ItemCompanyID AS ItemNo,
+               MAX(up.ItemDescription) AS Description,
+               -SUM(CAST(up.PullQty AS float)) AS RetQty,
+               -SUM(CAST(up.TotalCost AS float)) AS RetValue,
+               MAX(up.Reasons) AS Reasons
+        FROM dbo.vwInventoryUnfulfilledPulls up
+        LEFT JOIN dbo.tblProjects p ON p.ProjectID = up.ProjectID
+        LEFT JOIN (SELECT InventoryLocation, MAX(LocationName) AS LocationName
+                   FROM dbo.vwInventory GROUP BY InventoryLocation) loc
+          ON loc.InventoryLocation = up.InventoryLocation
+        {where}
+        GROUP BY up.InventoryLocation, up.ProjectID, up.ItemCompanyID
+        ORDER BY MAX(loc.LocationName), up.ProjectID, up.ItemCompanyID
+        """
+        return _inventory_returns_result(self._df(sql))
 
     def _q_packing_slip(self, project_ids, **kw):
         """Packing slips for the selected projects — header (number, type, dates, shipper, ship-to,
@@ -1998,6 +2047,179 @@ def _spec_labour_result(report_id, df, label):
             "each timecard. Figures run from project start through the end date.")
     export = {"kind": "labour", "report_id": report_id, "rows": grouped, "label": label}
     return QueryResult(report_id, f"{L('labour')} — {meta['label']}", qcols, rows, cards, note, export)
+
+
+# ---- Labour — Capacity & Utilization (departmental, vs a 2,000 hr/yr baseline) ----
+# The availability baseline (industry standard): 40 hrs/week × 50 weeks = 2,000 net hrs/employee/
+# year (the 50 weeks already carries ~2 weeks of holiday/PTO). We pro-rate that to the reporting
+# window by BUSINESS DAYS — 8 hrs × (Mon–Fri days in the window) — which is exactly the 40-hr week
+# spread over 5 days and never needs the 50-week figure again. Holidays that fall inside a short
+# window are NOT deducted (the 2-week allowance is annual), so a window straddling a holiday reads
+# slightly low; that's called out in the note. "Booked" is timecard hours (all of which are charged
+# to projects here), so utilization = the share of paid availability that lands on jobs.
+
+_BASELINE_HRS_PER_WEEK = 40                   # industry-standard availability week
+_BASELINE_HRS_PER_DAY = _BASELINE_HRS_PER_WEEK / 5.0   # 8.0 hrs / business day
+_BASELINE_ANNUAL_HRS = _BASELINE_HRS_PER_WEEK * 50     # 2,000 — the net-available baseline
+
+
+def _util_window(date_from, date_to):
+    """Resolve the (from, to) dates for the capacity view. `to` defaults to today; `from` defaults
+    to a trailing 4 weeks (28 days) when the user leaves it open — a 'Start of Project to Date' /
+    lifetime lower bound is meaningless for a capacity snapshot, so we give a recent window."""
+    import datetime as _dt
+    dto = _as_date(date_to) or _dt.date.today()
+    dfrom = _as_date(date_from)
+    if dfrom is None:
+        dfrom = dto - _dt.timedelta(days=27)
+    if dfrom > dto:
+        dfrom, dto = dto, dfrom
+    return dfrom, dto
+
+
+def _business_days(dfrom, dto):
+    """Mon–Fri days in [dfrom, dto] inclusive."""
+    import datetime as _dt
+    if dfrom is None or dto is None:
+        return 0
+    days = (dto - dfrom).days + 1
+    if days <= 0:
+        return 0
+    full_weeks, rem = divmod(days, 7)
+    wd = full_weeks * 5
+    start = dfrom.weekday()                    # 0=Mon … 6=Sun
+    for i in range(rem):
+        if (start + i) % 7 < 5:
+            wd += 1
+    return wd
+
+
+def _util_tone(u):
+    """Utilization tone. Over the baseline (sustained overtime, or a data issue) flags; a healthy
+    band sits mid; well under the baseline warns (idle / unbooked capacity)."""
+    if u is None:
+        return "neutral"
+    if u >= 1.15:
+        return "bad"
+    if u >= 0.75:
+        return "good"
+    if u >= 0.50:
+        return "warn"
+    return "bad"
+
+
+def _labour_util_rows(df, avail_per_emp):
+    """Model: each employee is placed in ONE department — the department (HourDepartment) they
+    booked the MOST hours to in the window — so headcount and capacity are counted once per person.
+    Booked/OT/cost are the employee's TOTALS across all their work. Department subtotals and a grand
+    total carry headcount, summed hours, capacity and utilization."""
+    import pandas as pd
+    if df is None or getattr(df, "empty", True):
+        return []
+    d = df.copy()
+    d["_dept"] = d["Department"].fillna("(unassigned)").replace("", "(unassigned)")
+    d["_emp"] = d["EmpNo"].fillna("").astype(str)
+    d["Hours"] = pd.to_numeric(d["Hours"], errors="coerce").fillna(0.0)
+    d["OTHours"] = pd.to_numeric(d["OTHours"], errors="coerce").fillna(0.0)
+    d["LabourCost"] = pd.to_numeric(d["LabourCost"], errors="coerce").fillna(0.0)
+
+    # per-employee totals + primary department (dept with the most hours; ties → alphabetical)
+    emp_name = {}
+    for _, r in d.iterrows():
+        key = r["_emp"] or str(r.get("Employee") or "")
+        if key and key not in emp_name:
+            emp_name[key] = r.get("Employee") or key
+    tot = (d.groupby("_emp")[["Hours", "OTHours", "LabourCost"]].sum())
+    by_ed = d.groupby(["_emp", "_dept"])["Hours"].sum().reset_index()
+    primary = {}
+    for emp, sub in by_ed.groupby("_emp"):
+        sub = sub.sort_values(["Hours", "_dept"], ascending=[False, True])
+        primary[emp] = sub.iloc[0]["_dept"]
+
+    # assemble department → employee
+    emps = []
+    for emp in tot.index:
+        emps.append({
+            "emp": emp, "name": emp_name.get(emp, emp), "dept": primary.get(emp, "(unassigned)"),
+            "booked": float(tot.loc[emp, "Hours"]), "ot": float(tot.loc[emp, "OTHours"]),
+            "cost": float(tot.loc[emp, "LabourCost"]),
+        })
+    depts = sorted({e["dept"] for e in emps}, key=str)
+    rows = []
+    g_head = g_book = g_ot = g_avail = g_cost = 0.0
+    for dept in depts:
+        members = sorted([e for e in emps if e["dept"] == dept], key=lambda e: str(e["name"]))
+        rows.append({"_kind": "l3_sub", "Employee": f"Department: {dept}"})
+        s_book = s_ot = s_cost = 0.0
+        for e in members:
+            avail = round(avail_per_emp, 1)
+            util = round(e["booked"] / avail, 4) if avail else None
+            rows.append({
+                "_kind": "detail", "Employee": e["name"],
+                "Booked": round(e["booked"], 2), "OT": round(e["ot"], 2),
+                "Available": avail, "Util": util, "Cost": round(e["cost"], 2),
+                "_tone": {"Util": _util_tone(util)},
+            })
+            s_book += e["booked"]; s_ot += e["ot"]; s_cost += e["cost"]
+        head = len(members)
+        d_avail = round(avail_per_emp * head, 1)
+        d_util = round(s_book / d_avail, 4) if d_avail else None
+        rows.append({
+            "_kind": "l1_sub", "Employee": f"{dept} — {head} employee(s)",
+            "Booked": round(s_book, 2), "OT": round(s_ot, 2), "Available": d_avail,
+            "Util": d_util, "Cost": round(s_cost, 2), "_tone": {"Util": _util_tone(d_util)},
+        })
+        g_head += head; g_book += s_book; g_ot += s_ot; g_avail += d_avail; g_cost += s_cost
+    grand_util = round(g_book / g_avail, 4) if g_avail else None
+    rows.append({
+        "_kind": "grand", "Employee": f"GRAND TOTAL — {int(g_head)} employee(s)",
+        "Booked": round(g_book, 2), "OT": round(g_ot, 2), "Available": round(g_avail, 1),
+        "Util": grand_util, "Cost": round(g_cost, 2), "_tone": {"Util": _util_tone(grand_util)},
+    })
+    return rows
+
+
+def _labour_util_result(df, dfrom, dto):
+    bdays = _business_days(dfrom, dto)
+    avail_per_emp = _BASELINE_HRS_PER_DAY * bdays
+    cols = [
+        QueryColumn("Employee", "Employee", "text", "left", wrap=True),
+        QueryColumn("Booked", "Booked Hrs", "hours", "right", calc=True),
+        QueryColumn("OT", "OT Hrs", "hours", "right", calc=True),
+        QueryColumn("Available", "Available Hrs", "hours", "right", calc=True),
+        QueryColumn("Util", "Utilization", "pct", "right", calc=True),
+        QueryColumn("Cost", "Labour Cost", "money", "right", calc=True),
+    ]
+    rows = _labour_util_rows(df, avail_per_emp)
+    grand = next((r for r in rows if r.get("_kind") == "grand"), {})
+    head = 0
+    if df is not None and not getattr(df, "empty", True):
+        head = int(df["EmpNo"].fillna("").astype(str).replace("", None).dropna().nunique())
+    booked = _num(grand.get("Booked")) or 0.0
+    avail = _num(grand.get("Available")) or 0.0
+    util = _num(grand.get("Util"))
+    cards = [
+        Card("Employees booking time", "{:,}".format(head)),
+        Card("Available hrs (window)", "{:,.0f}".format(avail)),
+        Card("Booked hrs", "{:,.0f}".format(booked)),
+        Card("Utilization", ("—" if util is None else "{:.0%}".format(util)), _util_tone(util)),
+    ]
+    note = (
+        f"Departmental labour capacity vs booked hours for {_window_label(dfrom, dto)} "
+        f"({bdays} business day(s) → {avail_per_emp:,.1f} available hrs per employee). "
+        "Availability baseline is 40 hrs/week × 50 weeks = 2,000 net hrs/employee/"
+        "year (the 50 weeks already allows ~2 weeks holiday/PTO), pro-rated to the window by "
+        "business days. Each employee is placed in the ONE department (ETO HourDepartment) they "
+        "booked the most hours to in the window, so headcount and capacity are counted once per "
+        "person; booked, OT and cost are that employee's totals across all their work. Utilization "
+        "= timecard hours booked ÷ available — every timecard hour here is charged to a project, so "
+        "the gap below 100% is indirect, unbooked or absence time, and above 100% is overtime "
+        "beyond the baseline. This is PORTFOLIO-WIDE and ignores the project selection (availability "
+        "is a workforce property). Only employees who booked at least one timecard entry in the "
+        "window appear — ETO carries no separate active-roster/home-department field here, so truly "
+        "idle staff who booked nothing are not shown; a window straddling a holiday reads slightly "
+        "low because in-window holidays are not deducted from availability.")
+    return QueryResult("lab_util", f"{L('labour')} — Capacity & Utilization", cols, rows, cards, note)
 
 
 def _spec_po_status_result(pdf, label):
@@ -2940,6 +3162,65 @@ def _inventory_contention_result(df):
                        _inventory_contention_rows(df), cards, note)
 
 
+# ---- Inventory — Pending Returns (material coming back to stock) ----
+def _inventory_returns_rows(df):
+    """Grouped SITE → return line (project · item · qty · value · reason), ranked by value, with a
+    per-site 'returning to stock' value subtotal and a grand total. Qty/value are positive
+    magnitudes (amount coming back)."""
+    if df is None or df.empty:
+        return []
+    df = df.copy()
+    df["_loc"] = df["Location"].fillna("(unspecified site)")
+    rows, g_val = [], 0.0
+    for loc in sorted(df["_loc"].unique(), key=str):
+        lsub = df[df["_loc"] == loc].sort_values("RetValue", ascending=False)
+        rows.append({"_kind": "l3_sub", "ProjectID": f"Site: {loc}"})
+        s_val = 0.0
+        for _, r in lsub.iterrows():
+            v = _num(r.get("RetValue"))
+            s_val += float(v or 0)
+            rows.append({"_kind": "detail", "ProjectID": _int(r.get("ProjectID")),
+                         "JobName": _s(r.get("JobName")), "ItemNo": r.get("ItemNo"),
+                         "Description": _s(r.get("Description")), "RetQty": _num(r.get("RetQty")),
+                         "RetValue": v, "Reasons": _s(r.get("Reasons"))})
+        g_val += s_val
+        rows.append({"_kind": "l1_sub", "Description": f"{loc} — returning to stock",
+                     "RetValue": round(s_val, 2)})
+    rows.append({"_kind": "grand", "ProjectID": "GRAND TOTAL — all sites",
+                 "RetValue": round(g_val, 2)})
+    return rows
+
+
+def _inventory_returns_result(df):
+    proj = L("project")
+    cols = [
+        QueryColumn("ProjectID", proj, "id", "left"),
+        QueryColumn("JobName", "Job", "text", "left", wrap=True),
+        QueryColumn("ItemNo", "Item", "id", "left"),
+        QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("RetQty", "Return Qty", "num", "right"),
+        QueryColumn("RetValue", "Return Value", "money", "right"),
+        QueryColumn("Reasons", "Reason", "text", "left", wrap=True),
+    ]
+    empty = df is None or df.empty
+    val = 0.0 if empty else float(df["RetValue"].fillna(0).sum())
+    lines = 0 if empty else int(len(df))
+    sites = 0 if empty else int(df["Location"].fillna("(unspecified site)").nunique())
+    cards = [Card("Value returning to stock", _fmt_money2(val)),
+             Card("Return lines", "{:,}".format(lines)),
+             Card("Sites", "{:,}".format(sites))]
+    note = (f"Material being RETURNED to stock — {proj.lower()} pulls posted in ETO as 'Return' lines "
+            "(negative pull quantity) that haven't been received back into inventory yet. This is the "
+            "flip side of allocation: stock coming back IN. Per site, each return line shows the "
+            f"{proj.lower()}, item, quantity and value coming back (shown as positive magnitudes) and "
+            "the return reason where recorded. These lines are EXCLUDED from the demand/allocation "
+            "reports (Coverage, Project Allocation, Item Allocation) so those never net negative — "
+            "this report is where they surface. Value is the return quantity × unit cost; it is "
+            "subtotalled per site.")
+    return QueryResult("inventory_returns", "Inventory — Pending Returns to Stock", cols,
+                       _inventory_returns_rows(df), cards, note)
+
+
 # ---- Shipping — Packing Slips (shipped lines by slip, project-scoped) ----
 def _s(v):
     """Safe display string: blank for None / NaN / NaT. A pandas NULL is a truthy float NaN (and a
@@ -3577,6 +3858,12 @@ class DemoQueryService(QueryService):
     def _q_lab_dsum(self, project_ids, date_from=None, date_to=None, **kw):
         return self._labour_demo(project_ids, "lab_dsum", date_from)
 
+    def _q_lab_util(self, project_ids, date_from=None, date_to=None, **kw):
+        # portfolio-wide (whole demo workforce, all history) so headcount/hours are realistic
+        df = self._demo_labour_df(list(_DEMO), lifetime=True)
+        dfrom, dto = _util_window(date_from, date_to)
+        return _labour_util_result(df, dfrom, dto)
+
     def _q_po_status(self, project_ids, date_from=None, date_to=None, **kw):
         import pandas as pd, datetime as _dt
         sel = set(self._sel(project_ids))
@@ -3702,6 +3989,14 @@ class DemoQueryService(QueryService):
             sel = set(self._sel(project_ids))
             recs = [r for r in recs if r["ProjectID"] in sel]
         return _inventory_contention_result(pd.DataFrame(recs, columns=_DEMO_INVCONT_COLS))
+
+    def _q_inventory_returns(self, project_ids, **kw):
+        import pandas as pd
+        recs = _DEMO_INVRET
+        if project_ids:
+            sel = set(self._sel(project_ids))
+            recs = [r for r in recs if r["ProjectID"] in sel]
+        return _inventory_returns_result(pd.DataFrame(recs, columns=_DEMO_INVRET_COLS))
 
     def _q_packing_slip(self, project_ids, **kw):
         import pandas as pd
@@ -4031,6 +4326,21 @@ _DEMO_INVCONT = [
     # Macrodyne 1 — contactor: single project, free remainder
     {"Location": "Macrodyne 1", "ItemNo": "EL-22", "Description": "Contactor 40A 3P",
      "ProjectID": 230312, "JobName": "2500T Compression Press", "ClaimQty": 25, "OnHand": 40, "UnitCost": 62.00},
+]
+
+# Inventory — Pending Returns demo (positive magnitudes coming back to stock)
+_DEMO_INVRET_COLS = ["Location", "ProjectID", "JobName", "ItemNo", "Description",
+                     "RetQty", "RetValue", "Reasons"]
+_DEMO_INVRET = [
+    {"Location": "Macrodyne 1", "ProjectID": 240148, "JobName": "650 Ton SPF Press Retrofit",
+     "ItemNo": "E03898", "Description": "Fuse 600V 12A Type CC", "RetQty": 216, "RetValue": 853.20,
+     "Reasons": ""},
+    {"Location": "Macrodyne 2 (Racco)", "ProjectID": 240033, "JobName": "5000 Ton Forming Press",
+     "ItemNo": "7026H0.0.0.0-18", "Description": "Hydraulic Tube 12mm x 1.5mm wall",
+     "RetQty": 132, "RetValue": 1232.88, "Reasons": "return stock"},
+    {"Location": "Macrodyne 2 (Racco)", "ProjectID": 220154, "JobName": "5000 Metric Ton Forging Press",
+     "ItemNo": "8273M0.0.0.0-06", "Description": "Nylon Locking Hex Nut 1/4-20",
+     "RetQty": 24, "RetValue": 1.92, "Reasons": ""},
 ]
 
 # Packing Slips — _q_packing_slip output shape (shipped lines by slip, project-scoped)
