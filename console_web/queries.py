@@ -1032,7 +1032,7 @@ class LiveQueryService(QueryService):
         LEFT JOIN (SELECT InventoryLocation, MAX(LocationName) AS LocationName
                    FROM dbo.vwInventory GROUP BY InventoryLocation) loc
           ON loc.InventoryLocation = up.InventoryLocation
-        WHERE up.ProjectID IN ({ids})
+        WHERE up.ProjectID IN ({ids}) AND up.PullQty > 0
         GROUP BY up.ProjectID, p.DisplayName, up.ItemCompanyID
         ORDER BY up.ProjectID, up.ItemCompanyID
         """
@@ -1069,7 +1069,7 @@ class LiveQueryService(QueryService):
         report), but honours an optional project filter if projects are selected. Value = SUM(
         TotalCost) = Σ(PullQty × AverageUnitCost). See PROJECT_CONSOLE_INVENTORY_COVERAGE_2026-08-13.md."""
         pids = [int(p) for p in project_ids] if project_ids else []
-        where = f"WHERE up.ProjectID IN ({_ids_sql(pids)})" if pids else ""
+        where = "WHERE up.PullQty > 0" + (f" AND up.ProjectID IN ({_ids_sql(pids)})" if pids else "")
         sql = f"""
         SELECT MAX(loc.LocationName) AS Location,
                up.ProjectID AS ProjectID, MAX(p.DisplayName) AS JobName,
@@ -1094,7 +1094,7 @@ class LiveQueryService(QueryService):
         item's on-hand at that site — a snapshot, so taken once per item). Portfolio-wide (optional
         project filter). See PROJECT_CONSOLE_INVENTORY_COVERAGE_2026-08-13.md."""
         pids = [int(p) for p in project_ids] if project_ids else []
-        where = f"WHERE up.ProjectID IN ({_ids_sql(pids)})" if pids else ""
+        where = "WHERE up.PullQty > 0" + (f" AND up.ProjectID IN ({_ids_sql(pids)})" if pids else "")
         sql = f"""
         SELECT MAX(loc.LocationName) AS Location, up.InventoryLocation AS LocID,
                up.ItemCompanyID AS ItemNo, MAX(up.ItemDescription) AS Description,
@@ -2712,7 +2712,9 @@ def _inventory_value_result(df):
             "once). Fully-fulfilled requirements drop off, so an item here still has an outstanding "
             "pull. Location and Bin are shown last: parts are moved to a "
             f"{proj.lower()} staging area, so bin is not where manufacturing looks. On-hand is a "
-            "snapshot per item and is not totalled.")
+            "snapshot per item and is not totalled. Returns to stock (ETO 'Return' pull lines with a "
+            "negative quantity) are EXCLUDED, so Required is genuine outstanding demand and never "
+            "shows negative.")
     return QueryResult("inventory_value", "Inventory — Material Coverage", cols,
                        _inventory_value_rows(df), cards, note)
 
@@ -2821,7 +2823,9 @@ def _inventory_alloc_result(df):
             "outstanding-pull requirement, so a fully-pulled claim drops off (an item shown still "
             "has an outstanding pull). Inventory is a SHARED pool: an item required by more than one "
             f"{proj.lower()} is counted under each, so per-{proj.lower()} item counts are not "
-            "totalled; allocated value is summable and is subtotalled per site.")
+            "totalled; allocated value is summable and is subtotalled per site. Returns to stock "
+            "(ETO 'Return' pull lines, negative quantity) are EXCLUDED, so allocation never nets "
+            "negative.")
     return QueryResult("inventory_alloc", "Inventory — Project Allocation", cols,
                        _inventory_alloc_rows(df), cards, note)
 
@@ -2929,7 +2933,9 @@ def _inventory_contention_result(df):
             "for limited stock. Items are ranked worst-contention first within each site. On-hand is "
             "a per-item snapshot at the site; a claim is a project's outstanding pull quantity × unit "
             "cost. Fully-pulled claims drop off. Only items with an outstanding pull appear (stock no "
-            f"{proj.lower()} is pulling isn't listed — see Inventory by Site for the full on-hand).")
+            f"{proj.lower()} is pulling isn't listed — see Inventory by Site for the full on-hand). "
+            "Returns to stock (ETO 'Return' pull lines, negative quantity) are EXCLUDED, so claims "
+            "are genuine outstanding demand and never net negative.")
     return QueryResult("inventory_contention", "Inventory — Item Allocation (claims vs free)", cols,
                        _inventory_contention_rows(df), cards, note)
 
