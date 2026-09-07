@@ -95,7 +95,7 @@ _QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "spec_budget",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "released_toorder", "item_location", "inventory_value",
-              "inventory_by_site", "packing_slip",
+              "inventory_by_site", "inventory_alloc", "inventory_contention", "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
               "nc_supplier", "nc_detail", "nc_rework", "nc_dashboard"}
 
@@ -229,6 +229,18 @@ def catalogue():
          "desc": "Where inventory sits across the sites (Macrodyne 1, Racco, TOC, PS1, Quinton, and "
                  "In-Transit) — on-hand value by location for the whole shared stock pool. "
                  "In-transit stock appears here whenever a site-to-site move is under way.",
+         "needs_projects": False},
+        {"id": "inventory_alloc", "menu": "Inventory", "label": "Project Allocation",
+         "desc": f"How stock is ALLOCATED to {proj.lower()}s, per site — for each site the "
+                 f"outstanding inventory pulls broken out by {proj.lower()} (items and value still "
+                 "to be pulled), so you see which jobs are holding claims on inventory rather than "
+                 "a bulk on-hand number. Shared stock, live from ETO.",
+         "needs_projects": False},
+        {"id": "inventory_contention", "menu": "Inventory", "label": "Item Allocation",
+         "desc": f"Per stock ITEM at each site: on-hand split across the {proj.lower()}s claiming "
+                 "it (outstanding pulls), plus the FREE / unallocated remainder. Items where the "
+                 f"{proj.lower()} claims exceed on-hand are flagged OVER-COMMITTED. Shows where "
+                 "jobs compete for limited stock. Shared stock, live from ETO.",
          "needs_projects": False},
         # ── Shipping ──────────────────────────────────────────────────────
         {"id": "packing_slip", "menu": "Shipping", "label": "Packing Slips",
@@ -1047,6 +1059,59 @@ class LiveQueryService(QueryService):
         ORDER BY SUM(lay.ExtValue) DESC
         """
         return _inventory_by_site_result(self._df(sql))
+
+    def _q_inventory_alloc(self, project_ids, **kw):
+        """How inventory is ALLOCATED to projects, per SITE. Source = vwInventoryUnfulfilledPulls
+        (ETO's OUTSTANDING inventory-pull requirement = design demand allocated to stock, minus
+        what's already pulled), rolled up per site × project: the value and item count still to be
+        pulled for each job at each location. Portfolio-wide (inventory is a shared pool — this is
+        the 'who's holding claims on the stock' lens, the inverse of the project-centric Coverage
+        report), but honours an optional project filter if projects are selected. Value = SUM(
+        TotalCost) = Σ(PullQty × AverageUnitCost). See PROJECT_CONSOLE_INVENTORY_COVERAGE_2026-08-13.md."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        where = f"WHERE up.ProjectID IN ({_ids_sql(pids)})" if pids else ""
+        sql = f"""
+        SELECT MAX(loc.LocationName) AS Location,
+               up.ProjectID AS ProjectID, MAX(p.DisplayName) AS JobName,
+               COUNT(DISTINCT up.ItemCompanyID) AS Items,
+               SUM(CAST(up.TotalCost AS float)) AS ExtValue
+        FROM dbo.vwInventoryUnfulfilledPulls up
+        LEFT JOIN dbo.tblProjects p ON p.ProjectID = up.ProjectID
+        LEFT JOIN (SELECT InventoryLocation, MAX(LocationName) AS LocationName
+                   FROM dbo.vwInventory GROUP BY InventoryLocation) loc
+          ON loc.InventoryLocation = up.InventoryLocation
+        {where}
+        GROUP BY up.InventoryLocation, up.ProjectID
+        ORDER BY MAX(loc.LocationName), SUM(CAST(up.TotalCost AS float)) DESC
+        """
+        return _inventory_alloc_result(self._df(sql))
+
+    def _q_inventory_contention(self, project_ids, **kw):
+        """Per stock ITEM at each site: on-hand split across the projects claiming it (outstanding
+        pulls) + the FREE / unallocated remainder, flagging items where claims exceed on-hand
+        (OVER-COMMITTED — jobs competing for limited stock). Source = vwInventoryUnfulfilledPulls,
+        one claim row per site × item × project (PullQty = the project's claim, QtyOnHand = the
+        item's on-hand at that site — a snapshot, so taken once per item). Portfolio-wide (optional
+        project filter). See PROJECT_CONSOLE_INVENTORY_COVERAGE_2026-08-13.md."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        where = f"WHERE up.ProjectID IN ({_ids_sql(pids)})" if pids else ""
+        sql = f"""
+        SELECT MAX(loc.LocationName) AS Location, up.InventoryLocation AS LocID,
+               up.ItemCompanyID AS ItemNo, MAX(up.ItemDescription) AS Description,
+               up.ProjectID AS ProjectID, MAX(p.DisplayName) AS JobName,
+               SUM(CAST(up.PullQty AS float)) AS ClaimQty,
+               MAX(CAST(up.QtyOnHand AS float)) AS OnHand,
+               MAX(CAST(up.AverageUnitCost AS float)) AS UnitCost
+        FROM dbo.vwInventoryUnfulfilledPulls up
+        LEFT JOIN dbo.tblProjects p ON p.ProjectID = up.ProjectID
+        LEFT JOIN (SELECT InventoryLocation, MAX(LocationName) AS LocationName
+                   FROM dbo.vwInventory GROUP BY InventoryLocation) loc
+          ON loc.InventoryLocation = up.InventoryLocation
+        {where}
+        GROUP BY up.InventoryLocation, up.ItemCompanyID, up.ProjectID
+        ORDER BY MAX(loc.LocationName), up.ItemCompanyID, up.ProjectID
+        """
+        return _inventory_contention_result(self._df(sql))
 
     def _q_packing_slip(self, project_ids, **kw):
         """Packing slips for the selected projects — header (number, type, dates, shipper, ship-to,
@@ -2700,6 +2765,175 @@ def _inventory_by_site_result(df):
                        _inventory_by_site_rows(df), cards, note)
 
 
+# ---- Inventory — Project Allocation (outstanding pulls by site → project) ----
+def _inventory_alloc_rows(df):
+    """Grouped SITE → project detail, with a per-site allocated-value subtotal and a grand total.
+    Allocated value (Σ outstanding-pull value) is summable; item counts are per-project (an item
+    claimed by two projects counts under each), so they are shown per row but not totalled."""
+    if df is None or df.empty:
+        return []
+    rows, g_val = [], 0.0
+    df = df.copy()
+    df["_loc"] = df["Location"].fillna("(unspecified site)")
+    for loc in sorted(df["_loc"].unique(), key=lambda x: str(x)):
+        lsub = df[df["_loc"] == loc]
+        rows.append({"_kind": "l3_sub", "ProjectID": f"Site: {loc}"})
+        s_val, n_proj = 0.0, 0
+        for _, r in lsub.iterrows():
+            v = _num(r.get("ExtValue"))
+            s_val += float(v or 0)
+            n_proj += 1
+            rows.append({
+                "_kind": "detail",
+                "ProjectID": _int(r.get("ProjectID")), "JobName": _s(r.get("JobName")),
+                "Items": _int(r.get("Items")), "Value": v,
+            })
+        g_val += s_val
+        rows.append({"_kind": "l1_sub",
+                     "JobName": f"{loc} — {n_proj} project(s), allocated",
+                     "Value": round(s_val, 2)})
+    rows.append({"_kind": "grand", "ProjectID": "GRAND TOTAL — all sites",
+                 "Value": round(g_val, 2)})
+    return rows
+
+
+def _inventory_alloc_result(df):
+    proj = L("project")
+    cols = [
+        QueryColumn("ProjectID", proj, "id", "left"),
+        QueryColumn("JobName", "Job", "text", "left", wrap=True),
+        QueryColumn("Items", "Items Allocated", "num", "right"),
+        QueryColumn("Value", "Allocated Value", "money", "right"),
+    ]
+    empty = df is None or df.empty
+    val = 0.0 if empty else float(df["ExtValue"].fillna(0).sum())
+    sites = 0 if empty else int(df["Location"].fillna("(unspecified site)").nunique())
+    claims = 0 if empty else int(len(df))
+    cards = [Card("Allocated value (all sites)", _fmt_money2(val)),
+             Card("Sites", "{:,}".format(sites)),
+             Card(f"{L('project')} claims", "{:,}".format(claims))]
+    note = (f"How inventory is ALLOCATED to {proj.lower()}s, grouped by SITE. For each site, the "
+            f"OUTSTANDING inventory pulls are rolled up per {proj.lower()}: the number of stock "
+            f"items and the value still to be pulled for that job at that site (value = Σ required "
+            "quantity × unit cost). This is the 'who is holding claims on the stock' view — the "
+            f"inverse of the project-centric Coverage report — so instead of a bulk on-hand number "
+            f"you see how each site's stock is spoken for across {proj.lower()}s. Source is ETO's "
+            "outstanding-pull requirement, so a fully-pulled claim drops off (an item shown still "
+            "has an outstanding pull). Inventory is a SHARED pool: an item required by more than one "
+            f"{proj.lower()} is counted under each, so per-{proj.lower()} item counts are not "
+            "totalled; allocated value is summable and is subtotalled per site.")
+    return QueryResult("inventory_alloc", "Inventory — Project Allocation", cols,
+                       _inventory_alloc_rows(df), cards, note)
+
+
+# ---- Inventory — Item Allocation (per item: project claims vs free, contention) ----
+def _inventory_contention_rows(df):
+    """Grouped SITE → item; under each item one row per project claiming it (outstanding pull qty
+    + value) plus a FREE/unallocated row (on-hand − Σclaims) or, when claims exceed on-hand, an
+    OVER-COMMITTED shortfall row. Items ranked worst-contention first within a site. Allocated
+    value is subtotalled per site."""
+    if df is None or df.empty:
+        return []
+    df = df.copy()
+    df["_loc"] = df["Location"].fillna("(unspecified site)")
+    rows, g_alloc = [], 0.0
+    for loc in sorted(df["_loc"].unique(), key=str):
+        lsub = df[df["_loc"] == loc]
+        rows.append({"_kind": "l3_sub", "ItemNo": f"Site: {loc}"})
+        items = []
+        for itemno in lsub["ItemNo"].dropna().unique():
+            isub = lsub[lsub["ItemNo"] == itemno]
+            onhand = float(isub["OnHand"].fillna(0).max())
+            unit = float(isub["UnitCost"].fillna(0).max())
+            desc = _s(isub["Description"].iloc[0]) if "Description" in isub.columns else ""
+            claims = [(r.get("ProjectID"), _s(r.get("JobName")), float(r.get("ClaimQty") or 0))
+                      for _, r in isub.iterrows()]
+            allocated = sum(q for _, _, q in claims)
+            items.append({"itemno": itemno, "desc": desc, "onhand": onhand, "unit": unit,
+                          "claims": claims, "allocated": allocated, "free": onhand - allocated})
+        # worst contention first: over-committed (most negative free) then largest allocated value
+        items.sort(key=lambda it: (0 if it["free"] < -1e-9 else 1,
+                                   it["free"] if it["free"] < -1e-9 else -it["allocated"] * it["unit"]))
+        site_alloc, n_over = 0.0, 0
+        for it in items:
+            over = it["free"] < -1e-9
+            n_over += 1 if over else 0
+            status = "OVER-COMMITTED" if over else ""
+            for pid, job, q in it["claims"]:
+                val = round(q * it["unit"], 2)
+                site_alloc += val
+                row = {"_kind": "detail", "ItemNo": it["itemno"], "Description": it["desc"],
+                       "OnHand": round(it["onhand"], 2),
+                       "Claimant": (f"{int(pid)} — {job}".rstrip(" —") if pid is not None else (job or "?")),
+                       "ClaimQty": round(q, 2), "ClaimValue": val, "Status": status}
+                if over:
+                    row["_tone"] = {"Status": "bad"}
+                rows.append(row)
+            if it["free"] > 1e-9:
+                rows.append({"_kind": "detail", "ItemNo": it["itemno"], "Description": it["desc"],
+                             "OnHand": round(it["onhand"], 2), "Claimant": "— Free / unallocated —",
+                             "ClaimQty": round(it["free"], 2),
+                             "ClaimValue": round(it["free"] * it["unit"], 2), "Status": "",
+                             "_tone": {"ClaimQty": "good"}})
+            elif over:
+                short = round(-it["free"], 2)
+                rows.append({"_kind": "detail", "ItemNo": it["itemno"], "Description": it["desc"],
+                             "OnHand": round(it["onhand"], 2),
+                             "Claimant": "⚠ Over-committed (short)", "ClaimQty": short,
+                             "ClaimValue": round(short * it["unit"], 2), "Status": "OVER-COMMITTED",
+                             "_tone": {"ClaimQty": "bad", "Status": "bad"}})
+        g_alloc += site_alloc
+        rows.append({"_kind": "l1_sub",
+                     "Description": f"{loc} — {len(items)} item(s), {n_over} over-committed",
+                     "ClaimValue": round(site_alloc, 2)})
+    rows.append({"_kind": "grand", "ItemNo": "GRAND TOTAL — all sites",
+                 "ClaimValue": round(g_alloc, 2)})
+    return rows
+
+
+def _inventory_contention_result(df):
+    proj = L("project")
+    cols = [
+        QueryColumn("ItemNo", "Item", "id", "left"),
+        QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("OnHand", "On Hand", "num", "right"),
+        QueryColumn("Claimant", f"{proj} / Claim", "text", "left"),
+        QueryColumn("ClaimQty", "Qty", "num", "right"),
+        QueryColumn("ClaimValue", "Value", "money", "right"),
+        QueryColumn("Status", "Status", "text", "left"),
+    ]
+    empty = df is None or df.empty
+    if empty:
+        items = over = 0
+        alloc_val = free_val = 0.0
+    else:
+        d = df.copy()
+        d["_loc"] = d["Location"].fillna("(unspecified site)")
+        d["_cv"] = d["ClaimQty"].fillna(0).astype(float) * d["UnitCost"].fillna(0).astype(float)
+        alloc_val = float(d["_cv"].sum())
+        agg = d.groupby(["_loc", "ItemNo"]).agg(
+            onhand=("OnHand", "max"), unit=("UnitCost", "max"), alloc=("ClaimQty", "sum")).reset_index()
+        agg["free"] = agg["onhand"].fillna(0) - agg["alloc"].fillna(0)
+        items = int(len(agg))
+        over = int((agg["free"] < -1e-9).sum())
+        free_val = float((agg["free"].clip(lower=0) * agg["unit"].fillna(0)).sum())
+    cards = [Card("Allocated value", _fmt_money2(alloc_val)),
+             Card("Items claimed", "{:,}".format(items)),
+             Card("Over-committed items", "{:,}".format(over),
+                  tone=("bad" if over else "good")),
+             Card("Free value", _fmt_money2(free_val))]
+    note = (f"Per stock ITEM at each site: current on-hand split across the {proj.lower()}s claiming "
+            "it (ETO's outstanding inventory pulls) plus the FREE / unallocated remainder "
+            "(on-hand − Σ claims). Where the claims exceed on-hand the item is flagged "
+            "OVER-COMMITTED and a shortfall line shows by how much — that's where jobs are competing "
+            "for limited stock. Items are ranked worst-contention first within each site. On-hand is "
+            "a per-item snapshot at the site; a claim is a project's outstanding pull quantity × unit "
+            "cost. Fully-pulled claims drop off. Only items with an outstanding pull appear (stock no "
+            f"{proj.lower()} is pulling isn't listed — see Inventory by Site for the full on-hand).")
+    return QueryResult("inventory_contention", "Inventory — Item Allocation (claims vs free)", cols,
+                       _inventory_contention_rows(df), cards, note)
+
+
 # ---- Shipping — Packing Slips (shipped lines by slip, project-scoped) ----
 def _s(v):
     """Safe display string: blank for None / NaN / NaT. A pandas NULL is a truthy float NaN (and a
@@ -3447,6 +3681,22 @@ class DemoQueryService(QueryService):
         import pandas as pd
         return _inventory_by_site_result(pd.DataFrame(_DEMO_BYSITE, columns=_DEMO_BYSITE_COLS))
 
+    def _q_inventory_alloc(self, project_ids, **kw):
+        import pandas as pd
+        recs = _DEMO_INVALLOC
+        if project_ids:
+            sel = set(self._sel(project_ids))
+            recs = [r for r in recs if r["ProjectID"] in sel]
+        return _inventory_alloc_result(pd.DataFrame(recs, columns=_DEMO_INVALLOC_COLS))
+
+    def _q_inventory_contention(self, project_ids, **kw):
+        import pandas as pd
+        recs = _DEMO_INVCONT
+        if project_ids:
+            sel = set(self._sel(project_ids))
+            recs = [r for r in recs if r["ProjectID"] in sel]
+        return _inventory_contention_result(pd.DataFrame(recs, columns=_DEMO_INVCONT_COLS))
+
     def _q_packing_slip(self, project_ids, **kw):
         import pandas as pd
         sel = set(self._sel(project_ids))
@@ -3739,6 +3989,42 @@ _DEMO_BYSITE = [
     {"Location": "TOC", "Lines": 34, "Items": 34, "Value": 118764.00, "Uncosted": 3},
     {"Location": "PS1", "Lines": 8, "Items": 8, "Value": 22110.40, "Uncosted": 0},
     {"Location": "In Transit to Racco", "Lines": 0, "Items": 0, "Value": 0.0, "Uncosted": 0},
+]
+
+# Inventory — Project Allocation demo (outstanding pulls per site × project)
+_DEMO_INVALLOC_COLS = ["Location", "ProjectID", "JobName", "Items", "ExtValue"]
+_DEMO_INVALLOC = [
+    {"Location": "Macrodyne 2 (Racco)", "ProjectID": 230219, "JobName": "5500 Ton Forging Press",
+     "Items": 84, "ExtValue": 212430.55},
+    {"Location": "Macrodyne 2 (Racco)", "ProjectID": 240087, "JobName": "650 Ton Trim Press",
+     "Items": 37, "ExtValue": 61840.10},
+    {"Location": "Macrodyne 2 (Racco)", "ProjectID": 250005, "JobName": "15,000 Ton Forging Press",
+     "Items": 122, "ExtValue": 305118.72},
+    {"Location": "Macrodyne 1", "ProjectID": 230312, "JobName": "2500T Compression Press",
+     "Items": 19, "ExtValue": 28904.00},
+    {"Location": "Macrodyne 1", "ProjectID": 230219, "JobName": "5500 Ton Forging Press",
+     "Items": 11, "ExtValue": 15220.40},
+    {"Location": "TOC", "ProjectID": 250005, "JobName": "15,000 Ton Forging Press",
+     "Items": 5, "ExtValue": 9310.00},
+]
+
+# Inventory — Item Allocation demo (per site × item × project claim; OnHand snapshot per item)
+_DEMO_INVCONT_COLS = ["Location", "ItemNo", "Description", "ProjectID", "JobName",
+                      "ClaimQty", "OnHand", "UnitCost"]
+_DEMO_INVCONT = [
+    # Racco — bolts: plenty on hand, two projects claim part of it → free remainder
+    {"Location": "Macrodyne 2 (Racco)", "ItemNo": "HW-1001", "Description": "Hex Bolt M12x60 Gr8.8",
+     "ProjectID": 230219, "JobName": "5500 Ton Forging Press", "ClaimQty": 300, "OnHand": 500, "UnitCost": 2.50},
+    {"Location": "Macrodyne 2 (Racco)", "ItemNo": "HW-1001", "Description": "Hex Bolt M12x60 Gr8.8",
+     "ProjectID": 250005, "JobName": "15,000 Ton Forging Press", "ClaimQty": 120, "OnHand": 500, "UnitCost": 2.50},
+    # Racco — seal kit: two projects claim MORE than on hand → OVER-COMMITTED
+    {"Location": "Macrodyne 2 (Racco)", "ItemNo": "HYD-88", "Description": "Hydraulic Seal Kit 200mm",
+     "ProjectID": 230219, "JobName": "5500 Ton Forging Press", "ClaimQty": 8, "OnHand": 10, "UnitCost": 145.00},
+    {"Location": "Macrodyne 2 (Racco)", "ItemNo": "HYD-88", "Description": "Hydraulic Seal Kit 200mm",
+     "ProjectID": 240087, "JobName": "650 Ton Trim Press", "ClaimQty": 6, "OnHand": 10, "UnitCost": 145.00},
+    # Macrodyne 1 — contactor: single project, free remainder
+    {"Location": "Macrodyne 1", "ItemNo": "EL-22", "Description": "Contactor 40A 3P",
+     "ProjectID": 230312, "JobName": "2500T Compression Press", "ClaimQty": 25, "OnHand": 40, "UnitCost": 62.00},
 ]
 
 # Packing Slips — _q_packing_slip output shape (shipped lines by slip, project-scoped)
