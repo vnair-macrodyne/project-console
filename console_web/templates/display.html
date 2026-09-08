@@ -28,6 +28,9 @@
   .legend{display:flex;gap:26px;font-size:21px;color:#c7d2e4;margin:2px 0 12px}
   .legend .sw{display:inline-block;width:16px;height:16px;border-radius:4px;margin-right:9px;vertical-align:-2px}
   .chartwrap{background:#141b28;border:1px solid rgba(255,255,255,.06);border-radius:18px;padding:16px 20px}
+  .pkey{columns:4;column-gap:26px;font-size:15px;line-height:1.55;color:#9fb0c9;margin-top:14px}
+  .pkey .ki{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:1px 0}
+  .pkey .ki b{color:#eef2f8;font-weight:700}
   .foot{position:absolute;left:46px;right:46px;bottom:22px;display:flex;align-items:center;color:#61708c;font-size:18px}
   .dots{display:flex;gap:9px;margin-left:auto}
   .dots i{width:11px;height:11px;border-radius:50%;background:#2b3752;display:inline-block}
@@ -58,12 +61,24 @@ function niceMax(m){if(!(m>0))return 1;const p=Math.pow(10,Math.floor(Math.log10
 function pf(v){return v==null?'':Math.round(v*100)+'%';}
 function nf(v){return v==null?'':(''+Math.round(v));}
 
-// ── horizontal bars (projects / origins read left-to-right; value labels) ─────
+// ── horizontal bars — labels read left-to-right; value labels at bar ends. ────
+// Label column sizes to the actual labels; fonts shrink as rows get denser; the axis can be
+// capped (o.cap) so a few extreme outliers don't crush the readable range — over-cap bars
+// clamp to the cap and their true value is shown with a ▸.
 function hbars(o){
   const cats=o.cats,S=o.series,W=o.W||1828,H=o.H||760;
-  const T=6,Bx=34,L=o.labelW||320,R=76,fmt=o.fmt||pf;
-  const pw=W-L-R, rows=cats.length, rowH=(H-T-Bx)/Math.max(rows,1);
-  let max=0;S.forEach(s=>s.values.forEach(v=>{if(v!=null&&v>max)max=v;}));if(o.threshold&&o.threshold>max)max=o.threshold;max=niceMax(max||1);
+  const T=6,Bx=34,R=84,fmt=o.fmt||pf;
+  const rows=cats.length, rowH=(H-T-Bx)/Math.max(rows,1);
+  const lf = rowH>=42?25 : rowH>=32?21 : rowH>=25?18 : rowH>=20?16 : 14;   // label font by density
+  const vf = Math.max(13, lf-3);                                            // value font
+  const cw = lf*0.58;                                                       // ~char width
+  let longest=0; cats.forEach(c=>longest=Math.max(longest,String(c).length));
+  const L = Math.max(96, Math.min(o.labelMax||W*0.34, longest*cw+20));
+  const maxCh = Math.max(5, Math.floor((L-14)/cw));
+  const clip = s=>{s=String(s); return s.length>maxCh? s.slice(0,maxCh-1)+'…':s;};
+  const pw=W-L-R;
+  let max=0;S.forEach(s=>s.values.forEach(v=>{if(v!=null&&v>max)max=v;}));if(o.threshold&&o.threshold>max)max=o.threshold;
+  max=niceMax(max||1); if(o.cap&&max>o.cap)max=o.cap;
   const x=v=>L+pw*Math.min(v,max)/max;
   let g=`<rect x="0" y="0" width="${W}" height="${H}" fill="${K.panel}" rx="16"/>`;
   const div=5;
@@ -72,10 +87,10 @@ function hbars(o){
     g+=`<text x="${xx.toFixed(1)}" y="${(T+rows*rowH+26).toFixed(1)}" text-anchor="middle" font-size="20" fill="${K.mut}">${fmt(max*i/div)}</text>`;}
   const ns=S.length,gap=rowH*0.24,bh=(rowH-gap)/ns;
   cats.forEach((c,ci)=>{const y0=T+rowH*ci+gap/2;
-    g+=`<text x="${(L-16)}" y="${(y0+rowH/2-gap/2+9).toFixed(1)}" text-anchor="end" font-size="25" font-weight="600" fill="${K.ink}">${esc(c)}</text>`;
-    S.forEach((s,si)=>{const v=s.values[ci];if(v==null)return;const yy=y0+si*bh,w=Math.max(2,x(v)-L),col=s.colorFor?s.colorFor(v):s.color;
+    g+=`<text x="${(L-12)}" y="${(y0+rowH/2-gap/2+lf*0.35).toFixed(1)}" text-anchor="end" font-size="${lf}" font-weight="600" fill="${K.ink}">${esc(clip(c))}</text>`;
+    S.forEach((s,si)=>{const v=s.values[ci];if(v==null)return;const yy=y0+si*bh,over=v>max,w=Math.max(2,x(v)-L),col=s.colorFor?s.colorFor(v):s.color;
       g+=`<rect x="${L}" y="${yy.toFixed(1)}" width="${w.toFixed(1)}" height="${(bh-3).toFixed(1)}" rx="3" fill="${col}"/>`;
-      g+=`<text x="${(L+w+8).toFixed(1)}" y="${(yy+bh/2+6).toFixed(1)}" font-size="21" font-weight="700" fill="${col}">${fmt(v)}</text>`;});});
+      g+=`<text x="${(L+w+7).toFixed(1)}" y="${(yy+bh/2+vf*0.34).toFixed(1)}" font-size="${vf}" font-weight="700" fill="${col}">${(over?'▸':'')}${fmt(v)}</text>`;});});
   if(o.threshold&&o.threshold<=max){const tx=x(o.threshold);
     g+=`<line x1="${tx.toFixed(1)}" y1="${T}" x2="${tx.toFixed(1)}" y2="${(T+rows*rowH).toFixed(1)}" stroke="${K.red}" stroke-width="2.5" stroke-dasharray="8 5"/>`;}
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">${g}</svg>`;
@@ -107,7 +122,11 @@ function legend(items){return `<div class="legend">`+items.map(i=>`<span><span c
 // ── scene builders ────────────────────────────────────────────────────────────
 function execRows(){return (DATA&&DATA.exec&&DATA.exec.rows||[]).filter(r=>r.Project);}
 function col(k){return execRows().map(r=> r[k]==null?null:r[k]);}
-function cats(){return execRows().map(r=>r.Project);}
+function cats(){return execRows().map(r=>String(r.ProjectID));}   // bars labelled by project NUMBER
+function projectKey(){    // number → name key beneath the exec charts
+  return `<div class="pkey">`+execRows().map(r=>
+    `<span class="ki"><b>${esc(r.ProjectID)}</b>&nbsp;${esc(r.Project)}</span>`).join('')+`</div>`;
+}
 
 function sc_kpi_budget(){
   const cardsHtml=(DATA.exec.cards||[]).map(c=>`<div class="kpi ${c.tone||''}"><div class="v">${esc(c.value)}</div><div class="l">${esc(c.label)}</div></div>`).join('');
@@ -115,29 +134,29 @@ function sc_kpi_budget(){
   return {sub:'Executive — Budget vs Completion',
     body:`<div class="kpis">${cardsHtml}</div>`+
       legend([{n:'% Complete',c:K.green},{n:'% Budget Spent',c:K.blue}])+
-      `<div class="chartwrap">${hbars({cats:cats(),H:600,threshold:1,series:[
-        {color:K.green,values:comp},{color:K.blue,values:bud}]})}</div>`};
+      `<div class="chartwrap">${hbars({cats:cats(),H:470,threshold:1,cap:2,series:[
+        {color:K.green,values:comp},{color:K.blue,values:bud}]})}</div>`+projectKey()};
 }
 function sc_labour_material(){
   return {sub:'Executive — Labour & Material Consumption',
-    body:legend([{n:'% Labour',c:K.blue},{n:'% Material',c:K.navy},{n:'100% budget',c:K.red}])+
-      `<div class="chartwrap">${hbars({cats:cats(),H:820,threshold:1,series:[
-        {color:K.blue,values:col('LabPctHrs')},{color:K.navy,values:col('MatPct')}]})}</div>`};
+    body:legend([{n:'% Labour',c:K.blue},{n:'% Material',c:K.navy},{n:'100% budget',c:K.red},{n:'▸ over cap',c:K.mut}])+
+      `<div class="chartwrap">${hbars({cats:cats(),H:610,threshold:1,cap:2.5,series:[
+        {color:K.blue,values:col('LabPctHrs')},{color:K.navy,values:col('MatPct')}]})}</div>`+projectKey()};
 }
 function sc_schedule(){
   const te=execRows().map(r=> r.DurationWeeks? (r.WeeksElapsed||0)/r.DurationWeeks : null);
   return {sub:'Executive — Schedule Performance',
     body:legend([{n:'% Time Elapsed',c:K.amber},{n:'% Complete',c:K.navy},{n:'100%',c:K.red}])+
-      `<div class="chartwrap">${hbars({cats:cats(),H:820,threshold:1,series:[
-        {color:K.amber,values:te},{color:K.navy,values:col('PctDone')}]})}</div>`};
+      `<div class="chartwrap">${hbars({cats:cats(),H:610,threshold:1,cap:2,series:[
+        {color:K.amber,values:te},{color:K.navy,values:col('PctDone')}]})}</div>`+projectKey()};
 }
 function sc_discipline(key,label){
   return function(){
     const vals=col('disc::'+key);
     return {sub:'Departmental Labour Consumption — '+label,
-      body:`<div class="sub">Actual ÷ budgeted hours · bars past the red line are over budget</div>`+
-        `<div class="chartwrap">${hbars({cats:cats(),H:780,threshold:1,series:[
-          {values:vals,colorFor:v=>v>1.0001?K.red:K.green}]})}</div>`};
+      body:`<div class="sub">Actual ÷ budgeted hours · past the red line = over budget · ▸ = beyond 300%</div>`+
+        `<div class="chartwrap">${hbars({cats:cats(),H:600,threshold:1,cap:3,series:[
+          {values:vals,colorFor:v=>v>1.0001?K.red:K.green}]})}</div>`+projectKey()};
   };
 }
 function sc_nc_monthly(){
