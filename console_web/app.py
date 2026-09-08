@@ -23,6 +23,7 @@ from flask import (Flask, jsonify, request, send_file, render_template, g,
                    redirect, url_for, session)
 import io
 import os
+import secrets
 
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -139,12 +140,33 @@ def _serve_dashboard(payload):
 _EXEMPT = {"/login", "/logout", "/api/login", "/api/me", "/auth/callback"}
 
 
+def _display_token_ok():
+    """The kiosk Display view authenticates with a shared secret in the URL (or an
+    X-Display-Token header) instead of an interactive login, so unattended screens can
+    show it. Set CONSOLE_DISPLAY_TOKEN in the environment (Azure app setting) to enable
+    it; leave it unset and the Display view is simply off. Read-only — it can only reach
+    /display and /api/display/*."""
+    want = os.environ.get("CONSOLE_DISPLAY_TOKEN", "").strip()
+    if not want:
+        return False
+    got = (request.values.get("token") or request.headers.get("X-Display-Token") or "").strip()
+    return bool(got) and secrets.compare_digest(got, want)
+
+
 @app.before_request
 def _auth_ctx():
     g.user, g.role = auth.resolve_user()
     p = request.path
     if p in _EXEMPT or p.startswith("/static"):
         return
+    # Kiosk Display: reachable with a valid display token OR by a signed-in user. Never
+    # public — an unset/blank token disables it entirely.
+    if p == "/display" or p.startswith("/api/display"):
+        if g.user or _display_token_ok():
+            return
+        if p.startswith("/api/"):
+            return jsonify({"error": "forbidden"}), 403
+        return ("Forbidden — a valid display token is required.", 403)
     if not g.user:
         if p.startswith("/api/"):
             return jsonify({"error": "not authenticated"}), 401
@@ -241,6 +263,50 @@ def _environment():
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+# ── Display (kiosk) — a self-running, auto-rotating dashboard for plant/office screens ─
+@app.route("/display")
+def display_page():
+    # token is validated in _auth_ctx; pass it through so the page's data polls carry it
+    return render_template("display.html")
+
+
+def _display_project_ids(svc):
+    """Projects for a Display screen: an explicit ?projects=101,102 scope (per-screen), else
+    every active project. Non-numeric junk is ignored; an empty/blank scope falls back to all."""
+    raw = (request.values.get("projects") or "").strip()
+    if raw:
+        ids = [int(t) for t in raw.replace(" ", "").split(",") if t.lstrip("-").isdigit()]
+        if ids:
+            return ids
+    return [p["id"] for p in svc.list_projects()]
+
+
+@app.route("/displays")
+def displays_page():
+    """In-app builder (normal login) to pick a screen's projects and copy its kiosk URL."""
+    return render_template("displays.html")
+
+
+@app.route("/api/display/data")
+def api_display_data():
+    """One read-only payload for the Display scenes: the Executive charts + the NC charts.
+    Scoped to ?projects= when given (per-screen), else all active projects. Token-authenticated."""
+    svc = _service()
+    try:
+        ids = _display_project_ids(svc)
+        exec_res = svc.run("exec_charts", ids).to_dict()
+        nc = svc.nc_display_data(ids)
+        return jsonify({"exec": exec_res, "nc": nc, "demo": app.config["DEMO"],
+                        "branding": branding()})
+    except Exception as e:
+        app.logger.exception("display data failed")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        close = getattr(svc, "close", None)
+        if close:
+            close()
 
 
 # ── PM controls: bring a project in + author/edit its budget ──────────────────

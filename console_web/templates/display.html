@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sextant — Display</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0f18;overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#eef2f8}
+  /* fixed 1920×1080 design surface, scaled to fit any screen (letterboxed on the dark body) */
+  #stage{position:absolute;top:50%;left:50%;width:1920px;height:1080px;transform-origin:center center;
+    padding:38px 46px;box-sizing:border-box;
+    background:radial-gradient(1300px 760px at 14% -12%,#1b2740 0%,#0b0f18 62%)}
+  .top{display:flex;align-items:center;gap:18px;margin-bottom:20px}
+  .brand{font-size:30px;font-weight:800;letter-spacing:.5px;color:#fff}
+  .brand .tag{font-weight:500;color:#8aa0c6;font-size:21px;margin-left:10px}
+  .live{margin-left:auto;font-size:21px;color:#8aa0c6;display:flex;align-items:center;gap:9px}
+  .live .dot{width:11px;height:11px;border-radius:50%;background:#37c07d;box-shadow:0 0 0 0 rgba(55,192,125,.6);animation:pulse 2.4s infinite}
+  .live.stale .dot{background:#f2b134;animation:none}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(55,192,125,.5)}70%{box-shadow:0 0 0 12px rgba(55,192,125,0)}100%{box-shadow:0 0 0 0 rgba(55,192,125,0)}}
+  .kpis{display:flex;gap:16px;margin-bottom:22px}
+  .kpi{flex:1;background:#161d2c;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:16px 20px}
+  .kpi .v{font-size:44px;font-weight:800;line-height:1}
+  .kpi .l{font-size:17px;color:#93a1b5;margin-top:8px;text-transform:uppercase;letter-spacing:1px}
+  .kpi.good .v{color:#37c07d}.kpi.warn .v{color:#f2b134}.kpi.bad .v{color:#ff5c5c}
+  .h2{font-size:33px;font-weight:750;margin:2px 0 6px}
+  .sub{font-size:22px;color:#8aa0c6;font-weight:500;margin-bottom:14px}
+  .legend{display:flex;gap:26px;font-size:21px;color:#c7d2e4;margin:2px 0 12px}
+  .legend .sw{display:inline-block;width:16px;height:16px;border-radius:4px;margin-right:9px;vertical-align:-2px}
+  .chartwrap{background:#141b28;border:1px solid rgba(255,255,255,.06);border-radius:18px;padding:16px 20px}
+  .foot{position:absolute;left:46px;right:46px;bottom:22px;display:flex;align-items:center;color:#61708c;font-size:18px}
+  .dots{display:flex;gap:9px;margin-left:auto}
+  .dots i{width:11px;height:11px;border-radius:50%;background:#2b3752;display:inline-block}
+  .dots i.on{background:#4f7fd6;width:26px;border-radius:6px}
+  #scene{opacity:1;transition:opacity .5s ease}
+  #scene.fade{opacity:0}
+  .msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:30px;color:#8aa0c6}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="scene"></div>
+  <div class="foot"><span id="orgname">Sextant</span><span class="dots" id="dots"></span></div>
+</div>
+
+<script>
+const CFG={SCENE_MS:13000, POLL_MS:60000};
+const K={panel:'#141b28',line:'rgba(255,255,255,.10)',ink:'#eef2f8',mut:'#93a1b5',
+  navy:'#4f7fd6',blue:'#6fb1ff',green:'#37c07d',amber:'#f2b134',red:'#ff5c5c',teal:'#2dd4bf',violet:'#b48cff',pink:'#ff8fb0'};
+const SERIESCLR=[K.blue,K.green,K.amber,K.teal,K.violet,K.pink];
+let DATA=null, sceneIx=0, scenes=[], lastOk=0, timer=null, pollTimer=null;
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function qp(name){try{return new URLSearchParams(location.search).get(name)||'';}catch(e){return '';}}
+function tok(){return qp('token');}
+function scopeParam(){const p=qp('projects').trim();return p?('&projects='+encodeURIComponent(p)):'';}
+function niceMax(m){if(!(m>0))return 1;const p=Math.pow(10,Math.floor(Math.log10(m)));for(const s of[1,1.2,1.5,2,2.5,3,4,5,6,8,10]){if(s*p>=m-1e-9)return +(s*p).toFixed(6);}return 10*p;}
+function pf(v){return v==null?'':Math.round(v*100)+'%';}
+function nf(v){return v==null?'':(''+Math.round(v));}
+
+// ── horizontal bars (projects / origins read left-to-right; value labels) ─────
+function hbars(o){
+  const cats=o.cats,S=o.series,W=o.W||1828,H=o.H||760;
+  const T=6,Bx=34,L=o.labelW||320,R=76,fmt=o.fmt||pf;
+  const pw=W-L-R, rows=cats.length, rowH=(H-T-Bx)/Math.max(rows,1);
+  let max=0;S.forEach(s=>s.values.forEach(v=>{if(v!=null&&v>max)max=v;}));if(o.threshold&&o.threshold>max)max=o.threshold;max=niceMax(max||1);
+  const x=v=>L+pw*Math.min(v,max)/max;
+  let g=`<rect x="0" y="0" width="${W}" height="${H}" fill="${K.panel}" rx="16"/>`;
+  const div=5;
+  for(let i=0;i<=div;i++){const xx=L+pw*i/div;
+    g+=`<line x1="${xx.toFixed(1)}" y1="${T}" x2="${xx.toFixed(1)}" y2="${(T+rows*rowH).toFixed(1)}" stroke="${K.line}"/>`;
+    g+=`<text x="${xx.toFixed(1)}" y="${(T+rows*rowH+26).toFixed(1)}" text-anchor="middle" font-size="20" fill="${K.mut}">${fmt(max*i/div)}</text>`;}
+  const ns=S.length,gap=rowH*0.24,bh=(rowH-gap)/ns;
+  cats.forEach((c,ci)=>{const y0=T+rowH*ci+gap/2;
+    g+=`<text x="${(L-16)}" y="${(y0+rowH/2-gap/2+9).toFixed(1)}" text-anchor="end" font-size="25" font-weight="600" fill="${K.ink}">${esc(c)}</text>`;
+    S.forEach((s,si)=>{const v=s.values[ci];if(v==null)return;const yy=y0+si*bh,w=Math.max(2,x(v)-L),col=s.colorFor?s.colorFor(v):s.color;
+      g+=`<rect x="${L}" y="${yy.toFixed(1)}" width="${w.toFixed(1)}" height="${(bh-3).toFixed(1)}" rx="3" fill="${col}"/>`;
+      g+=`<text x="${(L+w+8).toFixed(1)}" y="${(yy+bh/2+6).toFixed(1)}" font-size="21" font-weight="700" fill="${col}">${fmt(v)}</text>`;});});
+  if(o.threshold&&o.threshold<=max){const tx=x(o.threshold);
+    g+=`<line x1="${tx.toFixed(1)}" y1="${T}" x2="${tx.toFixed(1)}" y2="${(T+rows*rowH).toFixed(1)}" stroke="${K.red}" stroke-width="2.5" stroke-dasharray="8 5"/>`;}
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">${g}</svg>`;
+}
+
+// ── vertical grouped bars (months × few series; value labels on top) ──────────
+function vbars(o){
+  const cats=o.cats,S=o.series,W=o.W||1828,H=o.H||720;
+  const T=20,L=60,R=20,B=54,fmt=o.fmt||nf;
+  const pw=W-L-R,ph=H-T-B;
+  let max=0;S.forEach(s=>s.values.forEach(v=>{if(v!=null&&v>max)max=v;}));max=niceMax(max||1);
+  const y=v=>T+ph*(1-Math.min(v,max)/max);
+  let g=`<rect x="0" y="0" width="${W}" height="${H}" fill="${K.panel}" rx="16"/>`;
+  const div=5;
+  for(let i=0;i<=div;i++){const yy=T+ph*(1-i/div);
+    g+=`<line x1="${L}" y1="${yy.toFixed(1)}" x2="${W-R}" y2="${yy.toFixed(1)}" stroke="${K.line}"/>`;
+    g+=`<text x="${L-10}" y="${(yy+7).toFixed(1)}" text-anchor="end" font-size="20" fill="${K.mut}">${fmt(max*i/div)}</text>`;}
+  const band=pw/cats.length,ns=S.length,bw=Math.max(4,band*0.7/ns);
+  cats.forEach((c,ci)=>{const x0=L+band*ci+(band-bw*ns)/2;
+    S.forEach((s,si)=>{const v=s.values[ci];if(v==null)return;const by=y(v),bh=Math.max(0,T+ph-by),col=s.color;
+      g+=`<rect x="${(x0+si*bw).toFixed(1)}" y="${by.toFixed(1)}" width="${(bw-3).toFixed(1)}" height="${bh.toFixed(1)}" rx="3" fill="${col}"/>`;
+      if(ns===1&&v)g+=`<text x="${(x0+si*bw+(bw-3)/2).toFixed(1)}" y="${(by-9).toFixed(1)}" text-anchor="middle" font-size="24" font-weight="700" fill="${K.ink}">${fmt(v)}</text>`;});
+    g+=`<text x="${(L+band*ci+band/2).toFixed(1)}" y="${(T+ph+34).toFixed(1)}" text-anchor="middle" font-size="24" font-weight="600" fill="${K.ink}">${esc(c)}</text>`;});
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">${g}</svg>`;
+}
+
+function legend(items){return `<div class="legend">`+items.map(i=>`<span><span class="sw" style="background:${i.c}"></span>${esc(i.n)}</span>`).join('')+`</div>`;}
+
+// ── scene builders ────────────────────────────────────────────────────────────
+function execRows(){return (DATA&&DATA.exec&&DATA.exec.rows||[]).filter(r=>r.Project);}
+function col(k){return execRows().map(r=> r[k]==null?null:r[k]);}
+function cats(){return execRows().map(r=>r.Project);}
+
+function sc_kpi_budget(){
+  const cardsHtml=(DATA.exec.cards||[]).map(c=>`<div class="kpi ${c.tone||''}"><div class="v">${esc(c.value)}</div><div class="l">${esc(c.label)}</div></div>`).join('');
+  const comp=col('PctDone'), bud=execRows().map(r=> r.BudgetTotal? (r.SpentTotal||0)/r.BudgetTotal : null);
+  return {sub:'Executive — Budget vs Completion',
+    body:`<div class="kpis">${cardsHtml}</div>`+
+      legend([{n:'% Complete',c:K.green},{n:'% Budget Spent',c:K.blue}])+
+      `<div class="chartwrap">${hbars({cats:cats(),H:600,threshold:1,series:[
+        {color:K.green,values:comp},{color:K.blue,values:bud}]})}</div>`};
+}
+function sc_labour_material(){
+  return {sub:'Executive — Labour & Material Consumption',
+    body:legend([{n:'% Labour',c:K.blue},{n:'% Material',c:K.navy},{n:'100% budget',c:K.red}])+
+      `<div class="chartwrap">${hbars({cats:cats(),H:820,threshold:1,series:[
+        {color:K.blue,values:col('LabPctHrs')},{color:K.navy,values:col('MatPct')}]})}</div>`};
+}
+function sc_schedule(){
+  const te=execRows().map(r=> r.DurationWeeks? (r.WeeksElapsed||0)/r.DurationWeeks : null);
+  return {sub:'Executive — Schedule Performance',
+    body:legend([{n:'% Time Elapsed',c:K.amber},{n:'% Complete',c:K.navy},{n:'100%',c:K.red}])+
+      `<div class="chartwrap">${hbars({cats:cats(),H:820,threshold:1,series:[
+        {color:K.amber,values:te},{color:K.navy,values:col('PctDone')}]})}</div>`};
+}
+function sc_discipline(key,label){
+  return function(){
+    const vals=col('disc::'+key);
+    return {sub:'Departmental Labour Consumption — '+label,
+      body:`<div class="sub">Actual ÷ budgeted hours · bars past the red line are over budget</div>`+
+        `<div class="chartwrap">${hbars({cats:cats(),H:780,threshold:1,series:[
+          {values:vals,colorFor:v=>v>1.0001?K.red:K.green}]})}</div>`};
+  };
+}
+function sc_nc_monthly(){
+  const nc=DATA.nc;
+  return {sub:'Non-Conformance — NCRs Raised per Month ('+nc.year+')',
+    body:`<div class="chartwrap">${vbars({cats:nc.monthLabels,H:760,series:[{color:K.blue,values:nc.monthlyTotal}]})}</div>`};
+}
+function sc_nc_bydept(){
+  const nc=DATA.nc;
+  const series=nc.depts.map((d,i)=>({name:d,color:SERIESCLR[i%SERIESCLR.length],values:nc.deptMonthly[d]}));
+  return {sub:'Non-Conformance — by Responsible Area, per Month',
+    body:legend(nc.depts.map((d,i)=>({n:d,c:SERIESCLR[i%SERIESCLR.length]})))+
+      `<div class="chartwrap">${vbars({cats:nc.monthLabels,H:720,series})}</div>`};
+}
+function sc_nc_resolution(){
+  const nc=DATA.nc, r=nc.resolution.slice(0,14);
+  const y=nc.ytd;
+  return {sub:'Non-Conformance — Resolution Progress',
+    body:`<div class="kpis"><div class="kpi"><div class="v">${y.total}</div><div class="l">YTD NCRs</div></div>`+
+      `<div class="kpi bad"><div class="v">${y.open}</div><div class="l">Unresolved</div></div>`+
+      `<div class="kpi good"><div class="v">${y.closed}</div><div class="l">Resolved</div></div></div>`+
+      legend([{n:'Resolved',c:K.green},{n:'Unresolved',c:K.red}])+
+      `<div class="chartwrap">${hbars({cats:r.map(x=>x.origin),H:640,labelW:520,fmt:nf,series:[
+        {color:K.green,values:r.map(x=>x.closed)},{color:K.red,values:r.map(x=>x.open)}]})}</div>`};
+}
+
+function buildScenes(){
+  const s=[sc_kpi_budget, sc_labour_material, sc_schedule];
+  const discs=[['Mechanical Engineering','Mechanical'],['Hydraulic Engineering','Hydraulic'],
+               ['Electrical Engineering','Electrical'],['Manufacturing','Plant'],['Project Management','PM']];
+  discs.forEach(([k,l])=>{ const vals=col('disc::'+k); if(!vals.every(v=>v==null)) s.push(sc_discipline(k,l)); });
+  if(DATA.nc){
+    if((DATA.nc.monthlyTotal||[]).some(v=>v>0)) s.push(sc_nc_monthly);
+    if((DATA.nc.depts||[]).length) s.push(sc_nc_bydept);
+    if((DATA.nc.resolution||[]).length) s.push(sc_nc_resolution);
+  }
+  return s;
+}
+
+// ── rotation + rendering ──────────────────────────────────────────────────────
+function agoLabel(){const s=Math.max(0,Math.round((Date.now()-lastOk)/1000));
+  if(s<60)return 'updated '+s+'s ago'; const m=Math.round(s/60); return 'updated '+m+'m ago';}
+function brandName(){return (DATA&&DATA.branding&&DATA.branding.product)||'Sextant';}
+
+function renderScene(){
+  if(!scenes.length){return;}
+  if(sceneIx>=scenes.length)sceneIx=0;
+  const sc=scenes[sceneIx]();
+  const stale=(Date.now()-lastOk)>CFG.POLL_MS*2.5;
+  const html=`<div class="top">
+      <div class="brand">${esc(brandName())}<span class="tag">${esc(sc.sub)}</span></div>
+      <div class="live ${stale?'stale':''}"><span class="dot"></span>${DATA&&DATA.demo?'Demo data':('Live · '+agoLabel())}</div>
+    </div>${sc.body}`;
+  const scene=document.getElementById('scene');
+  scene.classList.add('fade');
+  setTimeout(()=>{ scene.innerHTML=html; scene.classList.remove('fade');
+    document.getElementById('orgname').textContent=(DATA&&DATA.branding&&DATA.branding.company)||'';
+    renderDots(); }, 260);
+}
+function renderDots(){
+  document.getElementById('dots').innerHTML=scenes.map((_,i)=>`<i class="${i===sceneIx?'on':''}"></i>`).join('');
+}
+function advance(){ sceneIx=(sceneIx+1)%Math.max(scenes.length,1); renderScene(); }
+
+async function poll(){
+  try{
+    const r=await fetch('/api/display/data?token='+encodeURIComponent(tok())+scopeParam(),{cache:'no-store'});
+    if(!r.ok)throw new Error('http '+r.status);
+    DATA=await r.json();
+    if(DATA.error)throw new Error(DATA.error);
+    lastOk=Date.now();
+    const n=buildScenes();
+    // keep position if scene count unchanged, else reset
+    if(n.length!==scenes.length){ scenes=n; if(sceneIx>=scenes.length)sceneIx=0; }
+    else scenes=n;
+    if(!document.getElementById('scene').innerHTML) renderScene();
+  }catch(e){
+    if(!DATA){ document.getElementById('scene').innerHTML='<div class="msg">Connecting to Sextant…</div>'; }
+    // else: keep showing last-good data; the live pill goes stale on its own
+  }
+}
+
+function fit(){const st=document.getElementById('stage');
+  const s=Math.min(window.innerWidth/1920, window.innerHeight/1080);
+  st.style.transform='translate(-50%,-50%) scale('+s+')';}
+
+window.addEventListener('resize',fit);
+fit();
+poll();
+pollTimer=setInterval(poll, CFG.POLL_MS);
+timer=setInterval(advance, CFG.SCENE_MS);
+</script>
+</body>
+</html>

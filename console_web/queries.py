@@ -1258,6 +1258,14 @@ class LiveQueryService(QueryService):
     def _nc_rows(self, project_ids, date_from, date_to):
         return _live_nc_cost_rows(self._eto_conn().cursor(), project_ids, date_from, date_to)
 
+    def nc_display_data(self, project_ids):
+        """Non-Conformance data shaped for the Display (kiosk) scenes — monthly NCR trend, monthly
+        by responsible area, and resolution progress — year-to-date, portfolio-wide."""
+        import datetime as _dt
+        y = _dt.date.today().year
+        rows = self._nc_rows(project_ids, _dt.date(y, 1, 1), _dt.date.today())
+        return _nc_charts_dict(rows)
+
     def _material_actuals(self, project_ids):
         """{pid: committed material $ (CAD)} derived live from purchase orders.
 
@@ -3528,6 +3536,55 @@ def _live_nc_cost_rows(cur, pids, dfrom, dto):
     return rows
 
 
+def _nc_charts_dict(rows):
+    """Shape normalized NC rows into the three Display (kiosk) NC scenes:
+      monthlyTotal      — NCRs raised per month (this calendar year, through the current month),
+      deptMonthly       — the same split across the top-6 responsible areas (Department),
+      resolution        — per Origin (root cause): Open (unresolved) vs Closed (resolved), + total,
+      ytd               — year-to-date Open / Closed / total.
+    Everything keys off each NC's Raised (CreationDate) and Status. Mirrors the exec team's Slide 2."""
+    import datetime as _dt
+    year = _dt.date.today().year
+    cur_m = _dt.date.today().month
+    mlabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][:cur_m]
+
+    def _month(iso):
+        d = _as_date(iso)
+        return d.month if (d and d.year == year) else None
+
+    monthly = [0] * cur_m
+    dept_month = {}
+    res = {}
+    open_ct = closed_ct = 0
+    for r in rows:
+        closed = (r.get("Status") == "Closed")
+        open_ct += 0 if closed else 1
+        closed_ct += 1 if closed else 0
+        o = r.get("Origin") or "(unspecified)"
+        gg = res.setdefault(o, {"origin": o, "open": 0, "closed": 0})
+        gg["closed" if closed else "open"] += 1
+        m = _month(r.get("Raised"))
+        if not m or m > cur_m:
+            continue
+        monthly[m - 1] += 1
+        dep = r.get("Department") or "(unassigned)"
+        dept_month.setdefault(dep, [0] * cur_m)[m - 1] += 1
+
+    top = sorted(dept_month.items(), key=lambda kv: -sum(kv[1]))[:6]
+    resolution = sorted(res.values(), key=lambda g: -(g["open"] + g["closed"]))
+    for g in resolution:
+        g["total"] = g["open"] + g["closed"]
+    return {
+        "year": year,
+        "monthLabels": mlabels,
+        "monthlyTotal": monthly,
+        "depts": [d for d, _ in top],
+        "deptMonthly": {d: v for d, v in top},
+        "resolution": resolution,
+        "ytd": {"open": open_ct, "closed": closed_ct, "total": open_ct + closed_ct},
+    }
+
+
 def _nc_cards(rows):
     t = ncspec.totals(rows)
     return [Card("NCRs", "{:,}".format(t["NCRs"])),
@@ -4060,6 +4117,9 @@ class DemoQueryService(QueryService):
     def _nc_rows(self, project_ids):
         sel = set(self._sel(project_ids))
         return [dict(r) for r in _DEMO_NC if r["ProjectID"] in sel]
+
+    def nc_display_data(self, project_ids):
+        return _nc_charts_dict(self._nc_rows(project_ids))
 
     def _nc_mat_actuals(self, project_ids):
         return {pid: _DEMO[pid]["ma"] for pid in self._sel(project_ids)}

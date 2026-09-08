@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sextant — Display Builder</title>
+<style>
+  :root{--brand:#1F3864;--brand-2:#2f4f8f;--ink:#1a1f2b;--muted:#6b7280;--line:#e5e8ef;
+    --bg:#f5f7fb;--panel:#fff;--good:#137a4a;--good-bg:#e6f5ec;--warn:#946200;--bad:#b02121}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);background:var(--bg);font-size:14px}
+  header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:12px}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .tag{opacity:.65;font-size:12px;font-style:italic}
+  header a{margin-left:auto;color:#cfe0ff;text-decoration:none;font-size:13px;font-weight:600}
+  .wrap{max-width:980px;margin:22px auto;padding:0 20px;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .card h2{margin:0 0 4px;font-size:15px}
+  .card p.hint{margin:0 0 14px;color:var(--muted);font-size:12.5px;line-height:1.5}
+  label.fld{display:block;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+    color:var(--muted);margin:0 0 6px}
+  input[type=text],input[type=password]{width:100%;border:1px solid var(--line);border-radius:9px;
+    padding:9px 11px;font-size:13.5px;font-family:inherit;color:var(--ink)}
+  .row{display:flex;gap:8px;align-items:center;margin-bottom:14px}
+  .searchbar{display:flex;gap:8px;margin-bottom:10px}
+  .searchbar input{flex:1}
+  .mini{border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px 11px;font-size:12.5px;
+    font-weight:600;cursor:pointer;color:var(--brand-2);white-space:nowrap}
+  .mini:hover{border-color:var(--brand-2);background:#f2f6ff}
+  .projbox{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:5px}
+  .prow{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;cursor:pointer}
+  .prow:hover{background:#f4f7ff}
+  .prow input{accent-color:var(--brand);width:16px;height:16px}
+  .prow .pid{font-weight:600}.prow .ship{margin-left:auto;font-size:12px;color:var(--muted)}
+  .count{font-size:12.5px;color:var(--muted);margin:8px 2px 0}
+  .urlbox{width:100%;min-height:88px;border:1px solid var(--line);border-radius:9px;padding:10px 12px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:var(--ink);
+    background:#fbfcfe;resize:vertical;word-break:break-all}
+  .btns{display:flex;gap:9px;margin-top:12px}
+  .btn{border:1px solid var(--brand);background:var(--brand);color:#fff;border-radius:9px;padding:10px 16px;
+    font-size:13.5px;font-weight:650;cursor:pointer}
+  .btn.sec{background:#fff;color:var(--brand-2);border-color:var(--line)}
+  .btn:hover{filter:brightness(1.06)} .btn.sec:hover{border-color:var(--brand-2);background:#f2f6ff}
+  .ok{color:var(--good);font-size:12.5px;font-weight:600;margin-left:6px;opacity:0;transition:.2s}
+  .ok.show{opacity:1}
+  .warnbox{background:var(--good-bg);border:1px solid #bfe6cd;border-radius:9px;padding:10px 12px;
+    font-size:12.5px;color:#0f5c37;margin-top:12px;line-height:1.5}
+  @media(max-width:820px){.wrap{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Display Builder</h1><span class="tag">build a screen's kiosk URL</span>
+  <a href="/">‹ Back to Sextant</a>
+</header>
+<div class="wrap">
+  <div class="card">
+    <h2>1 · Choose this screen's projects</h2>
+    <p class="hint">Tick the projects this screen should show. Leave everything unticked to show
+      <b>all active projects</b>. Each screen can have its own set — build one URL per screen.</p>
+    <div class="searchbar">
+      <input type="text" id="search" placeholder="Filter projects…">
+      <button class="mini" id="selall">All</button>
+      <button class="mini" id="selnone">None</button>
+    </div>
+    <div class="projbox" id="projbox"><div style="padding:10px;color:var(--muted)">Loading…</div></div>
+    <div class="count" id="count"></div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Token &amp; URL</h2>
+    <p class="hint">Paste the display token (the <code>CONSOLE_DISPLAY_TOKEN</code> set in the app
+      settings). It never leaves your browser — it's only pasted into the URL below.</p>
+    <label class="fld" for="token">Display token</label>
+    <div class="row">
+      <input type="password" id="token" placeholder="paste CONSOLE_DISPLAY_TOKEN">
+      <button class="mini" id="showtok" type="button">Show</button>
+    </div>
+    <label class="fld">Kiosk URL for this screen</label>
+    <textarea class="urlbox" id="url" readonly></textarea>
+    <div class="btns">
+      <button class="btn" id="copy">Copy URL</button>
+      <button class="btn sec" id="open">Open / preview</button>
+      <span class="ok" id="ok">Copied ✓</span>
+    </div>
+    <div class="warnbox" id="note"></div>
+  </div>
+</div>
+
+<script>
+const el=id=>document.getElementById(id);
+let PROJECTS=[], SEL=new Set();
+
+function fmtCount(){
+  const n=SEL.size;
+  el('count').textContent = n? `${n} project${n===1?'':'s'} selected` : 'Nothing ticked → shows all active projects';
+}
+function renderList(){
+  const q=(el('search').value||'').toLowerCase();
+  const box=el('projbox'); box.innerHTML='';
+  const shown=PROJECTS.filter(p=>!q || String(p.label).toLowerCase().includes(q) || String(p.id).includes(q));
+  if(!shown.length){ box.innerHTML='<div style="padding:10px;color:var(--muted)">No matches.</div>'; return; }
+  shown.forEach(p=>{
+    const row=document.createElement('label'); row.className='prow';
+    row.innerHTML=`<input type="checkbox" ${SEL.has(p.id)?'checked':''}>
+      <span class="pid">${p.label}</span><span class="ship">${p.ship||''}</span>`;
+    row.querySelector('input').onchange=e=>{ e.target.checked?SEL.add(p.id):SEL.delete(p.id); fmtCount(); buildUrl(); };
+    box.appendChild(row);
+  });
+}
+function buildUrl(){
+  const origin=location.origin;
+  const tok=(el('token').value||'').trim();
+  let u=origin+'/display';
+  const qs=[];
+  if(tok) qs.push('token='+encodeURIComponent(tok));
+  if(SEL.size){ const ids=PROJECTS.filter(p=>SEL.has(p.id)).map(p=>p.id); qs.push('projects='+ids.join(',')); }
+  if(qs.length) u+='?'+qs.join('&');
+  el('url').value=u;
+  el('note').innerHTML = tok
+    ? 'Put this URL on the screen’s browser in full-screen / kiosk mode. It refreshes itself — no login, no manual updates.'
+    : '⚠ Paste the display token above to complete the URL. Without a token the screen will show “Forbidden”.';
+  el('note').style.background = tok? 'var(--good-bg)':'#fbf1dc';
+  el('note').style.borderColor = tok? '#bfe6cd':'#e9d8a6';
+  el('note').style.color = tok? '#0f5c37':'#7a5b00';
+}
+el('search').oninput=renderList;
+el('selall').onclick=()=>{ PROJECTS.forEach(p=>SEL.add(p.id)); renderList(); fmtCount(); buildUrl(); };
+el('selnone').onclick=()=>{ SEL.clear(); renderList(); fmtCount(); buildUrl(); };
+el('token').oninput=buildUrl;
+el('showtok').onclick=()=>{ const t=el('token'); t.type=t.type==='password'?'text':'password'; el('showtok').textContent=t.type==='password'?'Show':'Hide'; };
+el('copy').onclick=async()=>{ try{ await navigator.clipboard.writeText(el('url').value); }catch(e){ el('url').select(); document.execCommand('copy'); }
+  el('ok').classList.add('show'); setTimeout(()=>el('ok').classList.remove('show'),1500); };
+el('open').onclick=()=>{ if(el('url').value) window.open(el('url').value,'_blank'); };
+
+(async function(){
+  try{ PROJECTS=await (await fetch('/api/projects')).json(); }catch(e){ PROJECTS=[]; }
+  if(!Array.isArray(PROJECTS)) PROJECTS=[];
+  renderList(); fmtCount(); buildUrl();
+})();
+</script>
+</body>
+</html>
