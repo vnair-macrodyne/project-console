@@ -158,6 +158,19 @@
   .foot{color:var(--muted);font-size:11.5px;margin-top:10px;text-align:right}
   .spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(0,0,0,.15);
     border-top-color:var(--brand);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  /* Executive (Charts) dashboard */
+  .dash{padding:2px}
+  .dash-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px}
+  .dash-head{font-size:15px;font-weight:700;color:var(--brand);margin:8px 2px 12px;text-align:center;
+    letter-spacing:.3px;border-top:1px solid var(--line);padding-top:14px}
+  .dash-mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+  .chart-card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 14px 10px;
+    box-shadow:0 1px 2px rgba(20,30,60,.04)}
+  .chart-card h3{margin:0;font-size:13.5px;font-weight:650;color:var(--ink)}
+  .chart-legend{display:flex;gap:13px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin:5px 0 4px}
+  .chart-legend .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+  .chart-card svg{display:block;width:100%;height:auto;margin-top:2px}
+  @media(max-width:1080px){.dash-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -503,6 +516,8 @@ function renderResult(){
   (r.cards||[]).forEach(c=>{ const d=document.createElement('div'); d.className='stat '+(c.tone||'neutral');
     d.innerHTML=`<div class="v">${c.value}</div><div class="l">${c.label}</div>`; cw.appendChild(d); });
 
+  if(r.query_id==='exec_charts'){ renderCharts(r); return; }
+
   let rows=r.rows.slice();
   // reports with a subtotal hierarchy are shown in natural order (sorting would break it);
   // flat reports (incl. Procurement Exceptions) stay sortable, with any total row pinned last.
@@ -545,6 +560,101 @@ function renderResult(){
     td.onclick=(e)=>{ e.stopPropagation(); openDrill(td.dataset.pid, e); };
   });
   el('foot').textContent = `${r.rows.length.toLocaleString()} row${r.rows.length===1?'':'s'} · ${r.title}`;
+}
+
+// ── Executive (Charts) — dependency-free inline-SVG dashboard (Slide 1) ────────
+const CH={navy:'#1F3864', navy2:'#2f4f8f', blue:'#7CA7DD', green:'#2e8b57',
+          amber:'#c98a1b', red:'#b02121', grid:'#e7ebf2', ink:'#1a1f2b', muted:'#6b7280'};
+function _esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function _niceMax(m){ if(!(m>0))return 1; const p=Math.pow(10,Math.floor(Math.log10(m)));
+  for(const s of [1,1.2,1.5,2,2.5,3,4,5,6,8,10]){ if(s*p>=m-1e-9) return +(s*p).toFixed(6); } return 10*p; }
+function _fmtv(v,f){ if(v==null||v==='')return ''; if(f==='pct')return Math.round(v*100)+'%';
+  if(f==='money')return '$'+Math.round(v).toLocaleString(); return (Math.round(v*10)/10).toString(); }
+function _dmax(S,thr){ let m=0; S.forEach(s=>s.values.forEach(v=>{ if(v!=null&&v>m)m=v; }));
+  if(thr&&thr>m)m=thr; return _niceMax(m||1); }
+
+function svgGroupedV(o){
+  const cats=o.cats, S=o.series, comp=o.compact;
+  const W=comp?270:440, H=comp?210:270, L=comp?32:42, R=8, T=10, B=comp?58:74;
+  const pw=W-L-R, ph=H-T-B, max=_dmax(S,o.threshold), div=5;
+  const y=v=>T+ph*(1-Math.min(v,max)/max);
+  let g='';
+  for(let i=0;i<=div;i++){ const yy=T+ph*(1-i/div);
+    g+=`<line x1="${L}" y1="${yy.toFixed(1)}" x2="${W-R}" y2="${yy.toFixed(1)}" stroke="${CH.grid}"/>`;
+    g+=`<text x="${L-4}" y="${(yy+3).toFixed(1)}" text-anchor="end" font-size="${comp?8:9}" fill="${CH.muted}">${_fmtv(max*i/div,o.fmt)}</text>`; }
+  const band=pw/cats.length, ns=S.length, bw=Math.max(2,band*0.74/ns);
+  cats.forEach((c,ci)=>{
+    const x0=L+band*ci+(band-bw*ns)/2;
+    S.forEach((s,si)=>{ const v=s.values[ci]; if(v==null)return;
+      const by=y(v), bh=Math.max(0,T+ph-by), col=s.colorFor?s.colorFor(v):s.color;
+      g+=`<rect x="${(x0+si*bw).toFixed(1)}" y="${by.toFixed(1)}" width="${(bw-1).toFixed(1)}" height="${bh.toFixed(1)}" fill="${col}"><title>${_esc(c)} — ${_esc(s.name||'')} ${_fmtv(v,o.fmt)}</title></rect>`; });
+    const lx=L+band*ci+band/2, ly=H-B+11;
+    g+=`<text x="${lx.toFixed(1)}" y="${ly}" transform="rotate(-42 ${lx.toFixed(1)} ${ly})" text-anchor="end" font-size="${comp?8:9.5}" fill="${CH.ink}">${_esc(c)}</text>`; });
+  if(o.threshold&&o.threshold<=max){ const ty=y(o.threshold);
+    g+=`<line x1="${L}" y1="${ty.toFixed(1)}" x2="${W-R}" y2="${ty.toFixed(1)}" stroke="${CH.red}" stroke-width="1.4" stroke-dasharray="5 3"/>`; }
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">${g}</svg>`;
+}
+
+function svgGroupedH(o){
+  const cats=o.cats, S=o.series, rowH=22, T=8;
+  const L=Math.min(160, Math.max(60, Math.max.apply(null,cats.map(c=>String(c).length))*6.0+12));
+  const W=440, R=12, pw=W-L-R, H=T+22+cats.length*rowH, max=_dmax(S,o.threshold), div=5;
+  const x=v=>L+pw*Math.min(v,max)/max;
+  let g='';
+  for(let i=0;i<=div;i++){ const xx=L+pw*i/div;
+    g+=`<line x1="${xx.toFixed(1)}" y1="${T}" x2="${xx.toFixed(1)}" y2="${T+cats.length*rowH}" stroke="${CH.grid}"/>`;
+    g+=`<text x="${xx.toFixed(1)}" y="${T+cats.length*rowH+14}" text-anchor="middle" font-size="9" fill="${CH.muted}">${_fmtv(max*i/div,o.fmt)}</text>`; }
+  const ns=S.length, bh=Math.max(3,(rowH-4)/ns);
+  cats.forEach((c,ci)=>{ const y0=T+rowH*ci+2;
+    g+=`<text x="${L-5}" y="${(y0+rowH/2+1).toFixed(1)}" text-anchor="end" font-size="9.5" fill="${CH.ink}">${_esc(c)}</text>`;
+    S.forEach((s,si)=>{ const v=s.values[ci]; if(v==null)return;
+      const w=Math.max(0,x(v)-L), col=s.colorFor?s.colorFor(v):s.color;
+      g+=`<rect x="${L}" y="${(y0+si*bh).toFixed(1)}" width="${w.toFixed(1)}" height="${(bh-1).toFixed(1)}" fill="${col}"><title>${_esc(c)} — ${_esc(s.name||'')} ${_fmtv(v,o.fmt)}</title></rect>`; }); });
+  if(o.threshold&&o.threshold<=max){ const tx=x(o.threshold);
+    g+=`<line x1="${tx.toFixed(1)}" y1="${T}" x2="${tx.toFixed(1)}" y2="${T+cats.length*rowH}" stroke="${CH.red}" stroke-width="1.4" stroke-dasharray="5 3"/>`; }
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">${g}</svg>`;
+}
+
+function chartCard(title, legend, svg){
+  const lg=(legend||[]).map(l=>`<span><span class="sw" style="background:${l.c}"></span>${_esc(l.n)}</span>`).join('');
+  return `<div class="chart-card"><h3>${_esc(title)}</h3>`+
+         (lg?`<div class="chart-legend">${lg}</div>`:'')+svg+`</div>`;
+}
+
+function renderCharts(r){
+  el('pager').style.display='none';
+  const rows=r.rows.filter(x=>x.Project);
+  const cats=rows.map(x=>x.Project);
+  el('foot').textContent = `${rows.length} project${rows.length===1?'':'s'} · ${r.title}`;
+  const col=(k)=>rows.map(x=> x[k]==null?null:x[k]);
+  const pctDone=col('PctDone');
+  const budgetSpent=rows.map(x=> (x.BudgetTotal? (x.SpentTotal||0)/x.BudgetTotal : null));
+  const timeElapsed=rows.map(x=> (x.DurationWeeks? (x.WeeksElapsed||0)/x.DurationWeeks : null));
+  let h='<div class="dash"><div class="dash-grid">';
+  h+=chartCard('Budget vs Completion',
+      [{n:'% Complete',c:CH.green},{n:'% Budget Spent',c:CH.navy}],
+      svgGroupedV({cats,fmt:'pct',series:[{name:'% Complete',color:CH.green,values:pctDone},
+                                          {name:'% Budget Spent',color:CH.navy,values:budgetSpent}]}));
+  h+=chartCard('Labour & Material Consumption',
+      [{n:'% Labour',c:CH.blue},{n:'% Material',c:CH.navy},{n:'100% budget',c:CH.red}],
+      svgGroupedV({cats,fmt:'pct',threshold:1,series:[{name:'% Labour',color:CH.blue,values:col('LabPctHrs')},
+                                          {name:'% Material',color:CH.navy,values:col('MatPct')}]}));
+  h+=chartCard('Schedule Performance',
+      [{n:'% Time Elapsed',c:CH.amber},{n:'% Complete',c:CH.navy}],
+      svgGroupedH({cats,fmt:'pct',threshold:1,series:[{name:'% Time Elapsed',color:CH.amber,values:timeElapsed},
+                                          {name:'% Complete',color:CH.navy,values:pctDone}]}));
+  h+='</div>';
+  const discs=[['Mechanical Engineering','Mechanical'],['Hydraulic Engineering','Hydraulic'],
+               ['Electrical Engineering','Electrical'],['Manufacturing','Plant'],['Project Management','PM']];
+  const mini=discs.map(([key,lbl])=>{ const vals=col('disc::'+key);
+      if(vals.every(v=>v==null)) return '';
+      return chartCard(lbl,[{n:'≤100%',c:CH.green},{n:'over budget',c:CH.red}],
+        svgGroupedV({cats,fmt:'pct',threshold:1,compact:true,
+          series:[{name:lbl,values:vals,colorFor:v=>v>1.0001?CH.red:CH.green}]})); }).join('');
+  if(mini){ h+='<div class="dash-head">Departmental Labour Consumption (%)</div>'+
+               '<div class="dash-mini-grid">'+mini+'</div>'; }
+  h+='</div>';
+  el('tscroll').innerHTML=h; el('tscroll').scrollTop=0;
 }
 const PAGE_SIZES=[100,250,500,1000];
 function renderPager(total, pages, shownFrom, shownTo){

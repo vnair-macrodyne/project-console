@@ -91,7 +91,7 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
-_QUERY_IDS = {"exec", "scorecard", "discipline", "budget_actual", "spec_budget", "data_completeness", "crosswalk",
+_QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "spec_budget", "data_completeness", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum", "lab_util",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "released_toorder", "item_location", "inventory_value",
@@ -121,6 +121,13 @@ def catalogue():
         {"id": "exec", "menu": "Dashboards", "label": "Executive",
          "desc": "The full ranked board — schedule, budget, 2-week delta, labour by "
                  f"{disc.lower()} and procurement — one row per {proj.lower()}.",
+         "needs_projects": True},
+        {"id": "exec_charts", "menu": "Dashboards", "label": "Executive (Charts)",
+         "desc": "The Executive board as a live visual dashboard — portfolio KPIs, budget vs "
+                 f"completion, {labour.lower()} & {material.lower()} consumption, schedule "
+                 f"performance, and per-{disc.lower()} consumption small-multiples (over-budget "
+                 "flagged) — one bar per project, straight from the same live figures as the "
+                 "Executive board.",
          "needs_projects": True},
         {"id": "scorecard", "menu": "Dashboards", "label": proj,
          "desc": f"One row per {proj.lower()}: {labour.lower()} & {material.lower()} "
@@ -571,7 +578,10 @@ class LiveQueryService(QueryService):
         return out
 
     # -- queries ----------------------------------------------------------------
-    def _q_exec(self, project_ids, **kw):
+    def _exec_rows(self, project_ids):
+        """Assemble the ranked Executive rows AND return the financials map alongside, so both the
+        table board (_q_exec) and the visual dashboard (_q_exec_charts) share one build (financials
+        are TTL-cached, so the second caller pays nothing)."""
         fin = self._financials(project_ids)
         ov = self._overlay_map()
         meta = self._project_meta(project_ids)
@@ -606,7 +616,35 @@ class LiveQueryService(QueryService):
                 disc_pct[d.discipline] = (round(planned / d.budget_hours, 4)
                                           if d.budget_hours else None)
             rows.append(_exec_row(pid, name, client, f, rec, disc_pct))
+        return rows, fin
+
+    def _q_exec(self, project_ids, **kw):
+        rows, _fin = self._exec_rows(project_ids)
         return _finalize_exec(rows)
+
+    def _q_exec_charts(self, project_ids, **kw):
+        rows, fin = self._exec_rows(project_ids)
+        rows = _finalize_exec(rows).rows            # rank-sort + renumber, reuse the exec ordering
+        starts = self._schedule_starts(project_ids)
+        for r in rows:
+            _exec_chart_augment(r, fin.get(r.get("ProjectID")), starts.get(r.get("ProjectID")))
+        return _exec_charts_result(rows)
+
+    def _schedule_starts(self, project_ids):
+        """{pid: earliest production-schedule StartDate} from ETO (tblProcessScheduleHeader), for the
+        weeks-elapsed / duration schedule chart. Best-effort — a missing table/column or unpopulated
+        start just leaves that project without weeks (the chart falls back to % complete)."""
+        pids = [int(p) for p in project_ids] if project_ids else []
+        if not pids:
+            return {}
+        try:
+            cur = self._eto_conn().cursor()
+            cur.execute(f"SELECT ProjectID, MIN(StartDate) FROM dbo.tblProcessScheduleHeader "
+                        f"WHERE ProjectID IN ({_ids_sql(pids)}) AND StartDate IS NOT NULL "
+                        f"GROUP BY ProjectID")
+            return {int(row[0]): row[1] for row in cur.fetchall()}
+        except Exception:
+            return {}
 
     def _procurement_actuals(self, project_ids):
         """{pid: {'TotalLineItems': n, 'LLTPDelLate': n}} computed live from ETO.
@@ -1945,6 +1983,94 @@ def _finalize_exec(rows):
     return _exec_result(rows)
 
 
+# ---- Executive (Charts) — the visual dashboard (Slide 1 of the exec deck) --------
+# Same live figures as the Executive board, shaped for on-screen charts. The client renders SVG
+# bar charts keyed off query_id == 'exec_charts'; we add the few per-project fields the charts
+# need beyond the table (budget $ / spent $ using the app's applied-rate methodology, and schedule
+# weeks) and portfolio KPIs as cards. See the Dashboard.pptx the exec team assembles by hand.
+
+def _sum_money(*vals):
+    xs = [float(v) for v in vals if v is not None]
+    return round(sum(xs), 2) if xs else None
+
+
+def _exec_chart_augment(row, f, start_date):
+    """Add BudgetTotal / SpentTotal (applied-rate $, the same basis the NC Dashboard uses) and
+    WeeksElapsed / DurationWeeks (from the production-schedule start → planned ship) to one exec row."""
+    bt = st = None
+    if f is not None:
+        rate = getattr(f, "labour_rate", None)
+        lb_h = getattr(f, "labour_budget_hours", None)
+        lab_bud = (lb_h * rate) if (lb_h is not None and rate) else None
+        bt = _sum_money(lab_bud, getattr(f, "material_budget", None))
+        st = _sum_money(getattr(f, "labour_actual_cost", None), getattr(f, "material_actual", None))
+    row["BudgetTotal"] = bt
+    row["SpentTotal"] = st
+    we = dur = None
+    sd = _as_date(start_date)
+    if sd:
+        import datetime as _dt
+        we = round(max((_dt.date.today() - sd).days, 0) / 7.0, 1)
+        ed = _as_date(row.get("PlannedShipDate"))
+        if ed and ed > sd:
+            dur = round((ed - sd).days / 7.0, 1)
+    row["WeeksElapsed"] = we
+    row["DurationWeeks"] = dur
+    return row
+
+
+def _exec_charts_columns():
+    labour, material, disc = L("labour"), L("material"), L("discipline")
+    cols = [
+        QueryColumn("Rank", "Rank", "int", "right"),
+        QueryColumn("Project", L("project"), "text", "left", wrap=True),
+        QueryColumn("PctDone", "% Complete", "pct", "right"),
+        QueryColumn("LabPctHrs", f"{labour} %", "pct", "right"),
+        QueryColumn("MatPct", f"{material} %", "pct", "right"),
+        QueryColumn("SlippageDays", "Slippage (d)", "days", "right"),
+        QueryColumn("WeeksElapsed", "Weeks Elapsed", "num", "right"),
+        QueryColumn("DurationWeeks", "Duration (wk)", "num", "right"),
+        QueryColumn("BudgetTotal", f"Budget $", "money", "right"),
+        QueryColumn("SpentTotal", "Spent $", "money", "right"),
+    ]
+    for d in _EXEC_DISC_ORDER:
+        cols.append(QueryColumn(f"disc::{d}", _EXEC_DISC_SHORT[d], "pct", "right", labour))
+    return cols
+
+
+def _exec_charts_result(rows):
+    """Build the visual-dashboard QueryResult. KPIs go in cards; the per-project series ride in rows
+    (the client plots them). Schedule buckets: Delayed = planned ship past the customer-agreed date;
+    At-Risk = on schedule but over labour budget; On-Time = the rest."""
+    import datetime as _dt
+    n = len(rows)
+    delayed = [r for r in rows if (r.get("SlippageDays") or 0) > 0]
+    at_risk = [r for r in rows if (r.get("SlippageDays") or 0) <= 0 and (r.get("LabPctHrs") or 0) > 1.0]
+    on_time = n - len(delayed) - len(at_risk)
+    tot_budget = _sum_money(*[r.get("BudgetTotal") for r in rows]) or 0.0
+    tot_spent = _sum_money(*[r.get("SpentTotal") for r in rows]) or 0.0
+    week = _dt.date.today().isocalendar()[1]
+    cards = [
+        Card("Week", str(week)),
+        Card(f"Active {L('projects')}", str(n)),
+        Card("Total Budget", _fmt_money0(tot_budget)),
+        Card("Spent Budget", _fmt_money0(tot_spent)),
+        Card("On-Time", str(on_time), "good"),
+        Card("At-Risk", str(len(at_risk)), "warn" if at_risk else "good"),
+        Card("Delayed", str(len(delayed)), "bad" if delayed else "good"),
+    ]
+    note = (f"Live visual dashboard — the Executive board as charts, one bar per {L('project').lower()}. "
+            f"KPIs: Total/Spent Budget are applied-rate $ ({L('labour').lower()} budget hours × the "
+            f"project's applied rate + {L('material').lower()} budget; spent = {L('labour').lower()} "
+            f"actual cost + {L('material').lower()} actual). Schedule buckets — Delayed: planned ship "
+            "past the customer-agreed date; At-Risk: on schedule but over "
+            f"{L('labour').lower()} budget; On-Time: the rest. Departmental consumption is per-"
+            f"{L('discipline').lower()} {L('labour').lower()} hours actual ÷ budget; bars over 100% are "
+            "flagged (over budget). Same figures as the Executive board.")
+    return QueryResult("exec_charts", "Executive — Dashboard", _exec_charts_columns(),
+                       rows, cards, note)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ETO report families — Labour / Purchase / Non-Conformance (read-only, live)
 # Each reads a canonical ETO view (never base tables), scoped to the selected
@@ -1978,6 +2104,13 @@ def _date_clause(col, dfrom, dto):
 def _fmt_money2(v):
     try:
         return "${:,.2f}".format(float(v))
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _fmt_money0(v):
+    try:
+        return "${:,.0f}".format(float(v))
     except (TypeError, ValueError):
         return str(v)
 
@@ -3666,11 +3799,12 @@ class DemoQueryService(QueryService):
         return [{"id": pid, "label": str(pid), "ship": d["ship"]}
                 for pid, d in sorted(_DEMO.items())]
 
-    def _q_exec(self, project_ids, **kw):
-        rows = []
+    def _demo_exec_rows(self, project_ids):
+        rows, fins = [], {}
         for pid in self._sel(project_ids):
             d, e = _DEMO[pid], _DEMO_EXEC[pid]
             f = _DemoFin(d)
+            fins[pid] = f
             prw = _DEMO_REWORK.get(pid, {})
             disc_pct = {disc: (round((a - prw.get(disc, (0.0, 0.0))[0]) / b, 4) if b else None)
                         for disc, (b, a) in d["disc"].items()}
@@ -3684,7 +3818,22 @@ class DemoQueryService(QueryService):
             g = _demo_nc_by_project().get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
             rows.append(_exec_row(pid, e["name"], e["client"], f, rec, disc_pct))
+        return rows, fins
+
+    def _q_exec(self, project_ids, **kw):
+        rows, _fins = self._demo_exec_rows(project_ids)
         return _finalize_exec(rows)
+
+    def _q_exec_charts(self, project_ids, **kw):
+        import datetime as _dt
+        rows, fins = self._demo_exec_rows(project_ids)
+        rows = _finalize_exec(rows).rows
+        for r in rows:
+            pid = r.get("ProjectID")
+            # synthesize a plausible production start so the schedule chart demonstrates weeks vs duration
+            start = _dt.date.today() - _dt.timedelta(weeks=40 + (int(pid) % 60))
+            _exec_chart_augment(r, fins.get(pid), start)
+        return _exec_charts_result(rows)
 
     def _sel(self, project_ids):
         pids = [int(p) for p in project_ids] or list(_DEMO)
