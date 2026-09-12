@@ -793,8 +793,11 @@ def _drawing_number(raw):
         '#210292-10M7.0.0.0-01.pdf#'              -> '210292-10M7.0.0.0-01'
         '#F:\\Jobs 2024\\...'  (path only) / '##' / '' -> ''  (no drawing number)
     A token that is a filesystem path (drive letter or UNC) is skipped, not returned."""
-    s = str(raw or "").strip()
-    if not s or set(s) <= {"#"}:
+    import pandas as pd
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return ""                          # NULL/NaN -> blank (not the string "nan")
+    s = str(raw).strip()
+    if not s or s.lower() == "nan" or set(s) <= {"#"}:
         return ""
     for tok in s.split("#"):
         t = tok.strip()
