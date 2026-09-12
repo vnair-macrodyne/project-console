@@ -1004,14 +1004,22 @@ class LiveQueryService(QueryService):
         pids = [int(p) for p in project_ids] if project_ids else None
         dfrom, dto = _as_date(date_from), _as_date(date_to)
         enriched = True
+        enrich_err = None
         try:
             raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto))
-        except Exception:
+        except Exception as e:
+            # Don't swallow silently: a bad enrichment column would otherwise blank RFQ / Lead / flags
+            # with no trace. Log it and surface it on the report note so it's diagnosable.
             enriched = False
+            enrich_err = f"{type(e).__name__}: {e}"
+            import logging
+            logging.getLogger(__name__).warning(
+                "PO exception enrichment query failed; using base query. %s", enrich_err)
             raw = self._df(etospec.query_po_exceptions(False, pids, dfrom, dto))
         as_of = _dt.date.today()
         items = etospec.exc_detail(raw, today=as_of)
-        return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}", enriched)
+        return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}",
+                                   enriched, enrich_err)
 
     def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
@@ -2385,7 +2393,7 @@ def _spec_po_status_result(pdf, label):
                        {"kind": "po_status", "df": pdf, "label": label})
 
 
-def _spec_po_exc_result(items, label, enriched=True):
+def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
     """items = exc_detail output — one row per OPEN, OVERDUE PO line (per-line detail)."""
     grouped = etospec.exc_detail_build_rows(items)
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
@@ -2395,14 +2403,19 @@ def _spec_po_exc_result(items, label, enriched=True):
     cards = [Card("Overdue lines", "{:,}".format(n), "bad" if n else "good"),
              Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
     note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
-            "line. Code = machine/spec; Category = item category; Receipt Date = last receipt; "
-            "Release Date = when the item's BOM was released to purchasing (ETO release log, eng date "
-            "as fallback); Last Activity = latest of order date, last receipt and header revision (a "
-            "last-activity signal, not an edit audit — ETO keeps no PO edit timestamp). Status "
-            "is derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates and Lead "
-            "Time are shown for the workbook layout but ETO holds no maintained source for them, so "
-            "they read blank."
-            + ("" if enriched else " Item details weren't available this run, so LLT / Oversize are blank."))
+            "line. Code = machine/spec; Category = item category; Drawing No. = the item's drawing "
+            "(from the engineering item master); RFQ Date = the item's last RFQ on this project; "
+            "Lead Time = estimated lead-time days; Oversized / Inspected / Critical = the item's "
+            "'Oversize Permit Required' / 'Requires Inspection' / 'Critical Path' flags. Receipt Date "
+            "= last receipt; Release Date = when the item's BOM was released to purchasing (ETO "
+            "release log, eng date as fallback); Last Activity = latest of order date, last receipt "
+            "and header revision (a last-activity signal, not an edit audit — ETO keeps no PO edit "
+            "timestamp). Status is derived. Lead Time / Oversized / Inspected / Critical read blank "
+            "where the ETO item hasn't been maintained. Planned Ship, Days to Assembly and Permit "
+            "Dates are shown for the workbook layout but ETO holds no source for them."
+            + ("" if enriched else
+               " NOTE: item enrichment (Drawing / RFQ / Lead / flags) was unavailable this run"
+               + (f" — {enrich_err}" if enrich_err else "") + ", so those columns are blank."))
     return QueryResult("po_exceptions", "Purchasing — Procurement Exceptions", qcols, rows, cards, note,
                        {"kind": "exceptions", "items": items, "label": label})
 
@@ -4584,24 +4597,29 @@ _DEMO_PACKSLIP = [
 # Procurement Exceptions — query_po_exceptions output shape
 _DEMO_EXC_COLS = ["Buyer", "ProjectID", "JobName", "Code", "Item", "Description", "Category",
                   "PO", "Vendor", "Qty", "Received", "ExtValue", "DateRequired", "DateRevised",
-                  "ReceiptDate", "Ordered", "LeadDays", "LLTFlag", "OverFlag", "EngReleaseDate",
-                  "RFQDate"]
+                  "ReceiptDate", "Ordered", "LeadDays", "LLTFlag", "OverFlag", "CritFlag",
+                  "InspFlag", "DrawingRaw", "EngReleaseDate", "RFQDate"]
 _DEMO_EXC_RAW = [
     {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48255",
      "Description": "Spherical roller bearings (lot)", "Category": "Bearings", "PO": "48255",
      "Vendor": "SKF Canada", "Qty": 40, "Received": 0, "ExtValue": 28800.0,
      "DateRequired": "2026-06-30", "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-05-02",
-     "LeadDays": 62, "LLTFlag": 1, "OverFlag": 0, "EngReleaseDate": "2026-04-15", "RFQDate": "2026-04-02"},
+     "LeadDays": 62, "LLTFlag": 1, "OverFlag": 0, "CritFlag": 1, "InspFlag": 1,
+     "DrawingRaw": "8900M0.0.0.0-08.PDF#F:\\Solidworks Data\\Library\\8900M0.0.0.0-08.pdf#",
+     "EngReleaseDate": "2026-04-15", "RFQDate": "2026-04-02"},
     {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48260",
      "Description": "Cylinder seals & glands", "Category": "Hydraulic Components", "PO": "48260",
      "Vendor": "Bosch Rexroth", "Qty": 12, "Received": 4, "ExtValue": 15400.0,
      "DateRequired": "2026-07-10", "DateRevised": None, "ReceiptDate": "2026-07-18",
-     "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0, "OverFlag": 0, "EngReleaseDate": None, "RFQDate": None},
+     "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0, "OverFlag": 0, "CritFlag": 0, "InspFlag": 0,
+     "DrawingRaw": "#F:\\Jobs 2024\\240115 - Zehrco\\#", "EngReleaseDate": None, "RFQDate": None},
     {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Code": 20, "Item": "48120",
      "Description": "S7-1500 PLC + IO", "Category": "Electrical / Controls", "PO": "48120",
      "Vendor": "Siemens", "Qty": 1, "Received": 0, "ExtValue": 47600.0, "DateRequired": "2026-07-01",
      "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-06-22", "LeadDays": 120,
-     "LLTFlag": 1, "OverFlag": 1, "EngReleaseDate": "2026-05-30", "RFQDate": "2026-05-20"},
+     "LLTFlag": 1, "OverFlag": 1, "CritFlag": 1, "InspFlag": 0,
+     "DrawingRaw": "240088-300A2.3.2.0-01.pdf#F:\\Jobs\\#",
+     "EngReleaseDate": "2026-05-30", "RFQDate": "2026-05-20"},
 ]
 
 # Extra lines to exercise the ALL-STATUS PO listing (received + open-before-need-by) on top of the
