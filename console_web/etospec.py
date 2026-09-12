@@ -732,13 +732,13 @@ _LLT_CRITICAL_DAYS = 90
 # Last Updated (no PO-line modified timestamp). Kept as columns so the layout matches the workbook.
 COLS_EXC = [
     ("Buyer",          "Buyer",            16, "L", False),
+    ("PO",             "PO #",             10, "L", False),
     ("ProjectID",      "Project #",         8, "C", False),
     ("JobName",        "Project",          20, "L", False),
     ("Code",           "Code",              6, "C", False),
     ("Item",           "Item",             11, "L", False),
     ("Category",       "Category",         16, "L", False),
     ("EngRelease",     "Release Date",     11, "C", False),
-    ("PO",             "PO #",             10, "L", False),
     ("PlannedShip",    "Planned Ship",     11, "C", False),
     ("PlannedReceipt", "Planned Receipt",  12, "C", False),
     ("RevisedReceipt", "Revised Receipt",  12, "C", False),
@@ -751,6 +751,9 @@ COLS_EXC = [
     ("LeadTime",       "Lead Time",         8, "R", True),
     ("Oversized",      "Oversized",         8, "C", False),
 ]
+
+# column index of "Item" (the grand-total "N line(s)" sits here) — computed so it survives reorders
+_EXC_ITEM_IDX = next(i for i, c in enumerate(COLS_EXC) if c[0] == "Item")
 
 
 def _num_or_none(v):
@@ -856,7 +859,7 @@ def exc_detail_build_rows(items):
     rows = [([r[c[0]] for c in COLS_EXC], "detail") for _, r in it.iterrows()]
     tot = [""] * len(COLS_EXC)
     tot[0] = "GRAND TOTAL"
-    tot[4] = f"{len(it)} line(s)"
+    tot[_EXC_ITEM_IDX] = f"{len(it)} line(s)"
     rows.append((tot, "grand"))
     return rows
 
@@ -1044,7 +1047,7 @@ def po_listing_build_rows(items):
     rows = [([r[c[0]] for c in COLS_EXC], "detail") for _, r in it.iterrows()]
     tot = [""] * len(COLS_EXC)
     tot[0] = "GRAND TOTAL"
-    tot[4] = f"{len(it)} line(s)"
+    tot[_EXC_ITEM_IDX] = f"{len(it)} line(s)"
     rows.append((tot, "grand"))
     return rows
 
