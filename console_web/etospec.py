@@ -742,7 +742,7 @@ COLS_EXC = [
     ("Code",           "Code",              6, "C", False),
     ("Item",           "Item",             11, "L", False),
     ("Category",       "Category",         16, "L", False),
-    ("DrawingNo",      "Drawing No.",      14, "L", False),
+    ("DrawingNo",      "Drawing",          16, "L", False),
     ("EngRelease",     "Release Date",     11, "C", False),
     ("PlannedShip",    "Planned Ship",     11, "C", False),
     ("PlannedReceipt", "Planned Receipt",  12, "C", False),
@@ -786,13 +786,14 @@ def _is_freight(*vals):
     return False
 
 
-def _drawing_number(raw):
+def _drawing_file(raw):
     """ETO stores tblEngItemMaster.Drawing as '<drawing file>#<full path>#' (either part may be
-    empty). The drawing NUMBER is the filename token, with its extension stripped:
-        '8900M0.0.0.0-08.PDF#F:\\Solidworks...#'  -> '8900M0.0.0.0-08'
-        '#210292-10M7.0.0.0-01.pdf#'              -> '210292-10M7.0.0.0-01'
-        '#F:\\Jobs 2024\\...'  (path only) / '##' / '' -> ''  (no drawing number)
-    A token that is a filesystem path (drive letter or UNC) is skipped, not returned."""
+    empty). Return just the drawing FILE NAME (extension kept) — NOT the fully-qualified path:
+        '8900M0.0.0.0-08.PDF#F:\\Solidworks...#'  -> '8900M0.0.0.0-08.PDF'
+        '#210292-10M7.0.0.0-01.pdf#'              -> '210292-10M7.0.0.0-01.pdf'
+        '#F:\\Jobs 2024\\...'  (path only) / '##' / '' -> ''  (no drawing file)
+    A token that is a filesystem path (drive letter or UNC) is skipped; if the chosen token still
+    carries path separators, only its last segment (the file name) is returned."""
     import pandas as pd
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return ""                          # NULL/NaN -> blank (not the string "nan")
@@ -805,12 +806,10 @@ def _drawing_number(raw):
             continue
         low = t.lower()
         if low[1:3] == ":\\" or low.startswith("\\\\") or ":\\" in low:
-            continue                       # a path, not the drawing number
-        if "." in t:                       # strip a trailing file extension (.pdf/.dwg/.slddrw…)
-            base, ext = t.rsplit(".", 1)
-            if base and 1 <= len(ext) <= 6 and ext.isalnum():
-                t = base
-        return t
+            continue                       # a fully-qualified path, not the drawing file name
+        if "\\" in t or "/" in t:          # a relative path — keep only the file-name segment
+            t = t.replace("/", "\\").rstrip("\\").split("\\")[-1]
+        return t                           # file name WITH its extension
     return ""
 
 
@@ -883,7 +882,7 @@ def exc_detail(df, today=None):
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path
-            "DrawingNo": _drawing_number(r.get("DrawingRaw")),
+            "DrawingNo": _drawing_file(r.get("DrawingRaw")),
             "ExtValue": round(_num_or_none(r.get("ExtValue")) or 0.0, 2),
             "DaysLate": (today - needd).days,
         })
@@ -1091,7 +1090,7 @@ def po_listing_detail(df, today=None):
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path
-            "DrawingNo": _drawing_number(r.get("DrawingRaw")),
+            "DrawingNo": _drawing_file(r.get("DrawingRaw")),
             "ExtValue": round(_num_or_none(r.get("ExtValue")) or 0.0, 2),
             "DaysLate": ((today - needd).days if needd else -10 ** 6),
         })
