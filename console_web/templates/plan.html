@@ -32,6 +32,16 @@
   button.save{background:var(--brand);color:#fff;border:0;border-radius:9px;padding:11px 20px;font-size:14px;font-weight:600;cursor:pointer}
   button.save:hover{background:var(--brand-2)}
   button.save:disabled{opacity:.5;cursor:default}
+  button.ghost{background:#fff;border:1px solid var(--line);border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;color:var(--brand)}
+  button.ghost:hover{background:#f2f6ff}
+  button.ghost.danger{color:var(--bad);border-color:#f0c9c5}
+  button.ghost.danger:hover{background:var(--bad-bg)}
+  button.ghost:disabled{opacity:.5;cursor:default}
+  .kpis{display:flex;flex-wrap:wrap;gap:10px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 14px;min-width:120px}
+  .kpi .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .kpi .v{font-size:18px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+  .kpi .v.bad{color:var(--bad)}.kpi .v.warn{color:#8a5a00}.kpi .v.good{color:var(--good)}
   .msg{font-size:13px;padding:8px 12px;border-radius:8px;display:none}
   .msg.ok{background:var(--good-bg);color:var(--good);display:block}
   .msg.err{background:var(--bad-bg);color:var(--bad);display:block}
@@ -66,17 +76,31 @@
 
 <div class="wrap">
   <div class="card">
-    <h2>Project Plan — Schedule &amp; Progress</h2>
-    <p class="hint">Enter this week's schedule for a project. Saving records it against the
-      current week; the dashboard's Schedule, % Done and run-out cells read the latest week.</p>
+    <h2>Project Plan — Budget, Schedule &amp; Progress</h2>
+    <p class="hint">One place to manage a project on the console: bring it in (or remove it), see its
+      budget &amp; efficacy, and enter this week's schedule &amp; progress. Saving records progress
+      against the current week; the dashboard reads the latest week.</p>
     <div class="row" style="margin-top:10px">
       <div class="fld"><label>Project</label><select id="proj"></select></div>
       <div class="fld"><label>Entered by</label><input id="by" class="entry" placeholder="Your name / initials"></div>
       <span class="pill" id="status"></span>
     </div>
+    <div class="actions" id="trackRow" style="display:none;margin-top:12px">
+      <button class="ghost" id="addBtn" style="display:none">+ Add to Console</button>
+      <button class="ghost danger" id="removeBtn" style="display:none">Remove from Console</button>
+      <span class="hint" id="trackHint"></span>
+      <div class="msg" id="trackMsg"></div>
+    </div>
   </div>
 
   <div id="form" style="display:none">
+    <div class="card" id="budgetCard">
+      <h2>Budget &amp; Efficacy <span class="hint" id="budgetSrc" style="font-weight:400"></span></h2>
+      <div class="kpis" id="budgetKpis"></div>
+      <div id="budgetDisc" style="margin-top:12px"></div>
+      <p class="hint" id="budgetEmpty" style="display:none">No budget on file for this project yet.</p>
+    </div>
+
     <div class="card">
       <h2>This Week — Schedule</h2>
       <div class="row">
@@ -234,8 +258,8 @@ async function loadProjects(sel){
 }
 
 el('proj').onchange=async()=>{
-  const pid=el('proj').value; hideMsg();
-  if(!pid){ el('form').style.display='none'; el('status').textContent=''; return; }
+  const pid=el('proj').value; hideMsg(); hideTrackMsg();
+  if(!pid){ el('form').style.display='none'; el('status').textContent=''; el('trackRow').style.display='none'; return; }
   const b=await (await fetch('/api/plan/'+pid)).json();
   el('status').textContent=b.exists?'Updating this week':'New — first entry for this project';
   el('planned_ship').value=b.planned_ship||'';
@@ -245,7 +269,89 @@ el('proj').onchange=async()=>{
   el('rework_threshold').value=(b.rework_threshold!=null?b.rework_threshold:'');
   buildMDGrid(b.machines||[]);
   el('form').style.display='block';
+  await loadBudget(pid);
 };
+
+// Budget & efficacy summary + Add/Remove-from-console controls (folded in from the old PM page).
+function money(n){ return n==null?'—':('$'+Number(n).toLocaleString(undefined,{maximumFractionDigits:0})); }
+function kpi(k,v,cls){ return `<div class="kpi"><div class="k">${k}</div><div class="v ${cls||''}">${v}</div></div>`; }
+
+async function loadBudget(pid){
+  el('trackRow').style.display='flex';
+  let d={};
+  try{ d=await (await fetch('/api/pm/budget/'+pid)).json(); }catch(e){ d={}; }
+  state.tracked=!!d.tracked;
+  renderTrackControls(d);
+  renderBudget(d);
+}
+
+function renderTrackControls(d){
+  const ro=state.readonly, tracked=!!d.tracked;
+  el('addBtn').style.display=(!tracked && !ro)?'inline-block':'none';
+  el('removeBtn').style.display=(tracked && !ro)?'inline-block':'none';
+  el('trackHint').textContent = tracked
+    ? 'On the console — visible on dashboards & reports.'
+    : (ro ? 'Not on the console.' : 'Not on the console — add it to show it on dashboards & reports.');
+}
+
+function renderBudget(d){
+  const discs=d.disciplines||[];
+  const has = discs.length || d.material_total!=null || d.labour_hours!=null;
+  el('budgetEmpty').style.display = has ? 'none' : 'block';
+  el('budgetSrc').textContent = (has && d.source) ? ('— '+d.source+(d.read_only?' (read-only)':'')) : '';
+  // project rollup: CPI = Σearned ÷ Σactual; % = completeness-weighted (weight = budget, else actual)
+  let earned=0, actual=0, pctw=0, w=0;
+  discs.forEach(x=>{ const b=x.hours||0, a=x.actual_hours||0;
+    earned+=(x.earned_hours||0); actual+=a;
+    if(x.pct_done!=null){ pctw+=x.pct_done*(b||a); w+=(b||a); } });
+  const cpi = (actual>0 && earned>0) ? earned/actual : null;
+  const pct = w>0 ? pctw/w : null;
+  const cpiCls = cpi==null?'':(cpi<0.9?'bad':(cpi<1.0?'warn':'good'));
+  el('budgetKpis').innerHTML =
+    kpi('Material $', money(d.material_total)) +
+    kpi('Labour (hrs)', d.labour_hours!=null?fmtN(d.labour_hours):'—') +
+    kpi('% Complete', pct!=null?Math.round(pct*100)+'%':'—') +
+    kpi('Project CPI', cpi!=null?cpi.toFixed(2):'—', cpiCls);
+  if(!discs.length){ el('budgetDisc').innerHTML=''; return; }
+  let h='<table class="mdt"><tr><th>Discipline</th><th class="num">Budget (hrs)</th>'+
+    '<th class="num">Actual (hrs)</th><th class="num">% Done</th><th class="num">Earned (hrs)</th><th class="num">CPI</th></tr>';
+  discs.forEach(x=>{ const c=x.cpi, cls=c==null?'':(c<0.9?'bad':(c<1.0?'warn':''));
+    h+=`<tr><td>${x.discipline}</td><td class="num">${fmtN(x.hours)}</td>`+
+       `<td class="num">${fmtN(x.actual_hours)}</td>`+
+       `<td class="num">${x.pct_done!=null?Math.round(x.pct_done*100)+'%':'—'}</td>`+
+       `<td class="num">${x.earned_hours!=null?fmtN(x.earned_hours):'—'}</td>`+
+       `<td class="num cpi ${cls}">${c!=null?c.toFixed(2):'—'}</td></tr>`; });
+  h+='</table>';
+  el('budgetDisc').innerHTML=h;
+}
+
+el('addBtn').onclick=async()=>{
+  const pid=el('proj').value; if(!pid) return;
+  el('addBtn').disabled=true; showTrackMsg('','Adding…');
+  try{
+    const r=await fetch('/api/pm/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:Number(pid)})});
+    const d=await r.json();
+    if(!r.ok){ showTrackMsg('err', d.error||'Add failed'); }
+    else{ showTrackMsg('ok', `Project ${pid} added to the console.`); await loadProjects(pid); await el('proj').onchange(); }
+  }catch(e){ showTrackMsg('err', String(e)); }
+  el('addBtn').disabled=false;
+};
+
+el('removeBtn').onclick=async()=>{
+  const pid=el('proj').value; if(!pid) return;
+  if(!confirm(`Remove project ${pid} from the console?\n\nIt will disappear from the dashboards and reports. Its budget and saved plan/progress are KEPT — you can add it back anytime.`)) return;
+  el('removeBtn').disabled=true; showTrackMsg('','Removing…');
+  try{
+    const r=await fetch('/api/pm/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:Number(pid)})});
+    const d=await r.json();
+    if(!r.ok){ showTrackMsg('err', d.error||'Remove failed'); }
+    else{ showTrackMsg('ok', `Project ${pid} removed from the console (reversible — data kept).`); await loadProjects(pid); await el('proj').onchange(); }
+  }catch(e){ showTrackMsg('err', String(e)); }
+  el('removeBtn').disabled=false;
+};
+
+function showTrackMsg(cls,txt){ const m=el('trackMsg'); m.className='msg '+(cls||''); m.textContent=txt; m.style.display='block'; }
+function hideTrackMsg(){ const m=el('trackMsg'); m.style.display='none'; }
 
 el('saveBtn').onclick=async()=>{
   const pid=el('proj').value; if(!pid) return;

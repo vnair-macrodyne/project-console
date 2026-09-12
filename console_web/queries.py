@@ -563,12 +563,24 @@ class LiveQueryService(QueryService):
                 pass
 
     # -- interface --------------------------------------------------------------
+    def _excluded_ids(self):
+        """Projects the PM has 'removed from console' (Reporting.tblConsoleProjectExclusion, sql/017)
+        — a reversible soft-hide. Guarded: an empty set if the migration hasn't been applied, so the
+        console behaves exactly as before until Remove-from-Console is used."""
+        try:
+            cur = self._console_conn().cursor()
+            cur.execute("SELECT ProjectID FROM Reporting.tblConsoleProjectExclusion")
+            return {int(r[0]) for r in cur.fetchall()}
+        except Exception:
+            return set()
+
     def list_projects(self):
         conn = self._console_conn()
         cur = conn.cursor()
         cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent "
                     "ORDER BY ProjectID")
-        ids = [int(r[0]) for r in cur.fetchall()]
+        excl = self._excluded_ids()
+        ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
         ov = self._overlay_map()
         out = []
         for pid in ids:

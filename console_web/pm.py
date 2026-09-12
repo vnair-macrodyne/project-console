@@ -173,6 +173,9 @@ class PMService:
     def add_project(self, project_id, entered_by=None) -> dict:
         raise NotImplementedError
 
+    def remove_project(self, project_id, entered_by=None) -> dict:
+        raise NotImplementedError
+
     def save_budget(self, payload) -> dict:
         raise NotImplementedError
 
@@ -229,10 +232,21 @@ class LivePMService(PMService):
     def scaffold(self):
         return {"disciplines": _grouped(self._crosswalk())}
 
+    def _excluded_ids(self):
+        """Projects the PM has 'removed from console' (sql/017) — a reversible soft-hide. Guarded:
+        returns an empty set if the migration hasn't been applied, so nothing breaks."""
+        try:
+            cur = self._cc().cursor()
+            cur.execute("SELECT ProjectID FROM Reporting.tblConsoleProjectExclusion")
+            return {int(r[0]) for r in cur.fetchall()}
+        except Exception:
+            return set()
+
     def _budgeted_ids(self):
         cur = self._cc().cursor()
         cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent")
-        return [int(r[0]) for r in cur.fetchall()]
+        excl = self._excluded_ids()
+        return [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
 
     def list_projects(self):
         budgeted_ids = set(self._budgeted_ids())
@@ -332,12 +346,29 @@ class LivePMService(PMService):
                 "labour_hours": b.labour_budget_hours, "disciplines": disciplines,
                 "machines": machines}
 
+    def _unexclude(self, pid):
+        """Clear a project's 'removed from console' mark (idempotent, guarded)."""
+        try:
+            cur = self._cc().cursor()
+            cur.execute("DELETE FROM Reporting.tblConsoleProjectExclusion WHERE ProjectID = ?", int(pid))
+            self._cc().commit()
+        except Exception:
+            pass
+
     def add_project(self, project_id, entered_by=None):
         """Bring an ETO project into the Console: bank its ETO budget as a versioned row
-        (source='ETO'), which makes it tracked (dashboard-visible) and starts its history."""
+        (source='ETO'), which makes it tracked (dashboard-visible) and starts its history.
+        Re-adding a previously removed project just clears its exclusion — its budget/plan history
+        is intact, so no redundant version is banked."""
         from console.domain.eto_budget import EtoBudgetDAO
         from console.domain.budget import BudgetDAO
         pid = int(project_id)
+        self._unexclude(pid)                       # un-hide first (covers the re-add case)
+        cur = self._cc().cursor()
+        cur.execute("SELECT 1 FROM Reporting.vw_Console_BudgetCurrent WHERE ProjectID = ?", pid)
+        if cur.fetchone():                         # already banked → un-excluding is all it needed
+            return {"ok": True, "project_id": pid, "tracked": True, "version": None,
+                    "labour_hours": None, "readded": True}
         b = EtoBudgetDAO(self._ec(), self._hourtype_map()).get_current(pid)
         if b is None or not b.discipline_hours:
             raise ValueError(f"Project {pid} has no ETO budget to bring in.")
@@ -345,6 +376,20 @@ class LivePMService(PMService):
             b, effective=_dt.date.today(), source="ETO", created_by=(entered_by or "console"))
         return {"ok": True, "project_id": pid, "tracked": True, "version": int(vid),
                 "labour_hours": b.labour_budget_hours}
+
+    def remove_project(self, project_id, entered_by=None):
+        """Remove a project from the Console — REVERSIBLE. Adds it to the exclusion list so it drops
+        off the dashboards / project lists, but its banked budget and plan/progress rows are kept
+        intact; a later 'Add to Console' restores it in full. No ETO or store data is deleted."""
+        pid = int(project_id)
+        conn = self._cc()
+        cur = conn.cursor()
+        cur.execute(
+            "IF NOT EXISTS (SELECT 1 FROM Reporting.tblConsoleProjectExclusion WHERE ProjectID = ?) "
+            "INSERT INTO Reporting.tblConsoleProjectExclusion (ProjectID, ExcludedBy) VALUES (?, ?)",
+            pid, pid, (entered_by or None))
+        conn.commit()
+        return {"ok": True, "project_id": pid, "tracked": False}
 
     def save_budget(self, payload):
         from console.domain.budget import Budget, BudgetDAO, BudgetLine
@@ -396,12 +441,13 @@ class DemoPMService(PMService):
                            "Hydraulic Shop Start-Up": 160, "Electrical Panel Building": 800,
                            "Electrical Wiring - Machine": 160, "Fabrication/Welding (IW)": 320}},
     }
+    _excluded = set()   # 'removed from console' (reversible), shared with DemoPlanService via this set
 
     def scaffold(self):
         return {"disciplines": _scaffold_from_sheet()}
 
     def list_projects(self):
-        budgeted_ids = set(DemoPMService._store)
+        budgeted_ids = set(DemoPMService._store) - DemoPMService._excluded
         budgeted = [{"id": pid, "name": _DEMO_NAMES.get(pid, "")} for pid in sorted(budgeted_ids)]
         available = [{"id": pid, "name": nm} for pid, nm in sorted(_DEMO_NAMES.items())
                      if pid not in budgeted_ids]
@@ -411,7 +457,7 @@ class DemoPMService(PMService):
         pid = int(project_id)
         rec = DemoPMService._store.get(pid)
         name = _DEMO_NAMES.get(pid, "")
-        tracked = pid in DemoPMService._store
+        tracked = pid in DemoPMService._store and pid not in DemoPMService._excluded
         if rec:
             _, disc = _build_detail(rec.get("lines", {}), _DEMO_XWALK)
             mat = rec.get("material_total")
@@ -447,12 +493,18 @@ class DemoPMService(PMService):
 
     def add_project(self, project_id, entered_by=None):
         pid = int(project_id)
+        DemoPMService._excluded.discard(pid)                 # re-add clears the removal
         DemoPMService._store.setdefault(pid, {
             "material_total": 1500000.0,
             "lines": {"Project Coordination": 200, "Mechanical Engineering": 1200,
                       "Electrical Engineering": 1000, "Hydraulic Engineering": 400,
                       "Mechanical Assembly": 3000}})
         return {"ok": True, "project_id": pid, "tracked": True, "version": 1, "labour_hours": 4800}
+
+    def remove_project(self, project_id, entered_by=None):
+        pid = int(project_id)
+        DemoPMService._excluded.add(pid)                     # reversible: data kept, just hidden
+        return {"ok": True, "project_id": pid, "tracked": False}
 
     def save_budget(self, payload):
         pid = int(payload["project_id"])

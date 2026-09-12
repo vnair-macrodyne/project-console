@@ -93,10 +93,21 @@ class LivePlanService(PlanService):
         except Exception:
             return {}
 
+    def _excluded_ids(self):
+        """Projects 'removed from console' (sql/017) — reversible soft-hide. Guarded (empty on
+        a missing table) so the plan page still works before the migration is applied."""
+        try:
+            cur = self._cc().cursor()
+            cur.execute("SELECT ProjectID FROM Reporting.tblConsoleProjectExclusion")
+            return {int(r[0]) for r in cur.fetchall()}
+        except Exception:
+            return set()
+
     def _budgeted_ids(self):
         cur = self._cc().cursor()
         cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent")
-        return [int(r[0]) for r in cur.fetchall()]
+        excl = self._excluded_ids()
+        return [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
 
     def list_projects(self):
         # projects with a budget are the ones a plan is meaningful for; others can be brought in
@@ -460,8 +471,16 @@ class DemoPlanService(PlanService):
 
     def list_projects(self):
         planned = set(DemoPlanService._store)
-        prim = [{"id": pid, "name": _DEMO_NAMES.get(pid, "")} for pid in sorted(_DEMO_NAMES)]
-        return {"budgeted": prim, "available": [], "planned": sorted(planned)}
+        try:                                              # share the reversible-exclusion set
+            from console_web.pm import DemoPMService
+            excl = DemoPMService._excluded
+        except Exception:
+            excl = set()
+        prim = [{"id": pid, "name": _DEMO_NAMES.get(pid, "")}
+                for pid in sorted(_DEMO_NAMES) if pid not in excl]
+        avail = [{"id": pid, "name": _DEMO_NAMES.get(pid, "")}
+                 for pid in sorted(_DEMO_NAMES) if pid in excl]
+        return {"budgeted": prim, "available": avail, "planned": sorted(planned)}
 
     def get_plan(self, project_id):
         pid = int(project_id)

@@ -396,6 +396,23 @@ def api_pm_add():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/pm/remove", methods=["POST"])
+def api_pm_remove():
+    denied = auth.gate("pm")           # only PM / Admin may remove a project from the console
+    if denied:
+        return denied
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("project_id"):
+        return jsonify({"error": "project_id is required"}), 400
+    try:
+        out = _pm_call(lambda s: s.remove_project(payload["project_id"], g.get("user")))
+        cache_mod.cache.mark_dirty()   # project hidden -> refresh the dashboard now
+        return jsonify(out)
+    except Exception as e:
+        app.logger.exception("pm remove_project failed")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── PM controls: author/edit a project's plan (schedule & progress) ───────────
 @app.route("/plan")
 def plan_page():
