@@ -176,7 +176,8 @@ class LivePlanService(PlanService):
         # superset of the budget-vs-actual breakdown; the PM declares progress at the cell.
         agg = self._md_agg(pid)
         prog = self._md_progress(pid)          # {(SpecID, discipline): form %}
-        base["machines"] = self._grid(agg, prog)
+        rem = self._md_remaining(pid)          # {(SpecID, discipline): hours remaining to completion}
+        base["machines"] = self._grid(agg, prog, rem)
         if any(d["pct"] is not None for m in base["machines"] for d in m["disciplines"]):
             base["exists"] = True
         return base
@@ -227,16 +228,19 @@ class LivePlanService(PlanService):
         return agg
 
     @staticmethod
-    def _grid(agg, prog):
-        """Shape the agg + entered % into the ordered machine grid (real machines numeric-sorted,
-        overhead group last)."""
+    def _grid(agg, prog, rem=None):
+        """Shape the agg + entered progress into the ordered machine grid (real machines
+        numeric-sorted, overhead group last). `rem` carries hours-remaining per cell (the PM input);
+        `prog` the derived % (for display)."""
+        rem = rem or {}
         def _mkey(k):
             return (1, 0) if k == 0 else (0, k)
         out = []
         for spec in sorted(agg, key=_mkey):
             dh = agg[spec]
             discs = [{"discipline": d, "budget_hours": round(dh[d][0], 2),
-                      "actual_hours": round(dh[d][1], 2), "pct": prog.get((spec, d))}
+                      "actual_hours": round(dh[d][1], 2), "pct": prog.get((spec, d)),
+                      "remaining": rem.get((spec, d))}
                      for d in sorted(dh)]
             out.append({
                 "spec": spec,
@@ -261,6 +265,24 @@ class LivePlanService(PlanService):
                 "  WHERE ProjectID = ? AND PercentComplete IS NOT NULL) t WHERE rn = 1", pid)
             for s, d, pct in cur.fetchall():
                 out[(int(s), str(d))] = _pct_out(pct)
+        except Exception:
+            pass
+        return out
+
+    def _md_remaining(self, pid):
+        """{(SpecID(int), discipline): hours remaining to completion} — latest week per cell.
+        The PM input the % is derived from (EAC = actual + remaining)."""
+        out = {}
+        try:
+            cur = self._cc().cursor()
+            cur.execute(
+                "SELECT SpecID, Discipline, RemainingHours FROM ("
+                "  SELECT SpecID, Discipline, RemainingHours,"
+                "         ROW_NUMBER() OVER (PARTITION BY SpecID, Discipline ORDER BY YearWeekKey DESC) rn"
+                "  FROM Reporting.tblProjectMachineDisciplineProgress"
+                "  WHERE ProjectID = ? AND RemainingHours IS NOT NULL) t WHERE rn = 1", pid)
+            for s, d, hrs in cur.fetchall():
+                out[(int(s), str(d))] = round(float(hrs), 2) if hrs is not None else None
         except Exception:
             pass
         return out
@@ -301,13 +323,15 @@ class LivePlanService(PlanService):
                 carry.get("LLTPReleasedLate"), carry.get("LLTPOrderedLate"),
                 carry.get("LLTPDeliveredLate"), carry.get("PartsReleasedLate"),
                 carry.get("PartsOrderedLate"), carry.get("Rank"), carry.get("ReRank"))
-        # % complete is captured at the MACHINE × DISCIPLINE cell (the finest budgeted unit).
+        # Progress is captured as HOURS REMAINING TO COMPLETION at the machine × discipline cell
+        # (the finest budgeted unit). % complete is derived = actual / (actual + remaining).
         cells = payload.get("machine_discipline_progress") or []
-        self._save_md_progress(cur, pid, fy, wk, key, by, cells)
+        actuals = self._md_agg(pid)            # {spec: {disc: [budget, actual]}} — for %-from-remaining
+        self._save_md_progress(cur, pid, fy, wk, key, by, cells, actuals)
         # The per-discipline % the dashboard / scorecard run-out reads is DERIVED (budget-weighted)
         # from those cells and written here, so the PM enters progress once — at the cell.
         self._save_discipline_progress(cur, pid, fy, wk, key, by,
-                                       self._derive_discipline_pct(pid, cells))
+                                       self._derive_discipline_pct(cells, actuals))
         conn.commit()
         return {"ok": True, "project_id": pid, "week": key,
                 "planned_ship": _iso(ship)}
@@ -331,9 +355,10 @@ class LivePlanService(PlanService):
                             " PercentComplete, EnteredBy, CapturedAt) VALUES (?,?,?,?,?,?,?,GETDATE())",
                             pid, fy, wk, key, disc, frac, by)
 
-    def _save_md_progress(self, cur, pid, fy, wk, key, by, cells):
-        """Upsert per machine×discipline % complete for the current week. cells is a list of
-        {spec, discipline, pct}; a blank pct clears that cell (NULL)."""
+    def _save_md_progress(self, cur, pid, fy, wk, key, by, cells, actuals):
+        """Upsert per machine×discipline HOURS REMAINING for the current week, plus the % complete
+        derived from it (% = actual / (actual + remaining)). cells is a list of {spec, discipline,
+        remaining}; a blank remaining clears that cell (RemainingHours + PercentComplete → NULL)."""
         for c in cells:
             try:
                 spec = int(c.get("spec"))
@@ -342,28 +367,30 @@ class LivePlanService(PlanService):
             disc = str(c.get("discipline") or "").strip()
             if not disc:
                 continue
-            frac = _frac_pct(c.get("pct"))
+            remaining = _remaining_in(c.get("remaining"))
+            a = (actuals.get(spec, {}).get(disc) or [0.0, 0.0])[1]
+            frac = _pct_from_remaining(a, remaining)   # None when remaining blank
             cur.execute("SELECT ProgressID FROM Reporting.tblProjectMachineDisciplineProgress "
                         "WHERE ProjectID = ? AND YearWeekKey = ? AND SpecID = ? AND Discipline = ?",
                         pid, key, spec, disc)
             r = cur.fetchone()
             if r:
                 cur.execute("UPDATE Reporting.tblProjectMachineDisciplineProgress "
-                            "SET PercentComplete = ?, EnteredBy = ?, CapturedAt = GETDATE() "
-                            "WHERE ProgressID = ?", frac, by, int(r[0]))
+                            "SET RemainingHours = ?, PercentComplete = ?, EnteredBy = ?, "
+                            "CapturedAt = GETDATE() WHERE ProgressID = ?", remaining, frac, by, int(r[0]))
             else:
                 cur.execute("INSERT INTO Reporting.tblProjectMachineDisciplineProgress "
                             "(ProjectID, FiscalYear, WeekNo, YearWeekKey, SpecID, Discipline, "
-                            " PercentComplete, EnteredBy, CapturedAt) VALUES (?,?,?,?,?,?,?,?,GETDATE())",
-                            pid, fy, wk, key, spec, disc, frac, by)
+                            " RemainingHours, PercentComplete, EnteredBy, CapturedAt) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,GETDATE())",
+                            pid, fy, wk, key, spec, disc, remaining, frac, by)
 
-    def _derive_discipline_pct(self, pid, cells):
-        """Roll the cell %s UP to a per-discipline % — COMPLETENESS-weighted (Σ %×weight ÷ Σ weight),
-        where a cell's weight is its budget, or its actual hours when the cell is unbudgeted
-        (worked but never budgeted) — so off-plan work still counts. Matches the Budgets-page
-        roll-up. Written to tblProjectDisciplineProgress (the run-out source) so the PM enters
-        progress once, at the cell. Returns {discipline: 0..1 fraction}."""
-        agg = self._md_agg(pid)                        # {spec: {disc: [budget, actual]}}
+    def _derive_discipline_pct(self, cells, actuals):
+        """Roll the cells UP to a per-discipline % for the dashboard/scorecard run-out. Each cell's %
+        is derived from hours remaining (% = actual / (actual + remaining)); the roll-up is then
+        COMPLETENESS-weighted (Σ %×weight ÷ Σ weight, weight = budget, or actual for unbudgeted
+        off-plan work) — the SAME method as before, so the run-out shape is unchanged. Returns
+        {discipline: 0..1 fraction}."""
         cell_frac = {}
         for c in cells:
             try:
@@ -371,11 +398,15 @@ class LivePlanService(PlanService):
             except (TypeError, ValueError):
                 continue
             disc = str(c.get("discipline") or "").strip()
-            f = _frac_pct(c.get("pct"))
-            if disc and f is not None:
+            remaining = _remaining_in(c.get("remaining"))
+            if not disc or remaining is None:
+                continue
+            a = (actuals.get(spec, {}).get(disc) or [0.0, 0.0])[1]
+            f = _pct_from_remaining(a, remaining)
+            if f is not None:
                 cell_frac[(spec, disc)] = f
         num, den = {}, {}
-        for spec, dh in agg.items():
+        for spec, dh in actuals.items():
             for disc, (b, a) in dh.items():
                 f = cell_frac.get((spec, disc))
                 w = b if b > 0 else a               # budget, else actual for unbudgeted off-plan work
@@ -419,12 +450,12 @@ class DemoPlanService(PlanService):
         20: {"Electrical Engineering": [1200.0, 1100.0], "Manufacturing": [900.0, 950.0]},
         0:  {"Project Management": [300.0, 280.0]},
     }}
-    _store = {   # persists across requests within the process; cells: {(spec, disc): 0..1 fraction}
+    _store = {   # persists across requests within the process; cells: {(spec, disc): remaining hours}
         230219: {"planned_ship": "2026-10-02",
                  "labour_runout": None, "material_runout": None, "rework_threshold": 0.015,
-                 "cells": {(10, "Mechanical Engineering"): 0.9, (10, "Manufacturing"): 0.8,
-                           (20, "Electrical Engineering"): 0.85, (20, "Manufacturing"): 0.75,
-                           (0, "Project Management"): 0.95}},
+                 "cells": {(10, "Mechanical Engineering"): 190.0, (10, "Manufacturing"): 375.0,
+                           (20, "Electrical Engineering"): 195.0, (20, "Manufacturing"): 315.0,
+                           (0, "Project Management"): 15.0}},
     }
 
     def list_projects(self):
@@ -440,10 +471,15 @@ class DemoPlanService(PlanService):
                 "labour_runout": None, "material_runout": None, "rework_threshold": None,
                 "week": week_key(_dt.date.today())[2],
                 "machines": []}
-        cells = (rec or {}).get("cells", {})
+        cells = (rec or {}).get("cells", {})     # {(spec, disc): remaining hours}
         grid = DemoPlanService._DEMO_GRID.get(pid, {})
-        prog = {k: _pct_out(v) for k, v in cells.items()}
-        base["machines"] = LivePlanService._grid(grid, prog)
+        prog = {}                                 # derived % for display
+        for spec, dh in grid.items():
+            for disc, (b, a) in dh.items():
+                f = _pct_from_remaining(a, cells.get((spec, disc)))
+                if f is not None:
+                    prog[(spec, disc)] = _pct_out(f)
+        base["machines"] = LivePlanService._grid(grid, prog, dict(cells))
         if rec:
             base.update(planned_ship=rec["planned_ship"],
                         labour_runout=_ratio_out(rec["labour_runout"]),
@@ -460,9 +496,9 @@ class DemoPlanService(PlanService):
             except (TypeError, ValueError):
                 continue
             disc = str(c.get("discipline") or "").strip()
-            f = _frac_pct(c.get("pct"))
+            remaining = _remaining_in(c.get("remaining"))
             if disc:
-                cells[(spec, disc)] = f
+                cells[(spec, disc)] = remaining
         DemoPlanService._store[pid] = {
             "planned_ship": (payload.get("planned_ship") or None),
             "labour_runout": _ratio_pct(payload.get("labour_runout")),
@@ -512,6 +548,27 @@ def _pct_out(frac):
     """0–1 fraction → a percentage number for the form (0.93 → 93)."""
     v = _num(frac)
     return round(v * 100.0, 2) if v is not None else None
+
+
+def _remaining_in(x):
+    """Hours-remaining-to-completion input → a non-negative float (blank → None clears the cell)."""
+    v = _num(x)
+    if v is None:
+        return None
+    return round(v, 2) if v > 0 else 0.0
+
+
+def _pct_from_remaining(actual, remaining):
+    """% complete (0–1) derived from hours remaining: %C = actual / (actual + remaining), where
+    EAC = actual + remaining. Blank remaining → None (nothing declared). 0 remaining → complete."""
+    if remaining is None:
+        return None
+    a = float(actual or 0.0)
+    r = max(0.0, float(remaining))
+    eac = a + r
+    if eac <= 0:
+        return 1.0                # 0 remaining and 0 actual → nothing left to do = complete
+    return round(a / eac, 4)
 
 
 def _ratio_out(r):

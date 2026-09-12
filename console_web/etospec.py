@@ -561,7 +561,7 @@ def query_po_status_open(project_ids=None, date_from=None, date_to=None):
         p.DisplayName                 AS JobName,
         pcust.CName                   AS Customer,
         pod.SpecID                    AS MachineCode,
-        pod.ItemID                    AS Item,
+        ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30)))                    AS Item,
         pod.ItemDescription           AS Description,
         poh.PurchaseOrderID           AS PO,
         poh.CName                     AS Supplier,
@@ -762,6 +762,20 @@ def _num_or_none(v):
         return None
 
 
+# Freight / courier / cartage POs are expense lines, not parts to chase for assembly — the buyers
+# said they aren't actionable, so the PO-line reports drop them. Matched on the item description /
+# category (case-insensitive substring); extend the list if a new label shows up.
+_FREIGHT_TERMS = ("freight", "courier", "cartage", "brokerage")
+
+
+def _is_freight(*vals):
+    for v in vals:
+        s = str(v or "").lower()
+        if s and any(t in s for t in _FREIGHT_TERMS):
+            return True
+    return False
+
+
 def _spec_code(v):
     """SpecID 10.0 -> '10' (machine/spec code); blank-safe."""
     f = _num_or_none(v)
@@ -793,6 +807,8 @@ def exc_detail(df, today=None):
     today = today or _dt.date.today()
     out = []
     for _, r in df.iterrows():
+        if _is_freight(r.get("Description"), r.get("Category")):   # freight/courier — not actionable
+            continue
         req = pd.to_datetime(r.get("DateRequired"), errors="coerce")
         rev = pd.to_datetime(r.get("DateRevised"), errors="coerce")
         need = rev if pd.notna(rev) else req
@@ -929,7 +945,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         pod.ProjectID                   AS ProjectID,
         p.DisplayName                   AS JobName,
         pod.SpecID                      AS Code,
-        pod.ItemID                      AS Item,
+        ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30)))                      AS Item,
         pod.ItemDescription             AS Description,
         pdd.ItemMasterCategoryDescription AS Category,
         poh.PurchaseOrderID             AS PO,
@@ -972,6 +988,8 @@ def po_listing_detail(df, today=None):
     today = today or _dt.date.today()
     out = []
     for _, r in df.iterrows():
+        if _is_freight(r.get("Description"), r.get("Category")):   # freight/courier — not actionable
+            continue
         req = pd.to_datetime(r.get("DateRequired"), errors="coerce")
         rev = pd.to_datetime(r.get("DateRevised"), errors="coerce")
         need = rev if pd.notna(rev) else req
@@ -1189,7 +1207,7 @@ def query_late_vendors(project_ids=None, date_from=None, date_to=None):
         poh.PurchaseOrderID              AS PO,
         COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName,
                  CAST(poh.BuyerID AS varchar(20)))       AS Buyer,
-        pod.ItemID                       AS Item,
+        ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30)))                       AS Item,
         pod.ItemDescription              AS Description,
         pod.PurchaseQty                  AS Qty,
         pod.Received                     AS Received,

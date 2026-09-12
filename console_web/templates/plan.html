@@ -91,11 +91,12 @@
 
     <div class="card" id="mdCard">
       <h2>Progress — Machine &times; Discipline</h2>
-      <p class="hint">Declare % complete for each machine &times; discipline cell, with its budget and
-        actual hours shown. Earned hours (= % &times; budget) and CPI (earned &divide; actual) update
-        live. This is the one judgement the plan needs: the per-discipline % the dashboard run-out
-        uses is <b>rolled up</b> from these cells — no separate entry. A machine worked but never
-        budgeted is flagged so the plan can be corrected.</p>
+      <p class="hint">Enter the <b>hours remaining to completion</b> for each machine &times; discipline
+        cell, with its budget and actual hours shown. % complete (= actual &divide; (actual + remaining)),
+        earned hours and CPI update live. The greyed number is the budget-implied remaining
+        (budget &minus; actual) as a starting point. This is the one judgement the plan needs: the
+        per-discipline % the dashboard run-out uses is <b>rolled up</b> from these cells — no separate
+        entry. A machine worked but never budgeted is flagged so the plan can be corrected.</p>
       <p class="mdbanner" id="mdBanner" style="display:none"></p>
       <div id="mdGrid" style="margin-top:10px"></div>
     </div>
@@ -140,20 +141,23 @@ function buildMDGrid(machines){
     const mtag = munb ? '<span class="utag">⚠ unbudgeted — add to plan</span>' : '';
     html+=`<div class="mdmach"><div class="mh">${m.machine}${mtag}</div>`+
       `<table class="mdt"><tr><th>Discipline</th><th class="num">Budget (hrs)</th>`+
-      `<th class="num">Actual (hrs)</th><th class="num">% Complete</th>`+
+      `<th class="num">Actual (hrs)</th><th class="num">Remaining (hrs)</th><th class="num">% Complete</th>`+
       `<th class="num">Earned (hrs)</th><th class="num">CPI</th></tr>`;
     (m.disciplines||[]).forEach((d,i)=>{
       const iid=`md_${m.spec}_${i}`;
       state.cells.push({spec:m.spec, discipline:d.discipline, id:iid});
-      const v=(d.pct!=null?d.pct:'');
+      const v=(d.remaining!=null?d.remaining:'');
+      const impl=Math.max(0,Math.round((d.budget_hours||0)-(d.actual_hours||0)));  // budget-implied remaining (hint)
       const unb=(!d.budget_hours && d.actual_hours>0);
       if(unb) nUnb++;
       const dtag = unb ? ' <span class="utag">unbudgeted</span>' : '';
       html+=`<tr class="${unb?'unb':''}"><td>${d.discipline}${dtag}</td>`+
         `<td class="num">${fmtN(d.budget_hours)}</td>`+
         `<td class="num">${fmtN(d.actual_hours)}</td>`+
-        `<td class="num"><input type="number" step="1" min="0" max="100" id="${iid}" value="${v}" `+
-        `data-b="${d.budget_hours||0}" data-a="${d.actual_hours||0}" oninput="recalc('${iid}')"></td>`+
+        `<td class="num"><input type="number" step="1" min="0" id="${iid}" value="${v}" `+
+        `placeholder="${impl}" data-b="${d.budget_hours||0}" data-a="${d.actual_hours||0}" `+
+        `oninput="recalc('${iid}')"></td>`+
+        `<td class="num" id="${iid}_p">—</td>`+
         `<td class="num" id="${iid}_e">—</td><td class="num cpi" id="${iid}_c">—</td></tr>`;
     });
     html+=`</table></div>`;
@@ -166,16 +170,22 @@ function buildMDGrid(machines){
   (state.cells||[]).forEach(c=>recalc(c.id));
 }
 
+// Progress is HOURS REMAINING TO COMPLETION per cell. Derived: EAC = actual + remaining,
+// % complete = actual / EAC, earned = % × budget, CPI = earned ÷ actual = budget ÷ EAC.
 function recalc(iid){
   const inp=el(iid); if(!inp) return;
   const b=parseFloat(inp.dataset.b||'0'), a=parseFloat(inp.dataset.a||'0');
-  const v=inp.value!==''?parseFloat(inp.value):null;
-  const eCell=el(iid+'_e'), cCell=el(iid+'_c');
+  let rem=inp.value!==''?parseFloat(inp.value):null;
+  const pCell=el(iid+'_p'), eCell=el(iid+'_e'), cCell=el(iid+'_c');
   cCell.className='num cpi';
+  if(rem==null||isNaN(rem)){ pCell.textContent='—'; eCell.textContent='—'; cCell.textContent='—'; return; }
+  if(rem<0) rem=0;
+  const eac=a+rem;
+  const pct = eac>0 ? a/eac : 1;                 // 0 remaining & 0 actual → complete
+  pCell.textContent=Math.round(pct*100)+'%';
   // No budget → nothing to earn against; earned/CPI are N/A (the cell is flagged unbudgeted).
   if(!b){ eCell.textContent='—'; cCell.textContent='—'; return; }
-  if(v==null||isNaN(v)){ eCell.textContent='—'; cCell.textContent='—'; return; }
-  const earned=(v/100)*b;
+  const earned=pct*b;
   eCell.textContent=earned.toLocaleString(undefined,{maximumFractionDigits:0});
   if(a>0){ const cpi=earned/a; cCell.textContent=cpi.toFixed(2);
     cCell.className='num cpi '+(cpi<0.9?'bad':(cpi<1.0?'warn':'')); }
@@ -242,7 +252,7 @@ el('saveBtn').onclick=async()=>{
   const by=el('by').value.trim();
   if(!by){ showMsg('err','Enter your name in “Entered by” before saving.'); return; }
   const val=id=>{ const v=el(id).value; return v!==''?parseFloat(v):null; };
-  const cells=(state.cells||[]).map(c=>({spec:c.spec, discipline:c.discipline, pct:val(c.id)}));
+  const cells=(state.cells||[]).map(c=>({spec:c.spec, discipline:c.discipline, remaining:val(c.id)}));
   const payload={ project_id:Number(pid), entered_by:by,
     planned_ship:el('planned_ship').value||null,
     labour_runout:val('labour_runout'), material_runout:val('material_runout'),
