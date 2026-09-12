@@ -820,6 +820,7 @@ def exc_detail(df, today=None):
             continue
         rcpt = pd.to_datetime(r.get("ReceiptDate"), errors="coerce")
         eng = pd.to_datetime(r.get("EngReleaseDate"), errors="coerce")
+        rfq = pd.to_datetime(r.get("RFQDate"), errors="coerce")
         recv = _num_or_none(r.get("Received")) or 0.0
         status = "Overdue — partial" if recv > 0 else "Overdue"
         pid = r.get("ProjectID")
@@ -841,7 +842,7 @@ def exc_detail(df, today=None):
             "LastUpdated": _last_activity(today, r.get("Ordered"), r.get("ReceiptDate"),
                                           r.get("HeaderRevised")),   # last activity (not an edit audit)
             "DaysToAssembly": None,                       # no maintained assembly date
-            "RFQDate": "",                                # not in ETO
+            "RFQDate": (rfq.date().isoformat() if pd.notna(rfq) else ""),   # last RFQ date for the item
             "PermitDates": "",                            # not in ETO
             "LeadTime": (int(_num_or_none(r.get("LeadDays"))) if _num_or_none(r.get("LeadDays")) else None),
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
@@ -938,6 +939,12 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     over_sel = f"eim.[{_OVERSIZE_FLAG_COL}]" if include_leadtime else "CAST(NULL AS bit)"
     rel_sel = f"CAST(eim.[{_ENG_RELEASE_COL}] AS date)" if include_leadtime else "CAST(NULL AS date)"
     lead_join = "LEFT JOIN tblEngItemMaster eim ON eim.ItemID = pod.ItemID" if include_leadtime else ""
+    # RFQ date = the date of the item's LAST RFQ on this project/machine. vwPurchasingRFQs is one row
+    # per (ProjectID, SpecID, ItemID) carrying LastRFQID → tblRFQHeader.RFQDate (no fan-out).
+    rfq_sel = "CAST(rfqh.RFQDate AS date)" if include_leadtime else "CAST(NULL AS date)"
+    rfq_join = ("LEFT JOIN dbo.vwPurchasingRFQs prq ON prq.ProjectID = pod.ProjectID "
+                "AND prq.ItemID = pod.ItemID AND prq.SpecID = pod.SpecID "
+                "LEFT JOIN dbo.tblRFQHeader rfqh ON rfqh.RFQID = prq.LastRFQID") if include_leadtime else ""
     proj = ""
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
@@ -964,6 +971,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         {lead_sel}                      AS LeadDays,
         {llt_sel}                       AS LLTFlag,
         {over_sel}                      AS OverFlag,
+        {rfq_sel}                       AS RFQDate,
         COALESCE(CAST(bomrel.BOMReleaseDate AS date), {rel_sel}) AS EngReleaseDate
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
@@ -971,6 +979,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
     {buyer_join}
     {lead_join}
+    {rfq_join}
     {_bom_release_join(project_ids)}
     WHERE poh.PurchaseActive = 1{"" if all_statuses else _RECV_OPEN_CLAUSE}{proj}{_po_date_window(date_from, date_to)}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
@@ -999,6 +1008,7 @@ def po_listing_detail(df, today=None):
         needd = need.date() if pd.notna(need) else None
         rcpt = pd.to_datetime(r.get("ReceiptDate"), errors="coerce")
         eng = pd.to_datetime(r.get("EngReleaseDate"), errors="coerce")
+        rfq = pd.to_datetime(r.get("RFQDate"), errors="coerce")
         qty = _num_or_none(r.get("Qty")) or 0.0
         recv = _num_or_none(r.get("Received")) or 0.0
         full = qty > 0 and recv >= qty
@@ -1029,7 +1039,7 @@ def po_listing_detail(df, today=None):
             "LastUpdated": _last_activity(today, r.get("Ordered"), r.get("ReceiptDate"),
                                           r.get("HeaderRevised")),   # last activity (not an edit audit)
             "DaysToAssembly": None,                       # no maintained assembly date
-            "RFQDate": "",                                # not in ETO
+            "RFQDate": (rfq.date().isoformat() if pd.notna(rfq) else ""),   # last RFQ date for the item
             "PermitDates": "",                            # not in ETO
             "LeadTime": (int(_num_or_none(r.get("LeadDays"))) if _num_or_none(r.get("LeadDays")) else None),
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),

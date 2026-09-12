@@ -4584,23 +4584,24 @@ _DEMO_PACKSLIP = [
 # Procurement Exceptions — query_po_exceptions output shape
 _DEMO_EXC_COLS = ["Buyer", "ProjectID", "JobName", "Code", "Item", "Description", "Category",
                   "PO", "Vendor", "Qty", "Received", "ExtValue", "DateRequired", "DateRevised",
-                  "ReceiptDate", "Ordered", "LeadDays", "LLTFlag", "OverFlag", "EngReleaseDate"]
+                  "ReceiptDate", "Ordered", "LeadDays", "LLTFlag", "OverFlag", "EngReleaseDate",
+                  "RFQDate"]
 _DEMO_EXC_RAW = [
     {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48255",
      "Description": "Spherical roller bearings (lot)", "Category": "Bearings", "PO": "48255",
      "Vendor": "SKF Canada", "Qty": 40, "Received": 0, "ExtValue": 28800.0,
      "DateRequired": "2026-06-30", "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-05-02",
-     "LeadDays": 62, "LLTFlag": 1, "OverFlag": 0, "EngReleaseDate": "2026-04-15"},
+     "LeadDays": 62, "LLTFlag": 1, "OverFlag": 0, "EngReleaseDate": "2026-04-15", "RFQDate": "2026-04-02"},
     {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48260",
      "Description": "Cylinder seals & glands", "Category": "Hydraulic Components", "PO": "48260",
      "Vendor": "Bosch Rexroth", "Qty": 12, "Received": 4, "ExtValue": 15400.0,
      "DateRequired": "2026-07-10", "DateRevised": None, "ReceiptDate": "2026-07-18",
-     "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0, "OverFlag": 0, "EngReleaseDate": None},
+     "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0, "OverFlag": 0, "EngReleaseDate": None, "RFQDate": None},
     {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Code": 20, "Item": "48120",
      "Description": "S7-1500 PLC + IO", "Category": "Electrical / Controls", "PO": "48120",
      "Vendor": "Siemens", "Qty": 1, "Received": 0, "ExtValue": 47600.0, "DateRequired": "2026-07-01",
      "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-06-22", "LeadDays": 120,
-     "LLTFlag": 1, "OverFlag": 1, "EngReleaseDate": "2026-05-30"},
+     "LLTFlag": 1, "OverFlag": 1, "EngReleaseDate": "2026-05-30", "RFQDate": "2026-05-20"},
 ]
 
 # Extra lines to exercise the ALL-STATUS PO listing (received + open-before-need-by) on top of the
