@@ -2972,7 +2972,8 @@ _BOM_READINESS_PROC = "urpEngStructuredReadinessBySpec"
 # once per scope. So bound a single run: refuse a selection above this many machines (ask the user to
 # narrow), and cap each proc call's runtime so one can't hang the request.
 _BOM_MAX_MACHINES = 6
-_BOM_QUERY_TIMEOUT = 60          # seconds, per proc call (pyodbc connection.timeout)
+_BOM_QUERY_TIMEOUT = 25          # seconds, per proc call (pyodbc connection.timeout) — fail fast so a
+#                                  slow call can't push the whole request past a web-worker timeout
 
 _BOM_COLS = [
     QueryColumn("Part", "Part — UOM — Description", "text", "left", wrap=True),
@@ -3000,7 +3001,7 @@ def _bom_scopes_sql(pid, spec):
             f"  (SELECT ChildID FROM dbo.vwEngProductStructure WHERE ProjectID={pid} AND SpecID={spec})) "
             f"SELECT s.StructureID, s.ItemCompanyID, s.ItemDescription "
             f"FROM dbo.vwEngProductStructure s JOIN roots r ON s.ParentID = r.ParentID "
-            f"WHERE s.ProjectID={pid} AND s.SpecID={spec} ORDER BY s.StructureID")
+            f"WHERE s.ProjectID={pid} AND s.SpecID={spec} ORDER BY s.ItemCompanyID, s.StructureID")
 
 
 def _bom_readiness_sql(pid, spec, asm):
@@ -3056,6 +3057,7 @@ def _bom_readiness_rows(blocks):
                 continue                                  # skip the synthetic TOP node each scope emits
             uom = str(r.get("UOMType") or "").strip()
             is_assy = _bom_is_assembly(uom)
+            uom_disp = "AS" if is_assy else uom            # PDF prints 'AS' for assemblies ('Assembly' in the proc)
             partno = str(r.get("ItemCompanyID") or r.get("PaddedPartNumber")
                          or r.get("ItemNumber") or "").strip()
             desc = str(r.get("ItemDescription") or "").strip()
@@ -3064,7 +3066,7 @@ def _bom_readiness_rows(blocks):
             tbp = _bom_num(r.get("ToBeProcured"))
             row = {
                 "_kind": "l2_sub" if is_assy else "detail",
-                "Part": indent + " — ".join(x for x in (partno, uom, desc) if x),
+                "Part": indent + " — ".join(x for x in (partno, uom_disp, desc) if x),
                 "AssyQty": _bom_num(r.get("ItemQty")),
                 "TotalQty": _bom_num(r.get("TotalRequiredForEntireAssy")),
                 "AvailQty": _bom_num(r.get("TotalAvailable")),
@@ -3097,7 +3099,7 @@ def _bom_readiness_result(blocks):
             "are shaded bands with their parts indented beneath; one section per machine (SpecID) of "
             "each selected project. (The PDF's Bin column is a follow-up — the only proc variant that "
             "carries it returns no rows standalone, so Bin isn't sourced yet.)")
-    return QueryResult("bom_readiness", "Structured BOM — Readiness", list(_BOM_COLS), rows, cards, note)
+    return QueryResult("bom_readiness", "Structured BOM — Readiness Detailed", list(_BOM_COLS), rows, cards, note)
 
 
 # ---- Data Completeness (are teams maintaining key ETO fields?) ------------------
