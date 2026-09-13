@@ -564,19 +564,24 @@ def api_export(fmt):
     fmt = fmt.lower()
     if fmt not in ("xlsx", "pdf"):
         return jsonify({"error": "format must be xlsx or pdf"}), 400
+    payload = request.get_json(silent=True) or {}
     try:
-        result = _run_from_payload(request.get_json(silent=True))
+        result = _run_from_payload(payload)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         app.logger.exception("export query failed")
         return jsonify({"error": str(e)}), 500
 
+    # Date-range line for the export Info section — always populated (cumulative reports,
+    # which send no window, read "Start of project to <today>").
+    date_range = exporters.date_range_label(payload.get("date_from"), payload.get("date_to"))
+
     if fmt == "xlsx":
-        data = exporters.to_xlsx(result)
+        data = exporters.to_xlsx(result, date_range=date_range)
         mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     else:
-        data = exporters.to_pdf(result)
+        data = exporters.to_pdf(result, date_range=date_range)
         mime = "application/pdf"
     return send_file(io.BytesIO(data), mimetype=mime, as_attachment=True,
                      download_name=exporters.filename(result, fmt))

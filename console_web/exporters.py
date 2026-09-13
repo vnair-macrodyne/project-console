@@ -43,6 +43,23 @@ def _ts():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
 
+def date_range_label(date_from, date_to):
+    """Human date-range line for the export Info section — always populated. A report that
+    honours the window shows its actual from/to; a cumulative report (no window applies —
+    the 'Start of Project to Date' preset sends both null) reads 'Start of project to <today>'
+    rather than a blank. Partial windows fall back to the missing end sensibly."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    f = date_from.strip() if isinstance(date_from, str) else date_from
+    t = date_to.strip() if isinstance(date_to, str) else date_to
+    if f and t:
+        return f"{f} to {t}"
+    if t and not f:
+        return f"Start of project to {t}"
+    if f and not t:
+        return f"{f} to {today}"
+    return f"Start of project to {today}"
+
+
 # Executive-dashboard palette (mirrors console_dashboard.py)
 C_GROUP = "2E75B6"   # medium-blue block band
 C_WARN = "FFEB9C"    # 90–100% amber
@@ -311,7 +328,7 @@ def _put_cell(cell, raw, ctype):
         cell.value = raw if ctype in ("text", "date") else _fmt(raw, ctype)
 
 
-def to_xlsx(result) -> bytes:
+def to_xlsx(result, date_range=None) -> bytes:
     """Flat, pivot-friendly workbook. Sheet 'Data' is a single clean table (headers in row 1,
     one row per line, grouping carried into leading columns, no subheads or subtotals, with an
     AutoFilter); sheet 'Info' carries the title, source and summary cards. This intentionally
@@ -365,7 +382,10 @@ def to_xlsx(result) -> bytes:
     lbl_font = Font(name="Helvetica", bold=True, size=10)
     info.cell(1, 1, f"{b['product']} — {result.title}").font = title_font
     info.cell(2, 1, f"{b['company']}   ·   generated {_ts()}").font = sub_font
-    r = 4
+    # Date range — always shown; a cumulative report reads "Start of project to <today>".
+    info.cell(3, 1, "Date range").font = lbl_font
+    info.cell(3, 2, date_range or date_range_label(None, None))
+    r = 5
     if result.cards:
         for card in result.cards:
             info.cell(r, 1, card.label).font = lbl_font
@@ -388,7 +408,7 @@ def to_xlsx(result) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 # PDF
 # ─────────────────────────────────────────────────────────────────────────────
-def to_pdf(result) -> bytes:
+def to_pdf(result, date_range=None) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
@@ -413,7 +433,8 @@ def to_pdf(result) -> bytes:
     cellst = ParagraphStyle("cell", parent=styles["Normal"], fontSize=7.5, leading=9)
 
     story = [Paragraph(f"{b['product']} — {result.title}", h),
-             Paragraph(f"{b['company']} &nbsp;·&nbsp; generated {_ts()}", sub)]
+             Paragraph(f"{b['company']} &nbsp;·&nbsp; generated {_ts()} &nbsp;·&nbsp; "
+                       f"Date range: {date_range or date_range_label(None, None)}", sub)]
     if result.cards:
         story.append(Paragraph(
             " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(f"<b>{c.label}:</b> {c.value}"
