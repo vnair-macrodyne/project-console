@@ -869,9 +869,11 @@ class LiveQueryService(QueryService):
 
     def _q_bom_readiness(self, project_ids, **kw):
         """Structured BOM readiness per machine, straight from ETO's report proc so the numbers are
-        byte-identical to the on-prem PDF. For each selected project, find its machines with a BOM
-        (vwEngProductStructure) and EXEC the readiness proc per machine (fully exploded). Each proc
-        call is guarded, and any failure is surfaced on the machine's row instead of a silent blank."""
+        byte-identical to the on-prem PDF. For each selected project × machine, find the machine's
+        top-level SCOPE assemblies and EXEC the readiness proc once per scope (that is what explodes
+        the tree), concatenating the scopes in order. Each call is guarded; a failure is surfaced on
+        the machine's row instead of a silent blank."""
+        import pandas as pd
         pids = [int(p) for p in project_ids] if project_ids else None
         if not pids:
             return _bom_readiness_result([])
@@ -885,11 +887,20 @@ class LiveQueryService(QueryService):
                 blocks.append((pid, names.get(pid, ""), "?", None, f"machine list failed — {type(e).__name__}: {e}"))
                 continue
             for spec in specs:
+                frames, err = [], None
                 try:
-                    df, err = self._readiness_df(_bom_readiness_sql(pid, spec)), None
+                    scopedf = self._df(_bom_scopes_sql(pid, spec))
+                    scope_ids = scopedf["StructureID"].tolist() if not scopedf.empty else []
+                    for asm in scope_ids:
+                        one = self._readiness_df(_bom_readiness_sql(pid, spec, asm))
+                        if not one.empty:
+                            if "HierarchySortKey" in one.columns:
+                                one = one.sort_values("HierarchySortKey", kind="stable")
+                            frames.append(one)
                 except Exception as e:
-                    df, err = None, f"{type(e).__name__}: {e}"
-                blocks.append((pid, names.get(pid, ""), spec, df, err))
+                    err = f"{type(e).__name__}: {e}"
+                machdf = pd.concat(frames, ignore_index=True) if frames else None
+                blocks.append((pid, names.get(pid, ""), spec, machdf, err))
         return _bom_readiness_result(blocks)
 
     def _q_data_completeness(self, project_ids, **kw):
@@ -2933,10 +2944,15 @@ def _spec_budget_result(df, htmap):
 
 # ---- BOM Readiness (Structured BOM - Readiness Detailed) -----------------------
 # Reproduces ETO's on-prem "Structured BOM - Readiness Detailed Report" by calling the SAME report
-# proc ETO uses, so the readiness numbers are byte-identical. Per project × machine (SpecID); the
-# proc explodes the entire assembly tree when @intNumberOfLevels is large. crp0470EngStructuredReadiness
-# is the variant that carries BinLabel (the PDF's Bin column). READ-ONLY: EXEC of a reporting proc.
-_BOM_READINESS_PROC = "crp0470EngStructuredReadiness"
+# proc ETO uses, so the readiness numbers are byte-identical. READ-ONLY: EXEC of a reporting proc.
+#
+# The proc explodes ONE assembly, identified by @intAssemblyStructureID = the StructureID of a
+# top-level SCOPE assembly (a direct child of the machine's ROOT node in vwEngProductStructure).
+# AssemblyStructureID=0 / the root itself returns only the top node — verified 2026-09-13. So per
+# machine we find its scope StructureIDs and EXEC once per scope, concatenating the results.
+# (crp0470EngStructuredReadiness — the only variant with BinLabel — returns 0 rows standalone, so it
+# is unusable; Bin is not sourced yet, see the note. urpEngStructuredReadinessBySpec explodes fine.)
+_BOM_READINESS_PROC = "urpEngStructuredReadinessBySpec"
 
 _BOM_COLS = [
     QueryColumn("Part", "Part — UOM — Description", "text", "left", wrap=True),
@@ -2946,7 +2962,6 @@ _BOM_COLS = [
     QueryColumn("ProcQty", "Proc Qty", "num", "right"),
     QueryColumn("ToBeProc", "To Be Proc", "num", "right"),
     QueryColumn("PctAvail", "% Avail", "pct", "right", calc=True),
-    QueryColumn("Bin", "Bin", "text", "left", wrap=True),
 ]
 
 
@@ -2956,14 +2971,25 @@ def _bom_machines_sql(pid):
             f"WHERE ProjectID = {int(pid)} ORDER BY SpecID")
 
 
-def _bom_readiness_sql(pid, spec):
-    """The exact 10-arg call ETO's report uses, fully exploded. AssemblyStructureID=0 = whole
-    machine; ExplodeStandardAssemblies=1; WeightMethod=0 (Absolute); NOT assemblies-only; don't
-    hide fully-available; NumberOfLevels=99 (fully explode — 0 returns the top node only);
-    IndentSpaces=3; don't average with BOM qty."""
+def _bom_scopes_sql(pid, spec):
+    """The top-level SCOPE assemblies of a machine = the StructureIDs whose parent is the machine
+    ROOT (the ItemID that is a parent but never a child). Each scope is exploded on its own."""
+    pid, spec = int(pid), float(spec)
+    return (f"WITH roots AS (SELECT DISTINCT ParentID FROM dbo.vwEngProductStructure "
+            f"  WHERE ProjectID={pid} AND SpecID={spec} AND ParentID NOT IN "
+            f"  (SELECT ChildID FROM dbo.vwEngProductStructure WHERE ProjectID={pid} AND SpecID={spec})) "
+            f"SELECT s.StructureID, s.ItemCompanyID, s.ItemDescription "
+            f"FROM dbo.vwEngProductStructure s JOIN roots r ON s.ParentID = r.ParentID "
+            f"WHERE s.ProjectID={pid} AND s.SpecID={spec} ORDER BY s.StructureID")
+
+
+def _bom_readiness_sql(pid, spec, asm):
+    """EXEC the readiness proc for ONE scope assembly, fully exploded. @intAssemblyStructureID = the
+    scope's StructureID (this is what drives the explosion); ExplodeStandardAssemblies=1;
+    WeightMethod=0 (Absolute); NOT assemblies-only; don't hide fully-available; NumberOfLevels=99."""
     return ("SET NOCOUNT ON; "
             f"EXEC dbo.{_BOM_READINESS_PROC} "
-            f"@intProjectID={int(pid)}, @decSpecID={float(spec)}, @intAssemblyStructureID=0, "
+            f"@intProjectID={int(pid)}, @decSpecID={float(spec)}, @intAssemblyStructureID={int(asm)}, "
             f"@bitExplodeStandardAssemblies=1, @intWeightMethod=0, @bitAssembliesOnly=0, "
             f"@bitHideFullyAvailable=0, @intNumberOfLevels=99, @intIndentSpaces=3, "
             f"@bitAverageWithBOMQty=0")
@@ -2975,6 +3001,13 @@ def _bom_num(v):
         return None if f != f else round(f, 2)
     except (TypeError, ValueError):
         return None
+
+
+def _bom_is_assembly(uom):
+    """The proc labels assembly rows 'Assembly'/'AS'/'SA' and parts 'PC'/'PIECE'/'EA'. Anything that
+    isn't clearly a piece is treated as an assembly (shaded band)."""
+    u = (uom or "").strip().upper()
+    return u.startswith("AS") or u == "SA"
 
 
 def _bom_readiness_rows(blocks):
@@ -2997,13 +3030,12 @@ def _bom_readiness_rows(blocks):
             msg = f"  (readiness call failed — {err})" if err else "  (no BOM rows for this machine)"
             rows.append({"_kind": "detail", "Part": msg})
             continue
-        d = df.sort_values("HierarchySortKey", kind="stable") if "HierarchySortKey" in df.columns else df
-        for _, r in d.iterrows():
+        for _, r in df.iterrows():
             depth = int(_bom_num(r.get("Depth")) or 0)
             if depth <= 0:
-                continue                                  # skip synthetic TOP (machine header shows it)
+                continue                                  # skip the synthetic TOP node each scope emits
             uom = str(r.get("UOMType") or "").strip()
-            is_assy = uom.upper() == "AS"
+            is_assy = _bom_is_assembly(uom)
             partno = str(r.get("ItemCompanyID") or r.get("PaddedPartNumber")
                          or r.get("ItemNumber") or "").strip()
             desc = str(r.get("ItemDescription") or "").strip()
@@ -3019,7 +3051,6 @@ def _bom_readiness_rows(blocks):
                 "ProcQty": _bom_num(r.get("PurchaseQty")),
                 "ToBeProc": tbp,
                 "PctAvail": (pa / 100.0 if pa is not None else None),
-                "Bin": str(r.get("BinLabel") or "").strip(),
             }
             if not is_assy:
                 n_lines += 1
@@ -3038,13 +3069,14 @@ def _bom_readiness_result(blocks):
              Card("Part lines", "{:,}".format(n_lines)),
              Card("Lines to procure", "{:,}".format(n_proc), "bad" if n_proc else "good")]
     note = ("Structured BOM readiness per machine — reproduced from ETO's own report engine "
-            f"(EXEC dbo.{_BOM_READINESS_PROC}, fully exploded) so the figures match the on-prem "
-            "\"Structured BOM - Readiness Detailed Report\" exactly. Assembly Qty = qty per parent; "
+            f"(EXEC dbo.{_BOM_READINESS_PROC}, exploded per scope assembly) so the figures match the "
+            "on-prem \"Structured BOM - Readiness Detailed Report\". Assembly Qty = qty per parent; "
             "Total Qty = total required for the whole assembly; Avail Qty = on hand / available; "
             "Proc Qty = quantity on purchase orders; To Be Proc = still to procure (negative = "
-            "over-supplied); % Avail = completeness by the Absolute (Assembly-Qty) method; Bin = "
-            "stock location. Assemblies are shaded bands with their parts indented beneath; one "
-            "section per machine (SpecID) of each selected project.")
+            "over-supplied); % Avail = completeness by the Absolute (Assembly-Qty) method. Assemblies "
+            "are shaded bands with their parts indented beneath; one section per machine (SpecID) of "
+            "each selected project. (The PDF's Bin column is a follow-up — the only proc variant that "
+            "carries it returns no rows standalone, so Bin isn't sourced yet.)")
     return QueryResult("bom_readiness", "Structured BOM — Readiness", list(_BOM_COLS), rows, cards, note)
 
 
