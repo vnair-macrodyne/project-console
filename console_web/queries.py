@@ -2976,13 +2976,15 @@ _BOM_QUERY_TIMEOUT = 25          # seconds, per proc call (pyodbc connection.tim
 #                                  slow call can't push the whole request past a web-worker timeout
 
 _BOM_COLS = [
+    QueryColumn("Machine", "Machine", "id", "left"),
     QueryColumn("Part", "Part — UOM — Description", "text", "left", wrap=True),
     QueryColumn("AssyQty", "Assembly Qty", "num", "right"),
     QueryColumn("TotalQty", "Total Required", "num", "right"),
     QueryColumn("AvailQty", "Available (in stock)", "num", "right"),
     QueryColumn("ProcQty", "On Order", "num", "right"),
     QueryColumn("ToBeProc", "To Procure", "num", "right"),
-    QueryColumn("PctAvail", "% Available", "pct", "right", calc=True),
+    QueryColumn("Ready", "Ready", "text", "right"),                 # ✓ = fully covered (proc's binary Absolute measure)
+    QueryColumn("Fill", "Fill %", "pct", "right", calc=True),       # quantity coverage: Available / Required (part), weighted rollup (assembly)
 ]
 
 
@@ -3064,23 +3066,42 @@ def _bom_readiness_rows(blocks):
             indent = "  " * max(0, depth - 1)
             pa = _bom_num(r.get("PercentageComplete_Absolute_Assy"))
             tbp = _bom_num(r.get("OutstandingQty"))    # proc's "To Be Proc" is OutstandingQty (ToBeProcured is NULL)
+            totq = _bom_num(r.get("TotalRequiredForEntireAssy"))
+            availq = _bom_num(r.get("TotalAvailable"))
+            ready = pa is not None and pa >= 100                       # Absolute readiness — fully covered
+            # Fill % = the gradient the binary Absolute hides. Part: quantity coverage (Available / Required,
+            # capped). Assembly: keep the proc's weighted rollup (assemblies are not stocked, so a raw
+            # Available/Required would read a misleading 0%).
+            if is_assy:
+                fill = (pa / 100.0) if pa is not None else None
+            elif totq:
+                fill = min((availq or 0.0) / totq, 1.0)
+            else:
+                fill = None
             row = {
                 "_kind": "l2_sub" if is_assy else "detail",
+                "Machine": speclbl,
                 "Part": indent + " — ".join(x for x in (partno, uom_disp, desc) if x),
                 "AssyQty": _bom_num(r.get("ItemQty")),
-                "TotalQty": _bom_num(r.get("TotalRequiredForEntireAssy")),
-                "AvailQty": _bom_num(r.get("TotalAvailable")),
+                "TotalQty": totq,
+                "AvailQty": availq,
                 "ProcQty": _bom_num(r.get("PurchaseQty")),
                 "ToBeProc": tbp,
-                "PctAvail": (pa / 100.0 if pa is not None else None),
+                "Ready": "✓" if ready else "",
+                "Fill": (round(fill, 4) if fill is not None else None),
             }
+            tone = {}
+            if ready:
+                tone["Ready"] = "good"
+            if fill is not None:                                       # higher fill = better (invert the default pct scale)
+                tone["Fill"] = "good" if fill >= 1.0 else ("warn" if fill >= 0.5 else "bad")
             if not is_assy:
                 n_lines += 1
                 if tbp and tbp > 0:
                     n_proc += 1
-                    row["_tone"] = {"ToBeProc": "bad"}
-                elif pa is not None and pa >= 100:
-                    row["_tone"] = {"PctAvail": "good"}
+                    tone["ToBeProc"] = "bad"
+            if tone:
+                row["_tone"] = tone
             rows.append(row)
     return rows, n_lines, n_proc, n_machines
 
@@ -3097,11 +3118,15 @@ def _bom_readiness_result(blocks):
             "Available (in stock) = on-hand inventory the proc can allocate (TotalAvailable = Received "
             "minus Pulled — i.e. what's physically in stores, not on order); On Order = qty already on "
             "purchase orders (PurchaseQty); To Procure = qty still to be procured (OutstandingQty; "
-            "negative = over-supplied, matching the PDF's parenthesised figures); % Available = "
-            "completeness by the Absolute (Assembly-Qty) method. Assemblies are shaded bands with their "
-            "parts indented beneath; one section per machine (SpecID) of each selected project. (The "
-            "PDF's Bin column is a follow-up — the only proc variant that carries it returns no rows "
-            "standalone, so Bin isn't sourced yet.)")
+            "negative = over-supplied, matching the PDF's parenthesised figures). The vendor's binary "
+            "\"% Available\" is split into two: Ready = the Absolute readiness flag (✓ when this line is "
+            "fully covered — the report's all-or-nothing 100%/0% measure); Fill % = the gradient that "
+            "flag hides — for a part, quantity coverage (Available ÷ Total Required, so 6 of 12 = 50%), "
+            "and for an assembly the vendor's weighted rollup of its children (assemblies aren't stocked, "
+            "so a raw ratio would read a false 0%). Machine = the SpecID this line belongs to. Assemblies "
+            "are shaded bands with their parts indented beneath; one section per machine (SpecID) of each "
+            "selected project. (The PDF's Bin column is a follow-up — the only proc variant that carries "
+            "it returns no rows standalone, so Bin isn't sourced yet.)")
     return QueryResult("bom_readiness", "Structured BOM — Readiness Detailed", list(_BOM_COLS), rows, cards, note)
 
 
