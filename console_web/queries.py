@@ -887,13 +887,9 @@ class LiveQueryService(QueryService):
                     pairs.append((pid, spec))
             except Exception as e:
                 listerr[pid] = f"machine list failed — {type(e).__name__}: {e}"
-        if len(pairs) > _BOM_MAX_MACHINES:
-            note = (f"BOM Readiness explodes the full BOM per machine from ETO's report engine, so it "
-                    f"can only run for a handful of machines at a time. Your selection has {len(pairs)} "
-                    f"machines across {len(pids)} projects. Select 1–2 projects (up to "
-                    f"{_BOM_MAX_MACHINES} machines) and re-run.")
-            return QueryResult("bom_readiness", "Structured BOM — Readiness", list(_BOM_COLS), [],
-                               [Card("Machines selected", "{:,}".format(len(pairs)), "warn")], note)
+        total = len(pairs)
+        truncated = total > _BOM_MAX_MACHINES
+        pairs = pairs[:_BOM_MAX_MACHINES]               # process a bounded set so it can't fan out
         try:                                            # bound each proc call so one can't hang the request
             self._eto_conn().timeout = _BOM_QUERY_TIMEOUT
         except Exception:
@@ -914,7 +910,12 @@ class LiveQueryService(QueryService):
                 err = f"{type(e).__name__}: {e}"
             machdf = pd.concat(frames, ignore_index=True) if frames else None
             blocks.append((pid, names.get(pid, ""), spec, machdf, err))
-        return _bom_readiness_result(blocks)
+        result = _bom_readiness_result(blocks)
+        if truncated:
+            result.note = (f"⚠ Showing the first {_BOM_MAX_MACHINES} of {total} machines in your "
+                           f"selection — BOM Readiness explodes the full BOM per machine (heavy), so "
+                           f"narrow to 1–2 projects to see the rest.  " + result.note)
+        return result
 
     def _q_data_completeness(self, project_ids, **kw):
         """Population rate of the tracked team-maintained fields, scoped to ACTIVE projects
