@@ -846,11 +846,32 @@ class LiveQueryService(QueryService):
         except Exception:
             return {}
 
+    def _readiness_df(self, sql):
+        """Run the readiness stored proc and return its data as a DataFrame. Unlike `_df`, a proc
+        emits its rows in a LATER result set (after SET NOCOUNT / interim sets), so we walk every
+        result set with nextset() and take the one carrying the readiness columns (else the first
+        non-empty set). Raises on a driver/permission error so the caller can surface it."""
+        import pandas as pd
+        cur = self._eto_conn().cursor()
+        cur.execute(sql)
+        best = None
+        while True:
+            if cur.description is not None:
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                if rows and ("ItemCompanyID" in cols or "PercentageComplete_Absolute_Assy" in cols):
+                    return pd.DataFrame([tuple(r) for r in rows], columns=cols)
+                if rows and best is None:
+                    best = (cols, rows)                 # fallback: first result set that has rows
+            if not cur.nextset():
+                break
+        return pd.DataFrame([tuple(r) for r in best[1]], columns=best[0]) if best else pd.DataFrame()
+
     def _q_bom_readiness(self, project_ids, **kw):
         """Structured BOM readiness per machine, straight from ETO's report proc so the numbers are
         byte-identical to the on-prem PDF. For each selected project, find its machines with a BOM
         (vwEngProductStructure) and EXEC the readiness proc per machine (fully exploded). Each proc
-        call is guarded, so one bad machine can't sink the whole report."""
+        call is guarded, and any failure is surfaced on the machine's row instead of a silent blank."""
         pids = [int(p) for p in project_ids] if project_ids else None
         if not pids:
             return _bom_readiness_result([])
@@ -860,14 +881,15 @@ class LiveQueryService(QueryService):
             try:
                 specdf = self._df(_bom_machines_sql(pid))
                 specs = specdf[specdf.columns[0]].tolist() if not specdf.empty else []
-            except Exception:
-                specs = []
+            except Exception as e:
+                blocks.append((pid, names.get(pid, ""), "?", None, f"machine list failed — {type(e).__name__}: {e}"))
+                continue
             for spec in specs:
                 try:
-                    df = self._df(_bom_readiness_sql(pid, spec))
-                except Exception:
-                    df = None
-                blocks.append((pid, names.get(pid, ""), spec, df))
+                    df, err = self._readiness_df(_bom_readiness_sql(pid, spec)), None
+                except Exception as e:
+                    df, err = None, f"{type(e).__name__}: {e}"
+                blocks.append((pid, names.get(pid, ""), spec, df, err))
         return _bom_readiness_result(blocks)
 
     def _q_data_completeness(self, project_ids, **kw):
@@ -2956,11 +2978,14 @@ def _bom_num(v):
 
 
 def _bom_readiness_rows(blocks):
-    """blocks = [(pid, name, spec, df)]; df = the proc's exploded rows for that machine. One l3_sub
-    band per machine; assemblies (UOMType 'AS') are shaded l2_sub bands, parts are detail rows,
-    indentation by Depth. Returns (rows, part_lines, lines_to_procure, machines)."""
+    """blocks = [(pid, name, spec, df, err)]; df = the proc's exploded rows for that machine (err =
+    an error string if the proc call failed). One l3_sub band per machine; assemblies (UOMType 'AS')
+    are shaded l2_sub bands, parts are detail rows, indentation by Depth. Returns (rows, part_lines,
+    lines_to_procure, machines)."""
     rows, n_lines, n_proc, n_machines = [], 0, 0, 0
-    for pid, name, spec, df in blocks:
+    for block in blocks:
+        pid, name, spec, df = block[0], block[1], block[2], block[3]
+        err = block[4] if len(block) > 4 else None
         n_machines += 1
         try:
             speclbl = str(int(float(spec)))
@@ -2969,7 +2994,8 @@ def _bom_readiness_rows(blocks):
         rows.append({"_kind": "l3_sub",
                      "Part": f"{int(pid)} · Machine {speclbl}" + (f" — {name}" if name else "")})
         if df is None or getattr(df, "empty", True):
-            rows.append({"_kind": "detail", "Part": "  (no BOM rows for this machine)"})
+            msg = f"  (readiness call failed — {err})" if err else "  (no BOM rows for this machine)"
+            rows.append({"_kind": "detail", "Part": msg})
             continue
         d = df.sort_values("HierarchySortKey", kind="stable") if "HierarchySortKey" in df.columns else df
         for _, r in d.iterrows():
@@ -4188,7 +4214,7 @@ class DemoQueryService(QueryService):
             recs = [(d, u, pn, ds, aq, tq, av, pq, tb, pa, bn, f"{i:04d}")
                     for i, (d, u, pn, ds, aq, tq, av, pq, tb, pa, bn) in enumerate(tree)]
             df = pd.DataFrame(recs, columns=cols)
-            blocks.append((pid, f"Demo Job {pid}", 10, df))
+            blocks.append((pid, f"Demo Job {pid}", 10, df, None))
         return _bom_readiness_result(blocks)
 
     def _q_data_completeness(self, project_ids, **kw):
