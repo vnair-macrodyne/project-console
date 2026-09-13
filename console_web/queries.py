@@ -2978,11 +2978,11 @@ _BOM_QUERY_TIMEOUT = 25          # seconds, per proc call (pyodbc connection.tim
 _BOM_COLS = [
     QueryColumn("Part", "Part — UOM — Description", "text", "left", wrap=True),
     QueryColumn("AssyQty", "Assembly Qty", "num", "right"),
-    QueryColumn("TotalQty", "Total Qty", "num", "right"),
-    QueryColumn("AvailQty", "Avail Qty", "num", "right"),
-    QueryColumn("ProcQty", "Proc Qty", "num", "right"),
-    QueryColumn("ToBeProc", "To Be Proc", "num", "right"),
-    QueryColumn("PctAvail", "% Avail", "pct", "right", calc=True),
+    QueryColumn("TotalQty", "Total Required", "num", "right"),
+    QueryColumn("AvailQty", "Available (in stock)", "num", "right"),
+    QueryColumn("ProcQty", "On Order", "num", "right"),
+    QueryColumn("ToBeProc", "To Procure", "num", "right"),
+    QueryColumn("PctAvail", "% Available", "pct", "right", calc=True),
 ]
 
 
@@ -3063,7 +3063,7 @@ def _bom_readiness_rows(blocks):
             desc = str(r.get("ItemDescription") or "").strip()
             indent = "  " * max(0, depth - 1)
             pa = _bom_num(r.get("PercentageComplete_Absolute_Assy"))
-            tbp = _bom_num(r.get("ToBeProcured"))
+            tbp = _bom_num(r.get("OutstandingQty"))    # proc's "To Be Proc" is OutstandingQty (ToBeProcured is NULL)
             row = {
                 "_kind": "l2_sub" if is_assy else "detail",
                 "Part": indent + " — ".join(x for x in (partno, uom_disp, desc) if x),
@@ -3092,13 +3092,16 @@ def _bom_readiness_result(blocks):
              Card("Lines to procure", "{:,}".format(n_proc), "bad" if n_proc else "good")]
     note = ("Structured BOM readiness per machine — reproduced from ETO's own report engine "
             f"(EXEC dbo.{_BOM_READINESS_PROC}, exploded per scope assembly) so the figures match the "
-            "on-prem \"Structured BOM - Readiness Detailed Report\". Assembly Qty = qty per parent; "
-            "Total Qty = total required for the whole assembly; Avail Qty = on hand / available; "
-            "Proc Qty = quantity on purchase orders; To Be Proc = still to procure (negative = "
-            "over-supplied); % Avail = completeness by the Absolute (Assembly-Qty) method. Assemblies "
-            "are shaded bands with their parts indented beneath; one section per machine (SpecID) of "
-            "each selected project. (The PDF's Bin column is a follow-up — the only proc variant that "
-            "carries it returns no rows standalone, so Bin isn't sourced yet.)")
+            "on-prem \"Structured BOM - Readiness Detailed Report\". Columns: Assembly Qty = qty of "
+            "this item per its parent assembly; Total Required = qty needed across the whole machine; "
+            "Available (in stock) = on-hand inventory the proc can allocate (TotalAvailable = Received "
+            "minus Pulled — i.e. what's physically in stores, not on order); On Order = qty already on "
+            "purchase orders (PurchaseQty); To Procure = qty still to be procured (OutstandingQty; "
+            "negative = over-supplied, matching the PDF's parenthesised figures); % Available = "
+            "completeness by the Absolute (Assembly-Qty) method. Assemblies are shaded bands with their "
+            "parts indented beneath; one section per machine (SpecID) of each selected project. (The "
+            "PDF's Bin column is a follow-up — the only proc variant that carries it returns no rows "
+            "standalone, so Bin isn't sourced yet.)")
     return QueryResult("bom_readiness", "Structured BOM — Readiness Detailed", list(_BOM_COLS), rows, cards, note)
 
 
