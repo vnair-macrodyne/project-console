@@ -878,29 +878,42 @@ class LiveQueryService(QueryService):
         if not pids:
             return _bom_readiness_result([])
         names = self._bom_project_names(pids)
-        blocks = []
+        # Gather (project, machine) pairs first so we can BOUND the work — this report is heavy.
+        pairs, listerr = [], {}
         for pid in pids:
             try:
                 specdf = self._df(_bom_machines_sql(pid))
-                specs = specdf[specdf.columns[0]].tolist() if not specdf.empty else []
+                for spec in (specdf[specdf.columns[0]].tolist() if not specdf.empty else []):
+                    pairs.append((pid, spec))
             except Exception as e:
-                blocks.append((pid, names.get(pid, ""), "?", None, f"machine list failed — {type(e).__name__}: {e}"))
-                continue
-            for spec in specs:
-                frames, err = [], None
-                try:
-                    scopedf = self._df(_bom_scopes_sql(pid, spec))
-                    scope_ids = scopedf["StructureID"].tolist() if not scopedf.empty else []
-                    for asm in scope_ids:
-                        one = self._readiness_df(_bom_readiness_sql(pid, spec, asm))
-                        if not one.empty:
-                            if "HierarchySortKey" in one.columns:
-                                one = one.sort_values("HierarchySortKey", kind="stable")
-                            frames.append(one)
-                except Exception as e:
-                    err = f"{type(e).__name__}: {e}"
-                machdf = pd.concat(frames, ignore_index=True) if frames else None
-                blocks.append((pid, names.get(pid, ""), spec, machdf, err))
+                listerr[pid] = f"machine list failed — {type(e).__name__}: {e}"
+        if len(pairs) > _BOM_MAX_MACHINES:
+            note = (f"BOM Readiness explodes the full BOM per machine from ETO's report engine, so it "
+                    f"can only run for a handful of machines at a time. Your selection has {len(pairs)} "
+                    f"machines across {len(pids)} projects. Select 1–2 projects (up to "
+                    f"{_BOM_MAX_MACHINES} machines) and re-run.")
+            return QueryResult("bom_readiness", "Structured BOM — Readiness", list(_BOM_COLS), [],
+                               [Card("Machines selected", "{:,}".format(len(pairs)), "warn")], note)
+        try:                                            # bound each proc call so one can't hang the request
+            self._eto_conn().timeout = _BOM_QUERY_TIMEOUT
+        except Exception:
+            pass
+        blocks = [(pid, names.get(pid, ""), "?", None, msg) for pid, msg in listerr.items()]
+        for pid, spec in pairs:
+            frames, err = [], None
+            try:
+                scopedf = self._df(_bom_scopes_sql(pid, spec))
+                scope_ids = scopedf["StructureID"].tolist() if not scopedf.empty else []
+                for asm in scope_ids:
+                    one = self._readiness_df(_bom_readiness_sql(pid, spec, asm))
+                    if not one.empty:
+                        if "HierarchySortKey" in one.columns:
+                            one = one.sort_values("HierarchySortKey", kind="stable")
+                        frames.append(one)
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+            machdf = pd.concat(frames, ignore_index=True) if frames else None
+            blocks.append((pid, names.get(pid, ""), spec, machdf, err))
         return _bom_readiness_result(blocks)
 
     def _q_data_completeness(self, project_ids, **kw):
@@ -2953,6 +2966,12 @@ def _spec_budget_result(df, htmap):
 # (crp0470EngStructuredReadiness — the only variant with BinLabel — returns 0 rows standalone, so it
 # is unusable; Bin is not sourced yet, see the note. urpEngStructuredReadinessBySpec explodes fine.)
 _BOM_READINESS_PROC = "urpEngStructuredReadinessBySpec"
+
+# The readiness proc explodes a machine's whole BOM (hundreds of rows) and is slow, and we call it
+# once per scope. So bound a single run: refuse a selection above this many machines (ask the user to
+# narrow), and cap each proc call's runtime so one can't hang the request.
+_BOM_MAX_MACHINES = 6
+_BOM_QUERY_TIMEOUT = 60          # seconds, per proc call (pyodbc connection.timeout)
 
 _BOM_COLS = [
     QueryColumn("Part", "Part — UOM — Description", "text", "left", wrap=True),
