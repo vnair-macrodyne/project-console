@@ -94,7 +94,7 @@ class QueryResult:
 _QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "spec_budget", "data_completeness", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum", "lab_util",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
-              "po_delivered", "po_buyer", "released_toorder", "item_location", "inventory_value",
+              "po_delivered", "po_buyer", "released_toorder", "bom_readiness", "item_location", "inventory_value",
               "inventory_by_site", "inventory_alloc", "inventory_contention", "inventory_returns",
               "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
@@ -206,6 +206,12 @@ def catalogue():
                  f"yet on the {proj.lower()} — the buyers' still-to-place worklist. One row per item "
                  "with the release date, age since release, released qty and an estimated cost "
                  "(historical PO price). Oldest release first.",
+         "needs_projects": True},
+        {"id": "bom_readiness", "menu": "Purchasing", "label": "BOM Readiness",
+         "desc": "Structured BOM readiness per machine — the on-prem \"Structured BOM - Readiness "
+                 "Detailed\" report, reproduced from ETO's own report engine so the numbers match "
+                 "exactly. Assembly/Total/Available/Procured quantities, still-to-procure, % "
+                 "available (Absolute method) and bin, exploded through the full assembly tree.",
          "needs_projects": True},
         {"id": "po_exceptions", "menu": "Purchasing", "label": "Procurement Exceptions",
          "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
@@ -832,6 +838,37 @@ class LiveQueryService(QueryService):
         ORDER BY ProjectID, MachineCode, HourType
         """
         return _spec_budget_result(self._df(sql), self._hourtype_map())
+
+    def _bom_project_names(self, pids):
+        try:
+            df = self._df(f"SELECT ProjectID, DisplayName FROM tblProjects WHERE ProjectID IN ({_ids_sql(pids)})")
+            return {int(r["ProjectID"]): (r["DisplayName"] or "") for _, r in df.iterrows()}
+        except Exception:
+            return {}
+
+    def _q_bom_readiness(self, project_ids, **kw):
+        """Structured BOM readiness per machine, straight from ETO's report proc so the numbers are
+        byte-identical to the on-prem PDF. For each selected project, find its machines with a BOM
+        (vwEngProductStructure) and EXEC the readiness proc per machine (fully exploded). Each proc
+        call is guarded, so one bad machine can't sink the whole report."""
+        pids = [int(p) for p in project_ids] if project_ids else None
+        if not pids:
+            return _bom_readiness_result([])
+        names = self._bom_project_names(pids)
+        blocks = []
+        for pid in pids:
+            try:
+                specdf = self._df(_bom_machines_sql(pid))
+                specs = specdf[specdf.columns[0]].tolist() if not specdf.empty else []
+            except Exception:
+                specs = []
+            for spec in specs:
+                try:
+                    df = self._df(_bom_readiness_sql(pid, spec))
+                except Exception:
+                    df = None
+                blocks.append((pid, names.get(pid, ""), spec, df))
+        return _bom_readiness_result(blocks)
 
     def _q_data_completeness(self, project_ids, **kw):
         """Population rate of the tracked team-maintained fields, scoped to ACTIVE projects
@@ -2415,8 +2452,8 @@ def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
     cards = [Card("Overdue lines", "{:,}".format(n), "bad" if n else "good"),
              Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
     note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
-            "line. Code = machine/spec; Category = item category; Drawing No. = the item's drawing "
-            "(from the engineering item master); RFQ Date = the item's last RFQ on this project; "
+            "line. Code = machine/spec; Category = item category; Drawing = the item's drawing file "
+            "name (from the engineering item master); RFQ Date = the item's last RFQ on this project; "
             "Lead Time = estimated lead-time days; Oversized / Inspected / Critical = the item's "
             "'Oversize Permit Required' / 'Requires Inspection' / 'Critical Path' flags. Receipt Date "
             "= last receipt; Release Date = when the item's BOM was released to purchasing (ETO "
@@ -2870,6 +2907,119 @@ def _spec_budget_result(df, htmap):
             "overhead line larger than the project’s entire machine budget is flagged as a likely "
             "estimate-entry error.")
     return QueryResult("spec_budget", f"Machine {disc} — Budget vs Actual", cols, rows, cards, note)
+
+
+# ---- BOM Readiness (Structured BOM - Readiness Detailed) -----------------------
+# Reproduces ETO's on-prem "Structured BOM - Readiness Detailed Report" by calling the SAME report
+# proc ETO uses, so the readiness numbers are byte-identical. Per project × machine (SpecID); the
+# proc explodes the entire assembly tree when @intNumberOfLevels is large. crp0470EngStructuredReadiness
+# is the variant that carries BinLabel (the PDF's Bin column). READ-ONLY: EXEC of a reporting proc.
+_BOM_READINESS_PROC = "crp0470EngStructuredReadiness"
+
+_BOM_COLS = [
+    QueryColumn("Part", "Part — UOM — Description", "text", "left", wrap=True),
+    QueryColumn("AssyQty", "Assembly Qty", "num", "right"),
+    QueryColumn("TotalQty", "Total Qty", "num", "right"),
+    QueryColumn("AvailQty", "Avail Qty", "num", "right"),
+    QueryColumn("ProcQty", "Proc Qty", "num", "right"),
+    QueryColumn("ToBeProc", "To Be Proc", "num", "right"),
+    QueryColumn("PctAvail", "% Avail", "pct", "right", calc=True),
+    QueryColumn("Bin", "Bin", "text", "left", wrap=True),
+]
+
+
+def _bom_machines_sql(pid):
+    """The machines (SpecIDs) that have a BOM on this project — one readiness section each."""
+    return (f"SELECT DISTINCT SpecID FROM dbo.vwEngProductStructure "
+            f"WHERE ProjectID = {int(pid)} ORDER BY SpecID")
+
+
+def _bom_readiness_sql(pid, spec):
+    """The exact 10-arg call ETO's report uses, fully exploded. AssemblyStructureID=0 = whole
+    machine; ExplodeStandardAssemblies=1; WeightMethod=0 (Absolute); NOT assemblies-only; don't
+    hide fully-available; NumberOfLevels=99 (fully explode — 0 returns the top node only);
+    IndentSpaces=3; don't average with BOM qty."""
+    return ("SET NOCOUNT ON; "
+            f"EXEC dbo.{_BOM_READINESS_PROC} "
+            f"@intProjectID={int(pid)}, @decSpecID={float(spec)}, @intAssemblyStructureID=0, "
+            f"@bitExplodeStandardAssemblies=1, @intWeightMethod=0, @bitAssembliesOnly=0, "
+            f"@bitHideFullyAvailable=0, @intNumberOfLevels=99, @intIndentSpaces=3, "
+            f"@bitAverageWithBOMQty=0")
+
+
+def _bom_num(v):
+    try:
+        f = float(v)
+        return None if f != f else round(f, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bom_readiness_rows(blocks):
+    """blocks = [(pid, name, spec, df)]; df = the proc's exploded rows for that machine. One l3_sub
+    band per machine; assemblies (UOMType 'AS') are shaded l2_sub bands, parts are detail rows,
+    indentation by Depth. Returns (rows, part_lines, lines_to_procure, machines)."""
+    rows, n_lines, n_proc, n_machines = [], 0, 0, 0
+    for pid, name, spec, df in blocks:
+        n_machines += 1
+        try:
+            speclbl = str(int(float(spec)))
+        except (TypeError, ValueError):
+            speclbl = str(spec)
+        rows.append({"_kind": "l3_sub",
+                     "Part": f"{int(pid)} · Machine {speclbl}" + (f" — {name}" if name else "")})
+        if df is None or getattr(df, "empty", True):
+            rows.append({"_kind": "detail", "Part": "  (no BOM rows for this machine)"})
+            continue
+        d = df.sort_values("HierarchySortKey", kind="stable") if "HierarchySortKey" in df.columns else df
+        for _, r in d.iterrows():
+            depth = int(_bom_num(r.get("Depth")) or 0)
+            if depth <= 0:
+                continue                                  # skip synthetic TOP (machine header shows it)
+            uom = str(r.get("UOMType") or "").strip()
+            is_assy = uom.upper() == "AS"
+            partno = str(r.get("ItemCompanyID") or r.get("PaddedPartNumber")
+                         or r.get("ItemNumber") or "").strip()
+            desc = str(r.get("ItemDescription") or "").strip()
+            indent = "  " * max(0, depth - 1)
+            pa = _bom_num(r.get("PercentageComplete_Absolute_Assy"))
+            tbp = _bom_num(r.get("ToBeProcured"))
+            row = {
+                "_kind": "l2_sub" if is_assy else "detail",
+                "Part": indent + " — ".join(x for x in (partno, uom, desc) if x),
+                "AssyQty": _bom_num(r.get("ItemQty")),
+                "TotalQty": _bom_num(r.get("TotalRequiredForEntireAssy")),
+                "AvailQty": _bom_num(r.get("TotalAvailable")),
+                "ProcQty": _bom_num(r.get("PurchaseQty")),
+                "ToBeProc": tbp,
+                "PctAvail": (pa / 100.0 if pa is not None else None),
+                "Bin": str(r.get("BinLabel") or "").strip(),
+            }
+            if not is_assy:
+                n_lines += 1
+                if tbp and tbp > 0:
+                    n_proc += 1
+                    row["_tone"] = {"ToBeProc": "bad"}
+                elif pa is not None and pa >= 100:
+                    row["_tone"] = {"PctAvail": "good"}
+            rows.append(row)
+    return rows, n_lines, n_proc, n_machines
+
+
+def _bom_readiness_result(blocks):
+    rows, n_lines, n_proc, n_machines = _bom_readiness_rows(blocks)
+    cards = [Card("Machines", "{:,}".format(n_machines)),
+             Card("Part lines", "{:,}".format(n_lines)),
+             Card("Lines to procure", "{:,}".format(n_proc), "bad" if n_proc else "good")]
+    note = ("Structured BOM readiness per machine — reproduced from ETO's own report engine "
+            f"(EXEC dbo.{_BOM_READINESS_PROC}, fully exploded) so the figures match the on-prem "
+            "\"Structured BOM - Readiness Detailed Report\" exactly. Assembly Qty = qty per parent; "
+            "Total Qty = total required for the whole assembly; Avail Qty = on hand / available; "
+            "Proc Qty = quantity on purchase orders; To Be Proc = still to procure (negative = "
+            "over-supplied); % Avail = completeness by the Absolute (Assembly-Qty) method; Bin = "
+            "stock location. Assemblies are shaded bands with their parts indented beneath; one "
+            "section per machine (SpecID) of each selected project.")
+    return QueryResult("bom_readiness", "Structured BOM — Readiness", list(_BOM_COLS), rows, cards, note)
 
 
 # ---- Data Completeness (are teams maintaining key ETO fields?) ------------------
@@ -4010,6 +4160,36 @@ class DemoQueryService(QueryService):
         df = pd.DataFrame(recs, columns=["ProjectID", "MachineCode", "HourType",
                                          "Budget", "Actual", "JobName", "Customer"])
         return _spec_budget_result(df, htmap)
+
+    def _q_bom_readiness(self, project_ids, **kw):
+        import pandas as pd
+        pids = self._sel(project_ids)
+        if not pids:
+            return _bom_readiness_result([])
+        # canned exploded BOM for one machine — (Depth, UOM, PartNo, Desc, Assy, Total, Avail,
+        # Proc, ToBeProc, %Avail, Bin); assemblies (AS) shade, parts sit beneath.
+        tree = [
+            (1, "AS", "10E-ELECTRICAL", "ELECTRICAL SCOPE",        1, 1, 1, 0, 0, 100, ""),
+            (2, "AS", "10E1.0.0.1-00-CABINET", "CABINET",          1, 1, 1, 0, 0, 100, ""),
+            (3, "PC", "E04011", "Grounding straps, 5 AWG",         3, 3, 3, 3, 0, 100, "Hydraulic and Electrical room"),
+            (3, "PC", "E06718", "Plinth; 200mm High 800W encl",    2, 2, 3, 3, -1, 100, "Hydraulic and Electrical room"),
+            (3, "PC", "E09452", "Operating mechanism w/ switch",   1, 1, 0, 1, 1, 0, ""),
+            (2, "AS", "10E1.0.0.2-00-DISC", "DISCONNECT",          1, 1, 1, 0, 0, 100, ""),
+            (3, "PC", "E00557", "Disconnect switch; 600V 600A",    1, 1, 1, 1, 0, 100, "Hydraulic and Electrical room"),
+            (1, "AS", "10M-MECHANICAL", "MECHANICAL SCOPE",        1, 1, 1, 0, 0, 50, ""),
+            (2, "PC", "8009M0.0.0.0-03", "SHCS 0.5-13 x 1.25 LG",  4, 4, 4, 0, 0, 100, "Receiving area"),
+            (2, "PC", "8155M0.0.0.0-01", "0.5\" reg lock washer",  2, 2, 0, 0, 2, 0, ""),
+        ]
+        cols = ["Depth", "UOMType", "ItemCompanyID", "ItemDescription", "ItemQty",
+                "TotalRequiredForEntireAssy", "TotalAvailable", "PurchaseQty", "ToBeProcured",
+                "PercentageComplete_Absolute_Assy", "BinLabel", "HierarchySortKey"]
+        blocks = []
+        for pid in pids[:2]:                        # keep the demo light — up to two machines shown
+            recs = [(d, u, pn, ds, aq, tq, av, pq, tb, pa, bn, f"{i:04d}")
+                    for i, (d, u, pn, ds, aq, tq, av, pq, tb, pa, bn) in enumerate(tree)]
+            df = pd.DataFrame(recs, columns=cols)
+            blocks.append((pid, f"Demo Job {pid}", 10, df))
+        return _bom_readiness_result(blocks)
 
     def _q_data_completeness(self, project_ids, **kw):
         import pandas as pd
