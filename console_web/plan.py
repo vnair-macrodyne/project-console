@@ -28,6 +28,13 @@ DISCIPLINES = ["Project Management", "Mechanical Engineering", "Electrical Engin
 _OVERHEAD_SPEC_MIN = 700
 
 
+def machine_label(spec, desc=None):
+    """'Machine 10 — Staircase' (the machine's tblSpec.SDescription next to its number), or just
+    'Machine 10' when the description is blank. desc is stripped/none-safe by the caller."""
+    d = (desc or "").strip()
+    return f"Machine {spec}" + (f" — {d}" if d else "")
+
+
 # ── week keying (matches the workbook's Year-Week convention, e.g. 202629) ──────
 def excel_weeknum(d):
     """Excel WEEKNUM of a date — same algorithm the labour feed uses (keys line up)."""
@@ -188,7 +195,7 @@ class LivePlanService(PlanService):
         agg = self._md_agg(pid)
         prog = self._md_progress(pid)          # {(SpecID, discipline): form %}
         rem = self._md_remaining(pid)          # {(SpecID, discipline): hours remaining to completion}
-        base["machines"] = self._grid(agg, prog, rem)
+        base["machines"] = self._grid(agg, prog, rem, self._spec_desc(pid))
         if any(d["pct"] is not None for m in base["machines"] for d in m["disciplines"]):
             base["exists"] = True
         return base
@@ -238,12 +245,28 @@ class LivePlanService(PlanService):
             pass
         return agg
 
+    def _spec_desc(self, pid):
+        """{SpecID(int): SDescription} for a project's machines — labels 'Machine 10 — Staircase'."""
+        out = {}
+        try:
+            cur = self._ec().cursor()
+            cur.execute("SELECT SpecID, SDescription FROM dbo.tblSpec WHERE ProjectID = ?", pid)
+            for spec, desc in cur.fetchall():
+                try:
+                    out[int(spec)] = (desc or "").strip()
+                except (TypeError, ValueError):
+                    pass
+        except Exception:
+            pass
+        return out
+
     @staticmethod
-    def _grid(agg, prog, rem=None):
+    def _grid(agg, prog, rem=None, descmap=None):
         """Shape the agg + entered progress into the ordered machine grid (real machines
         numeric-sorted, overhead group last). `rem` carries hours-remaining per cell (the PM input);
-        `prog` the derived % (for display)."""
+        `prog` the derived % (for display); `descmap` = {spec: SDescription} for the machine label."""
         rem = rem or {}
+        descmap = descmap or {}
         def _mkey(k):
             return (1, 0) if k == 0 else (0, k)
         out = []
@@ -255,7 +278,7 @@ class LivePlanService(PlanService):
                      for d in sorted(dh)]
             out.append({
                 "spec": spec,
-                "machine": ("Overhead / Contingency" if spec == 0 else f"Machine {spec}"),
+                "machine": ("Overhead / Contingency" if spec == 0 else machine_label(spec, descmap.get(spec))),
                 "overhead": spec == 0,
                 "budget_hours": round(sum(v[0] for v in dh.values()), 2),
                 "actual_hours": round(sum(v[1] for v in dh.values()), 2),

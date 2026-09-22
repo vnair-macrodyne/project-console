@@ -39,12 +39,11 @@ def discipline_for(dept: str, desc: str) -> str:
     if dep.startswith("manuf"):
         return "Manufacturing"
     if dep.startswith("eng"):
-        # Shop-floor start-up / commissioning is booked under the Engineering department in ETO,
-        # but it's shop work, not design — folding it into Manufacturing keeps the engineering
-        # disciplines reflecting DESIGN effort only, so a discipline manager's utilisation matches
-        # their engineering budget line (Vijay 2026-08-12; e.g. Hydraulic/Electrical Shop Start-Up).
-        if "shop start" in d or "start-up" in d or "start up" in d:
-            return "Manufacturing"
+        # Every Engineering-department hour type keeps ETO's own grouping: Hydraulic / Electrical
+        # (incl. programming) / Mechanical (default). Shop Start-Up lines stay under their
+        # engineering discipline to match ETO's printed estimate — reverted 2026-09-22 (Mike Plata
+        # feedback: ETO groups Elec/Hyd Shop Start-Up under Engineering, so the console must agree;
+        # supersedes the 2026-08-12 fold into Manufacturing).
         if "hydraul" in d:
             return "Hydraulic Engineering"
         if "electr" in d or "program" in d:

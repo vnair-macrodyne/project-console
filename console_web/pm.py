@@ -29,9 +29,16 @@ _OVERHEAD_SPEC_MIN = 700
 _OVERHEAD_LABEL = "Overhead / Contingency"
 
 
-def _machines_payload(agg):
+def _machine_label(spec, desc=None):
+    """'Machine 10 — Staircase' (tblSpec.SDescription beside the number), or 'Machine 10' if blank."""
+    d = (desc or "").strip()
+    return f"Machine {spec}" + (f" — {d}" if d else "")
+
+
+def _machines_payload(agg, descmap=None):
     """agg = {machine-key: {discipline: [budget_hrs, actual_hrs]}} → ordered list for the UI
-    (real machines numeric-sorted, overhead last)."""
+    (real machines numeric-sorted, overhead last). descmap = {spec: SDescription} for the label."""
+    descmap = descmap or {}
     def _mkey(k):
         return (1, 0) if k == _OVERHEAD_LABEL else (0, int(k))
     out = []
@@ -40,7 +47,7 @@ def _machines_payload(agg):
         discs = [{"discipline": d, "budget_hours": round(dh[d][0], 2), "actual_hours": round(dh[d][1], 2)}
                  for d in sorted(dh)]
         out.append({
-            "machine": (_OVERHEAD_LABEL if key == _OVERHEAD_LABEL else f"Machine {key}"),
+            "machine": (_OVERHEAD_LABEL if key == _OVERHEAD_LABEL else _machine_label(key, descmap.get(int(key)) if str(key).lstrip('-').isdigit() else None)),
             "spec": (0 if key == _OVERHEAD_LABEL else int(key)),   # 0 = overhead group (matches plan store)
             "overhead": key == _OVERHEAD_LABEL,
             "budget_hours": round(sum(v[0] for v in dh.values()), 2),
@@ -262,6 +269,21 @@ class LivePMService(PMService):
         dao = HourTypeDisciplineDAO(self._cc())
         return dao.load_map() or HourTypeDisciplineDAO.derive_from_eto(self._ec())
 
+    def _spec_desc(self, pid):
+        """{SpecID(int): SDescription} for a project's machines — labels 'Machine 10 — Staircase'."""
+        out = {}
+        try:
+            cur = self._ec().cursor()
+            cur.execute("SELECT SpecID, SDescription FROM dbo.tblSpec WHERE ProjectID = ?", pid)
+            for spec, desc in cur.fetchall():
+                try:
+                    out[int(spec)] = (desc or "").strip()
+                except (TypeError, ValueError):
+                    pass
+        except Exception:
+            pass
+        return out
+
     def _machine_discipline(self, pid):
         """Machine × discipline hours (budget + actual) for one project, from the SAME ETO tables
         as the Machine Asset Re-Code report — budget = SUM(tblSpecHours.Hours), actual =
@@ -297,7 +319,7 @@ class LivePMService(PMService):
                 slot = agg.setdefault(key, {}).get(disc, [0.0, 0.0])
                 slot[0] += b; slot[1] += a
                 agg[key][disc] = slot
-            return _machines_payload(agg)
+            return _machines_payload(agg, self._spec_desc(pid))
         except Exception:
             return []
 

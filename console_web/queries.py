@@ -828,12 +828,14 @@ class LiveQueryService(QueryService):
                COALESCE(b.HourType, a.HourType)   AS HourType,
                CAST(ISNULL(b.Budget, 0) AS decimal(20,2)) AS Budget,
                CAST(ISNULL(a.Actual, 0) AS decimal(20,2)) AS Actual,
-               p.DisplayName AS JobName, pcust.CName AS Customer
+               p.DisplayName AS JobName, pcust.CName AS Customer, sp.SDescription AS MachineDesc
         FROM bud b
         FULL OUTER JOIN act a
           ON a.ProjectID = b.ProjectID AND a.SpecID = b.SpecID AND a.HourType = b.HourType
         LEFT JOIN tblProjects p     ON p.ProjectID = COALESCE(b.ProjectID, a.ProjectID)
         LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
+        LEFT JOIN tblSpec     sp    ON sp.ProjectID = COALESCE(b.ProjectID, a.ProjectID)
+                                   AND sp.SpecID    = COALESCE(b.SpecID, a.SpecID)
         WHERE (ISNULL(b.Budget, 0) <> 0 OR ISNULL(a.Actual, 0) <> 0)
         ORDER BY ProjectID, MachineCode, HourType
         """
@@ -843,6 +845,22 @@ class LiveQueryService(QueryService):
         try:
             df = self._df(f"SELECT ProjectID, DisplayName FROM tblProjects WHERE ProjectID IN ({_ids_sql(pids)})")
             return {int(r["ProjectID"]): (r["DisplayName"] or "") for _, r in df.iterrows()}
+        except Exception:
+            return {}
+
+    def _spec_desc_map(self, pids):
+        """{(ProjectID, SpecID): SDescription} — the machine descriptions for labelling
+        'Machine 10 — Staircase'. Keyed by (project, spec) since SpecID is unique only within a project."""
+        try:
+            df = self._df(f"SELECT ProjectID, SpecID, SDescription FROM tblSpec "
+                          f"WHERE ProjectID IN ({_ids_sql(pids)})")
+            out = {}
+            for _, r in df.iterrows():
+                try:
+                    out[(int(r["ProjectID"]), int(float(r["SpecID"])))] = _s(r.get("SDescription"))
+                except (TypeError, ValueError):
+                    pass
+            return out
         except Exception:
             return {}
 
@@ -878,6 +896,7 @@ class LiveQueryService(QueryService):
         if not pids:
             return _bom_readiness_result([])
         names = self._bom_project_names(pids)
+        descmap = self._spec_desc_map(pids)             # {(pid, spec): SDescription} for machine labels
         # Gather (project, machine) pairs first so we can BOUND the work — this report is heavy.
         pairs, listerr = [], {}
         for pid in pids:
@@ -894,7 +913,7 @@ class LiveQueryService(QueryService):
             self._eto_conn().timeout = _BOM_QUERY_TIMEOUT
         except Exception:
             pass
-        blocks = [(pid, names.get(pid, ""), "?", None, msg) for pid, msg in listerr.items()]
+        blocks = [(pid, names.get(pid, ""), "?", None, msg, "") for pid, msg in listerr.items()]
         for pid, spec in pairs:
             frames, err = [], None
             try:
@@ -909,7 +928,11 @@ class LiveQueryService(QueryService):
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
             machdf = pd.concat(frames, ignore_index=True) if frames else None
-            blocks.append((pid, names.get(pid, ""), spec, machdf, err))
+            try:
+                mdesc = descmap.get((int(pid), int(float(spec))), "")
+            except (TypeError, ValueError):
+                mdesc = ""
+            blocks.append((pid, names.get(pid, ""), spec, machdf, err, mdesc))
         result = _bom_readiness_result(blocks)
         if truncated:
             result.note = (f"⚠ Showing the first {_BOM_MAX_MACHINES} of {total} machines in your "
@@ -1076,7 +1099,8 @@ class LiveQueryService(QueryService):
         rate = "CASE WHEN poh.PurchaseCurrRate > 0 THEN poh.PurchaseCurrRate ELSE 1 END"
         sql = f"""
         SELECT pod.ProjectID AS ProjectID, p.DisplayName AS JobName, pcust.CName AS Customer,
-               pod.SpecID AS MachineCode, pod.ItemID AS Item, pod.ItemDescription AS Description,
+               pod.SpecID AS MachineCode, sp.SDescription AS MachineDesc,
+               pod.ItemID AS Item, pod.ItemDescription AS Description,
                poh.PurchaseOrderID AS PO, poh.CName AS Supplier,
                COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName,
                         CAST(poh.BuyerID AS varchar(20))) AS Buyer,
@@ -1089,6 +1113,7 @@ class LiveQueryService(QueryService):
         LEFT JOIN tblProjects p     ON p.ProjectID = pod.ProjectID
         LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
         LEFT JOIN tblEmployee bu    ON bu.EmployeeID = poh.BuyerID
+        LEFT JOIN tblSpec     sp    ON sp.ProjectID = pod.ProjectID AND sp.SpecID = pod.SpecID
         WHERE poh.PurchaseActive = 1 AND poh.PurchasePrinted = 0 AND poh.PurchaseEmailed = 0
           AND ISNULL(pod.Archived, 0) = 0{proj}{dtc}
         ORDER BY pod.ProjectID, pod.SpecID, poh.PurchaseOrderID, pod.ItemID
@@ -2779,7 +2804,8 @@ def _po_to_order_rows(df):
         rows.append({"_kind": "l3_sub", "Item": head})
         for mc in sorted(psub["MachineCode"].dropna().unique(), key=str):
             msub = psub[psub["MachineCode"] == mc]
-            rows.append({"_kind": "l2_sub", "Item": f"Machine {_mc_label(mc)}"})
+            mdesc = _s(msub["MachineDesc"].iloc[0]) if "MachineDesc" in msub.columns else ""
+            rows.append({"_kind": "l2_sub", "Item": _machine_label(_mc_label(mc), mdesc)})
             for _, r in msub.iterrows():
                 rows.append({
                     "_kind": "detail",
@@ -2849,6 +2875,13 @@ _OVERHEAD_FLAG_MIN_HOURS = 1000   # floor: don't flag outsized contingency on ve
 _OVERHEAD_LABEL = "Overhead / Contingency"
 
 
+def _machine_label(spec, desc=None):
+    """'Machine 10 — Staircase' (the machine's tblSpec.SDescription next to its number), or just
+    'Machine 10' when the description is blank."""
+    d = _s(desc)
+    return f"Machine {spec}" + (f" — {d}" if d else "")
+
+
 def _spec_budget_detail(disc, b, a, flagged=False):
     cons = (a / b) if b else None
     tone = {"ConsumedPct": _pct_tone(cons)}
@@ -2882,6 +2915,13 @@ def _spec_budget_rows(df, htmap):
         if cust:
             head += f"   ·   {cust}"
         rows.append({"_kind": "l3_sub", "Machine": head})
+        descmap = {}                  # {spec: SDescription} for the machine label
+        if "MachineDesc" in psub.columns:
+            for _, rr in psub.iterrows():
+                try:
+                    descmap[int(rr.get("MachineCode"))] = _s(rr.get("MachineDesc"))
+                except (TypeError, ValueError):
+                    pass
         mach_agg, oh_agg = {}, {}     # {spec:{disc:[b,a]}} , {disc:[b,a]}
         for _, r in psub.iterrows():
             b = float(r.get("Budget") or 0)
@@ -2903,7 +2943,7 @@ def _spec_budget_rows(df, htmap):
         mtb = sum(v[0] for dd in mach_agg.values() for v in dd.values())
         ptb = pta = 0.0
         for spec in sorted(mach_agg):
-            rows.append({"_kind": "l2_sub", "Machine": f"Machine {spec}"})
+            rows.append({"_kind": "l2_sub", "Machine": _machine_label(spec, descmap.get(spec))})
             for disc in sorted(mach_agg[spec]):
                 b, a = mach_agg[spec][disc]
                 rows.append(_spec_budget_detail(disc, b, a))
@@ -3042,13 +3082,16 @@ def _bom_readiness_rows(blocks):
     for block in blocks:
         pid, name, spec, df = block[0], block[1], block[2], block[3]
         err = block[4] if len(block) > 4 else None
+        mdesc = block[5] if len(block) > 5 else ""       # machine SDescription ('Staircase')
         n_machines += 1
         try:
             speclbl = str(int(float(spec)))
         except (TypeError, ValueError):
             speclbl = str(spec)
-        rows.append({"_kind": "l3_sub",
-                     "Part": f"{int(pid)} · Machine {speclbl}" + (f" — {name}" if name else "")})
+        # machine band: number + the machine's own description; fall back to the project name only
+        # when the machine has no description of its own.
+        suffix = f" — {mdesc}" if mdesc else (f" — {name}" if name else "")
+        rows.append({"_kind": "l3_sub", "Part": f"{int(pid)} · Machine {speclbl}{suffix}"})
         if df is None or getattr(df, "empty", True):
             msg = f"  (readiness call failed — {err})" if err else "  (no BOM rows for this machine)"
             rows.append({"_kind": "detail", "Part": msg})
