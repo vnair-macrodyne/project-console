@@ -753,7 +753,7 @@ COLS_EXC = [
     ("DaysToAssembly", "Days to Assembly",  8, "R", True),
     ("RFQDate",        "RFQ Date",         11, "C", False),
     ("PermitDates",    "Permit Dates",     12, "L", False),
-    ("LeadTime",       "Lead Time",         9, "R", False),   # text: '45' maintained, '~45' historical fallback
+    ("LeadTime",       "Lead Time",         8, "R", True),    # number; a historical fallback is italicised via _em, not the value
     ("Oversized",      "Oversized",         8, "C", False),
     ("Inspected",      "Inspected",         8, "C", False),
     ("Critical",       "Critical",          8, "C", False),
@@ -773,17 +773,18 @@ def _num_or_none(v):
 
 
 def _lead_display(maintained, historical):
-    """Lead Time cell. Prefer the maintained EstimatedLeadTime; when it is blank/0, fall back to the
-    HISTORICAL lead time derived from this item's own PO order→receipt history, marked with a leading
-    '~' so it reads as an estimate from past deliveries rather than a maintained value. Blank when
-    neither is available."""
+    """Return (cell, is_historical). The maintained EstimatedLeadTime wins ('45', False); when it is
+    blank/0, fall back to the HISTORICAL lead time from this item's own PO order→receipt history
+    ('34', True); else ('', False). The stored cell is a clean number either way — the caller carries
+    the flag so the web view can render a historical (calculated) value in italics, while the Excel/PDF
+    export keeps a plain number."""
     m = _num_or_none(maintained)
     if m and m > 0:
-        return str(int(round(m)))
+        return int(round(m)), False
     h = _num_or_none(historical)
     if h and h > 0:
-        return f"~{int(round(h))}"
-    return ""
+        return int(round(h)), True
+    return None, False
 
 
 # Freight / courier / cartage POs are expense lines, not parts to chase for assembly — the buyers
@@ -892,7 +893,8 @@ def exc_detail(df, today=None):
             "DaysToAssembly": None,                       # no maintained assembly date
             "RFQDate": (rfq.date().isoformat() if pd.notna(rfq) else ""),   # last RFQ date for the item
             "PermitDates": "",                            # not in ETO
-            "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays")),
+            "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[0],
+            "LeadHist": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[1],   # web italicises a historical value
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path
@@ -908,7 +910,8 @@ def exc_detail_build_rows(items):
     if items is None or items.empty:
         return [(["No open-PO exceptions as of report date."] + [""] * (len(COLS_EXC) - 1), "grand")]
     it = items.sort_values(["Buyer", "DaysLate"], ascending=[True, False])
-    rows = [([r[c[0]] for c in COLS_EXC], "detail") for _, r in it.iterrows()]
+    rows = [([r[c[0]] for c in COLS_EXC], "detail", (["LeadTime"] if r.get("LeadHist") else None))
+            for _, r in it.iterrows()]
     tot = [""] * len(COLS_EXC)
     tot[0] = "GRAND TOTAL"
     tot[_EXC_ITEM_IDX] = f"{len(it)} line(s)"
@@ -1133,7 +1136,8 @@ def po_listing_detail(df, today=None):
             "DaysToAssembly": None,                       # no maintained assembly date
             "RFQDate": (rfq.date().isoformat() if pd.notna(rfq) else ""),   # last RFQ date for the item
             "PermitDates": "",                            # not in ETO
-            "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays")),
+            "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[0],
+            "LeadHist": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[1],   # web italicises a historical value
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path
@@ -1149,7 +1153,8 @@ def po_listing_build_rows(items):
     if items is None or items.empty:
         return [(["No purchase-order lines for the selection."] + [""] * (len(COLS_EXC) - 1), "grand")]
     it = items.sort_values(["Buyer", "DaysLate"], ascending=[True, False])
-    rows = [([r[c[0]] for c in COLS_EXC], "detail") for _, r in it.iterrows()]
+    rows = [([r[c[0]] for c in COLS_EXC], "detail", (["LeadTime"] if r.get("LeadHist") else None))
+            for _, r in it.iterrows()]
     tot = [""] * len(COLS_EXC)
     tot[0] = "GRAND TOTAL"
     tot[_EXC_ITEM_IDX] = f"{len(it)} line(s)"
@@ -1604,11 +1609,16 @@ def _native(v):
 
 
 def web_rows(col_defs, grouped_rows):
-    """grouped (cells, kind) tuples -> list of row dicts carrying a reserved _kind."""
+    """grouped (cells, kind[, em]) tuples -> list of row dicts carrying a reserved _kind, and an
+    optional _em list of column keys the web view should emphasise (italic) for that row."""
     keys = [c[0] for c in col_defs]
     out = []
-    for cells, kind in grouped_rows:
+    for entry in grouped_rows:
+        cells, kind = entry[0], entry[1]
+        em = entry[2] if len(entry) > 2 else None
         d = {k: _native(v) for k, v in zip(keys, cells)}
         d["_kind"] = kind
+        if em:
+            d["_em"] = list(em)
         out.append(d)
     return out

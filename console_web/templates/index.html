@@ -699,7 +699,8 @@ function renderPlain(r,rows){
       return;
     }
     h+=`<tr${kc?` class="${kc.trim()}"`:''}>`;
-    r.columns.forEach(c=>{ const cls=[c.align==='right'?'r':'', c.wrap?'wrap':'', c.calc?'calc':''].filter(Boolean).join(' ');
+    r.columns.forEach(c=>{ const em=row._em&&row._em.indexOf(c.key)>=0;   // per-cell emphasis (italic), e.g. a calculated/historical value
+      const cls=[c.align==='right'?'r':'', c.wrap?'wrap':'', (c.calc||em)?'calc':''].filter(Boolean).join(' ');
       const cell=c.type==='pct'?pctPill(row[c.key], row._thr, row._tone&&row._tone[c.key]):fmt(row[c.key],c.type);
       h+=`<td${cls?` class="${cls}"`:''}>${cell}</td>`; });
     if(pad) h+='<td class="filler"></td>';
