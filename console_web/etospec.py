@@ -753,7 +753,7 @@ COLS_EXC = [
     ("DaysToAssembly", "Days to Assembly",  8, "R", True),
     ("RFQDate",        "RFQ Date",         11, "C", False),
     ("PermitDates",    "Permit Dates",     12, "L", False),
-    ("LeadTime",       "Lead Time",         8, "R", True),
+    ("LeadTime",       "Lead Time",         9, "R", False),   # text: '45' maintained, '~45' historical fallback
     ("Oversized",      "Oversized",         8, "C", False),
     ("Inspected",      "Inspected",         8, "C", False),
     ("Critical",       "Critical",          8, "C", False),
@@ -770,6 +770,20 @@ def _num_or_none(v):
         return None if pd.isna(f) else f
     except (TypeError, ValueError):
         return None
+
+
+def _lead_display(maintained, historical):
+    """Lead Time cell. Prefer the maintained EstimatedLeadTime; when it is blank/0, fall back to the
+    HISTORICAL lead time derived from this item's own PO order→receipt history, marked with a leading
+    '~' so it reads as an estimate from past deliveries rather than a maintained value. Blank when
+    neither is available."""
+    m = _num_or_none(maintained)
+    if m and m > 0:
+        return str(int(round(m)))
+    h = _num_or_none(historical)
+    if h and h > 0:
+        return f"~{int(round(h))}"
+    return ""
 
 
 # Freight / courier / cartage POs are expense lines, not parts to chase for assembly — the buyers
@@ -878,7 +892,7 @@ def exc_detail(df, today=None):
             "DaysToAssembly": None,                       # no maintained assembly date
             "RFQDate": (rfq.date().isoformat() if pd.notna(rfq) else ""),   # last RFQ date for the item
             "PermitDates": "",                            # not in ETO
-            "LeadTime": (int(_num_or_none(r.get("LeadDays"))) if _num_or_none(r.get("LeadDays")) else None),
+            "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays")),
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path
@@ -988,10 +1002,40 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     insp_sel = f"eim.[{_INSPECTED_COL}]" if include_leadtime else "CAST(NULL AS bit)"
     draw_sel = "eim.Drawing" if include_leadtime else "CAST(NULL AS nvarchar(400))"
     proj = ""
+    ids = ""
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
         proj = f" AND pod.ProjectID IN ({ids})"
-    return f"""
+    # HISTORICAL lead time (fallback when EstimatedLeadTime is blank): per ItemID, the average of the
+    # item's actual PO order→receipt spans — DATEDIFF(order date poh.PurchaseDate → last receipt
+    # pdd.LastReceivedDate) — bounded to 0..730 days to drop data-entry outliers. When a project set is
+    # in scope, the history scan is limited to those projects' items (an item's spans across ALL its POs
+    # still count — that's the point). Guarded to include_leadtime so the freight/no-enrich path is unchanged.
+    if include_leadtime:
+        scope = (f" AND pod2.ItemID IN (SELECT pod3.ItemID FROM vwPurchaseOrderDetails pod3 "
+                 f"WHERE pod3.ProjectID IN ({ids}))") if ids else ""
+        hist_cte = f"""WITH hist AS (
+        SELECT x.ItemID,
+               CAST(ROUND(AVG(CAST(x.LeadDays AS float)), 0) AS int) AS HistLead,
+               COUNT_BIG(*) AS HistN
+        FROM (
+            SELECT pod2.ItemID,
+                   DATEDIFF(day, poh2.PurchaseDate, pdd2.LastReceivedDate) AS LeadDays
+            FROM vwPurchaseOrderHeader poh2
+            JOIN vwPurchaseOrderDetails pod2 ON pod2.PurchaseOrderID = poh2.PurchaseOrderID
+            JOIN vwPurchaseOrderDetailsDetailed pdd2 ON pdd2.PurchaseDetailID = pod2.PurchaseDetailID
+            WHERE pdd2.LastReceivedDate IS NOT NULL AND poh2.PurchaseDate IS NOT NULL
+              AND DATEDIFF(day, poh2.PurchaseDate, pdd2.LastReceivedDate) BETWEEN 0 AND 730{scope}
+        ) x
+        GROUP BY x.ItemID
+    )
+    """
+        hist_join = "LEFT JOIN hist ON hist.ItemID = pod.ItemID"
+        hist_sel, histn_sel = "hist.HistLead", "hist.HistN"
+    else:
+        hist_cte, hist_join = "", ""
+        hist_sel, histn_sel = "CAST(NULL AS int)", "CAST(NULL AS int)"
+    return f"""{hist_cte}
     SELECT
         {buyer_sel}                     AS Buyer,
         pod.ProjectID                   AS ProjectID,
@@ -1011,6 +1055,8 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         CAST(poh.PurchaseDate AS date)  AS Ordered,
         CAST(poh.PurchaseDateRevised AS date) AS HeaderRevised,
         {lead_sel}                      AS LeadDays,
+        {hist_sel}                      AS HistLeadDays,
+        {histn_sel}                     AS HistLeadN,
         {llt_sel}                       AS LLTFlag,
         {over_sel}                      AS OverFlag,
         {crit_sel}                      AS CritFlag,
@@ -1024,6 +1070,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
     {buyer_join}
     {lead_join}
+    {hist_join}
     {rfq_join}
     {_bom_release_join(project_ids)}
     WHERE poh.PurchaseActive = 1{"" if all_statuses else _RECV_OPEN_CLAUSE}{proj}{_po_date_window(date_from, date_to)}
@@ -1086,7 +1133,7 @@ def po_listing_detail(df, today=None):
             "DaysToAssembly": None,                       # no maintained assembly date
             "RFQDate": (rfq.date().isoformat() if pd.notna(rfq) else ""),   # last RFQ date for the item
             "PermitDates": "",                            # not in ETO
-            "LeadTime": (int(_num_or_none(r.get("LeadDays"))) if _num_or_none(r.get("LeadDays")) else None),
+            "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays")),
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path

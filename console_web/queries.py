@@ -2526,13 +2526,17 @@ def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
     note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
             "line. Code = machine/spec; Category = item category; Drawing = the item's drawing file "
             "name (from the engineering item master); RFQ Date = the item's last RFQ on this project; "
-            "Lead Time = estimated lead-time days; Oversized / Inspected / Critical = the item's "
-            "'Oversize Permit Required' / 'Requires Inspection' / 'Critical Path' flags. Receipt Date "
+            "Lead Time = maintained estimated lead-time days, or a '~N' HISTORICAL fallback (the item's "
+            "average actual order→receipt span across its PO history, bounded to 0–730 days) when the "
+            "estimate is blank — the '~' marks it as inferred from past deliveries, not a maintained "
+            "value; Oversized / Inspected / Critical = the item's 'Oversize Permit Required' / 'Requires "
+            "Inspection' / 'Critical Path' flags. Receipt Date "
             "= last receipt; Release Date = when the item's BOM was released to purchasing (ETO "
             "release log, eng date as fallback); Last Activity = latest of order date, last receipt "
             "and header revision (a last-activity signal, not an edit audit — ETO keeps no PO edit "
-            "timestamp). Status is derived. Lead Time / Oversized / Inspected / Critical read blank "
-            "where the ETO item hasn't been maintained. Planned Ship, Days to Assembly and Permit "
+            "timestamp). Status is derived. Oversized / Inspected / Critical read blank "
+            "where the ETO item hasn't been maintained; Lead Time reads blank only when neither a "
+            "maintained estimate nor any receipt history exists for the item. Planned Ship, Days to Assembly and Permit "
             "Dates are shown for the workbook layout but ETO holds no source for them."
             + ("" if enriched else
                " NOTE: item enrichment (Drawing / RFQ / Lead / flags) was unavailable this run"
@@ -4940,7 +4944,7 @@ _DEMO_PACKSLIP = [
 # Procurement Exceptions — query_po_exceptions output shape
 _DEMO_EXC_COLS = ["Buyer", "ProjectID", "JobName", "Code", "Item", "Description", "Category",
                   "PO", "Vendor", "Qty", "Received", "ExtValue", "DateRequired", "DateRevised",
-                  "ReceiptDate", "Ordered", "LeadDays", "LLTFlag", "OverFlag", "CritFlag",
+                  "ReceiptDate", "Ordered", "LeadDays", "HistLeadDays", "HistLeadN", "LLTFlag", "OverFlag", "CritFlag",
                   "InspFlag", "DrawingRaw", "EngReleaseDate", "RFQDate"]
 _DEMO_EXC_RAW = [
     {"Buyer": "Nolan, Pat", "ProjectID": 230219, "JobName": _D19[0], "Code": 10, "Item": "48255",
@@ -4954,7 +4958,8 @@ _DEMO_EXC_RAW = [
      "Description": "Cylinder seals & glands", "Category": "Hydraulic Components", "PO": "48260",
      "Vendor": "Bosch Rexroth", "Qty": 12, "Received": 4, "ExtValue": 15400.0,
      "DateRequired": "2026-07-10", "DateRevised": None, "ReceiptDate": "2026-07-18",
-     "Ordered": "2026-07-08", "LeadDays": 30, "LLTFlag": 0, "OverFlag": 0, "CritFlag": 0, "InspFlag": 0,
+     "Ordered": "2026-07-08", "LeadDays": 0, "HistLeadDays": 34, "HistLeadN": 7,
+     "LLTFlag": 0, "OverFlag": 0, "CritFlag": 0, "InspFlag": 0,
      "DrawingRaw": "#F:\\Jobs 2024\\240115 - Zehrco\\#", "EngReleaseDate": None, "RFQDate": None},
     {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Code": 20, "Item": "48120",
      "Description": "S7-1500 PLC + IO", "Category": "Electrical / Controls", "PO": "48120",
