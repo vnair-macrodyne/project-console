@@ -192,11 +192,11 @@ class LivePlanService(PlanService):
         # MACHINE × DISCIPLINE grid — every budgeted cell (machine + overhead group) with its
         # budget & actual hours from ETO and the latest week's entered % complete. This is the
         # superset of the budget-vs-actual breakdown; the PM declares progress at the cell.
-        agg = self._md_agg(pid)
-        prog = self._md_progress(pid)          # {(SpecID, discipline): form %}
-        rem = self._md_remaining(pid)          # {(SpecID, discipline): hours remaining to completion}
-        base["machines"] = self._grid(agg, prog, rem, self._spec_desc(pid))
-        if any(d["pct"] is not None for m in base["machines"] for d in m["disciplines"]):
+        items = self._wi_agg(pid)              # [{spec, ht, disc, wi, bud, act}] — work-item grain
+        rem = self._wi_remaining(pid)          # {(SpecID, HourType): hours remaining to completion}
+        base["machines"] = self._grid_wi(items, rem, self._spec_desc(pid))
+        if any(it["pct"] is not None
+               for m in base["machines"] for d in m["disciplines"] for it in d["items"]):
             base["exists"] = True
         return base
 
@@ -260,6 +260,74 @@ class LivePlanService(PlanService):
             pass
         return out
 
+    def _wi_agg(self, pid):
+        """WORK-ITEM aggregation: [{spec, ht, disc, wi, bud, act}] — one entry per machine × HourType.
+        Budget = SUM(tblSpecHours.Hours), actual = SUM(vwTimecards.HourTime); FULL OUTER JOIN so every
+        item with a budget OR logged hours appears (budgeted + worked-but-unbudgeted). The work item is
+        the HourType, labelled by tlkpHourTypes.HourDescription (the ETO estimate's own line names).
+        Overhead specs (>= 700) fold into spec 0; same-HourType lines there are summed."""
+        rows = []
+        try:
+            htmap = self._hourtype_map()
+            cur = self._ec().cursor()
+            cur.execute("""
+                WITH bud AS (SELECT SpecID, ISNULL(HourType,0) AS HourType, SUM(Hours) AS Budget
+                             FROM dbo.tblSpecHours WHERE ProjectID = ? GROUP BY SpecID, ISNULL(HourType,0)),
+                     act AS (SELECT SpecID, ISNULL(HourType,0) AS HourType, SUM(HourTime) AS Actual
+                             FROM dbo.vwTimecards WHERE ProjectID = ? GROUP BY SpecID, ISNULL(HourType,0))
+                SELECT COALESCE(b.SpecID, a.SpecID)   AS SpecID,
+                       COALESCE(b.HourType, a.HourType) AS HourType,
+                       ht.HourDescription             AS WorkItem,
+                       CAST(ISNULL(b.Budget,0) AS decimal(20,2)) AS Budget,
+                       CAST(ISNULL(a.Actual,0) AS decimal(20,2)) AS Actual
+                FROM bud b FULL OUTER JOIN act a ON a.SpecID = b.SpecID AND a.HourType = b.HourType
+                LEFT JOIN dbo.tlkpHourTypes ht ON ht.HourType = COALESCE(b.HourType, a.HourType)
+                WHERE (ISNULL(b.Budget,0) <> 0 OR ISNULL(a.Actual,0) <> 0)
+            """, pid, pid)
+            for spec, ht, wi, b, a in cur.fetchall():
+                try:
+                    s = int(spec)
+                except (TypeError, ValueError):
+                    s = None
+                key = 0 if (s is None or s >= _OVERHEAD_SPEC_MIN) else s
+                try:
+                    hti = int(ht)
+                except (TypeError, ValueError):
+                    hti = 0
+                disc = htmap.get(hti, "Other")
+                label = (wi or "").strip() or (f"HourType {hti}" if hti else "Unspecified")
+                rows.append({"spec": key, "ht": hti, "disc": disc, "wi": label,
+                             "bud": float(b or 0), "act": float(a or 0)})
+        except Exception:
+            pass
+        # fold duplicates (e.g. several overhead specs ≥700 collapsing to spec 0 with the same HourType)
+        merged = {}
+        for it in rows:
+            k = (it["spec"], it["ht"])
+            if k in merged:
+                merged[k]["bud"] += it["bud"]; merged[k]["act"] += it["act"]
+            else:
+                merged[k] = it
+        return list(merged.values())
+
+    def _wi_remaining(self, pid):
+        """{(SpecID(int), HourType(int)): hours remaining} — latest week per work item (the PM input
+        the % is derived from). Empty before sql/019 is applied (guarded), so the page still renders."""
+        out = {}
+        try:
+            cur = self._cc().cursor()
+            cur.execute(
+                "SELECT SpecID, HourType, RemainingHours FROM ("
+                "  SELECT SpecID, HourType, RemainingHours,"
+                "         ROW_NUMBER() OVER (PARTITION BY SpecID, HourType ORDER BY YearWeekKey DESC) rn"
+                "  FROM Reporting.tblProjectWorkItemProgress"
+                "  WHERE ProjectID = ? AND RemainingHours IS NOT NULL) t WHERE rn = 1", pid)
+            for s, ht, hrs in cur.fetchall():
+                out[(int(s), int(ht))] = round(float(hrs), 2) if hrs is not None else None
+        except Exception:
+            pass
+        return out
+
     @staticmethod
     def _grid(agg, prog, rem=None, descmap=None):
         """Shape the agg + entered progress into the ordered machine grid (real machines
@@ -285,6 +353,86 @@ class LivePlanService(PlanService):
                 "disciplines": discs,
             })
         return out
+
+    @staticmethod
+    def _grid_wi(items, rem=None, descmap=None):
+        """Shape the WORK-ITEM aggregation into the nested grid machine → discipline → work item.
+        `items` = [{spec, ht, disc, wi, bud, act}]; `rem` = {(spec, ht): remaining hrs} (the PM input);
+        `descmap` = {spec: SDescription}. Each work item carries budget/actual/remaining/%/earned/CPI;
+        discipline and machine rows carry the budget-weighted roll-ups (weight = budget, or actual for
+        unbudgeted work). Overhead group (spec 0) sorts last."""
+        rem = rem or {}
+        descmap = descmap or {}
+        by_spec = {}
+        for it in items:
+            by_spec.setdefault(it["spec"], {}).setdefault(it["disc"], []).append(it)
+
+        def _mkey(k):
+            return (1, 0) if k == 0 else (0, k)
+
+        out = []
+        for spec in sorted(by_spec, key=_mkey):
+            discs_out, m_bud, m_act, m_pairs = [], 0.0, 0.0, []
+            for disc in sorted(by_spec[spec]):
+                items_out, d_bud, d_act, d_pairs = [], 0.0, 0.0, []
+                for it in sorted(by_spec[spec][disc], key=lambda x: (x["wi"] or "").lower()):
+                    b, a = round(it["bud"], 2), round(it["act"], 2)
+                    r = rem.get((spec, it["ht"]))
+                    pct, earned, cpi = _wi_metrics(b, a, r)
+                    items_out.append({
+                        "hourtype": it["ht"], "work_item": it["wi"],
+                        "budget_hours": b, "actual_hours": a, "remaining": r,
+                        "pct": _pct_out(pct) if pct is not None else None,
+                        "earned_hours": earned, "cpi": cpi, "unbudgeted": not (b > 0)})
+                    d_bud += b; d_act += a
+                    d_pairs.append((pct, b if b > 0 else a))
+                d_pct = _budget_weighted(d_pairs)
+                d_earn = round(d_pct * d_bud, 2) if (d_pct is not None and d_bud) else None
+                d_cpi = round(d_earn / d_act, 3) if (d_earn is not None and d_act) else None
+                discs_out.append({
+                    "discipline": disc, "budget_hours": round(d_bud, 2), "actual_hours": round(d_act, 2),
+                    "pct": _pct_out(d_pct) if d_pct is not None else None,
+                    "earned_hours": d_earn, "cpi": d_cpi, "items": items_out})
+                m_bud += d_bud; m_act += d_act
+                m_pairs.append((d_pct, d_bud if d_bud > 0 else d_act))
+            m_pct = _budget_weighted(m_pairs)
+            m_earn = round(m_pct * m_bud, 2) if (m_pct is not None and m_bud) else None
+            m_cpi = round(m_earn / m_act, 3) if (m_earn is not None and m_act) else None
+            out.append({
+                "spec": spec,
+                "machine": ("Overhead / Contingency" if spec == 0 else machine_label(spec, descmap.get(spec))),
+                "overhead": spec == 0,
+                "budget_hours": round(m_bud, 2), "actual_hours": round(m_act, 2),
+                "pct": _pct_out(m_pct) if m_pct is not None else None,
+                "earned_hours": m_earn, "cpi": m_cpi,
+                "disciplines": discs_out})
+        return out
+
+    @staticmethod
+    def _derive_rollups(items, cell_rem):
+        """From the ETO work items + the PM's per-item remaining, derive the roll-up rows that keep the
+        legacy tables current: `md` = {(spec, disc): (remaining_sum|None, pct_frac|None)} for the
+        machine×discipline table; `disc` = {disc: pct_frac} for the discipline table. Both budget-weighted
+        (weight = budget, or actual for unbudgeted), the SAME method the discipline roll-up used before —
+        just sourced one level down, from the work items."""
+        md_pairs, disc_pairs, md_rem = {}, {}, {}
+        for it in items:
+            spec, disc = it["spec"], it["disc"]
+            b, a = it["bud"], it["act"]
+            r = cell_rem.get((spec, it["ht"]))
+            pct = _pct_from_remaining(a, r)
+            w = b if b > 0 else a
+            md_pairs.setdefault((spec, disc), []).append((pct, w))
+            disc_pairs.setdefault(disc, []).append((pct, w))
+            if r is not None:
+                acc = md_rem.setdefault((spec, disc), [0.0, False])
+                acc[0] += r; acc[1] = True
+        md = {}
+        for key, pairs in md_pairs.items():
+            acc = md_rem.get(key)
+            md[key] = (round(acc[0], 2) if (acc and acc[1]) else None, _budget_weighted(pairs))
+        disc = {d: v for d, v in ((d, _budget_weighted(p)) for d, p in disc_pairs.items()) if v is not None}
+        return md, disc
 
     def _md_progress(self, pid):
         """{(SpecID(int), discipline): %complete as a form percentage} — latest week per cell."""
@@ -357,15 +505,25 @@ class LivePlanService(PlanService):
                 carry.get("LLTPReleasedLate"), carry.get("LLTPOrderedLate"),
                 carry.get("LLTPDeliveredLate"), carry.get("PartsReleasedLate"),
                 carry.get("PartsOrderedLate"), carry.get("Rank"), carry.get("ReRank"))
-        # Progress is captured as HOURS REMAINING TO COMPLETION at the machine × discipline cell
-        # (the finest budgeted unit). % complete is derived = actual / (actual + remaining).
+        # Progress is captured as HOURS REMAINING TO COMPLETION at the WORK ITEM (machine × HourType)
+        # cell — the finest unit ETO budgets. % complete is derived = actual / (actual + remaining).
+        # The payload posts every work-item cell in the grid; a blank remaining clears that cell.
         cells = payload.get("machine_discipline_progress") or []
-        actuals = self._md_agg(pid)            # {spec: {disc: [budget, actual]}} — for %-from-remaining
-        self._save_md_progress(cur, pid, fy, wk, key, by, cells, actuals)
-        # The per-discipline % the dashboard / scorecard run-out reads is DERIVED (budget-weighted)
-        # from those cells and written here, so the PM enters progress once — at the cell.
-        self._save_discipline_progress(cur, pid, fy, wk, key, by,
-                                       self._derive_discipline_pct(cells, actuals))
+        items = self._wi_agg(pid)              # ETO budget/actual per work item — for %-from-remaining + roll-up
+        cell_rem = {}
+        for c in cells:
+            try:
+                spec, ht = int(c.get("spec")), int(c.get("hourtype"))
+            except (TypeError, ValueError):
+                continue
+            cell_rem[(spec, ht)] = _remaining_in(c.get("remaining"))
+        self._save_wi_progress(cur, pid, fy, wk, key, by, items, cell_rem)
+        # Keep the legacy roll-up tables the dashboard / scorecard / Budgets read: DERIVE the machine×
+        # discipline and discipline % (budget-weighted) from the work items and write them, so those
+        # surfaces are unchanged and the PM still enters progress once — now at the work item.
+        md, disc = self._derive_rollups(items, cell_rem)
+        self._save_md_derived(cur, pid, fy, wk, key, by, md)
+        self._save_discipline_progress(cur, pid, fy, wk, key, by, disc)
         conn.commit()
         return {"ok": True, "project_id": pid, "week": key,
                 "planned_ship": _iso(ship)}
@@ -418,6 +576,48 @@ class LivePlanService(PlanService):
                             " RemainingHours, PercentComplete, EnteredBy, CapturedAt) "
                             "VALUES (?,?,?,?,?,?,?,?,?,GETDATE())",
                             pid, fy, wk, key, spec, disc, remaining, frac, by)
+
+    def _save_wi_progress(self, cur, pid, fy, wk, key, by, items, cell_rem):
+        """Upsert the PM's per-work-item HOURS REMAINING for the current week into
+        Reporting.tblProjectWorkItemProgress (the new source of truth), plus the derived % complete
+        (= actual / (actual + remaining)). `cell_rem` = {(spec, ht): remaining}; a blank clears the cell."""
+        act_idx = {(it["spec"], it["ht"]): it["act"] for it in items}
+        for (spec, ht), remaining in cell_rem.items():
+            frac = _pct_from_remaining(act_idx.get((spec, ht), 0.0), remaining)
+            cur.execute("SELECT ProgressID FROM Reporting.tblProjectWorkItemProgress "
+                        "WHERE ProjectID = ? AND YearWeekKey = ? AND SpecID = ? AND HourType = ?",
+                        pid, key, spec, ht)
+            r = cur.fetchone()
+            if r:
+                cur.execute("UPDATE Reporting.tblProjectWorkItemProgress "
+                            "SET RemainingHours = ?, PercentComplete = ?, EnteredBy = ?, "
+                            "CapturedAt = GETDATE() WHERE ProgressID = ?", remaining, frac, by, int(r[0]))
+            else:
+                cur.execute("INSERT INTO Reporting.tblProjectWorkItemProgress "
+                            "(ProjectID, FiscalYear, WeekNo, YearWeekKey, SpecID, HourType, "
+                            " RemainingHours, PercentComplete, EnteredBy, CapturedAt) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,GETDATE())",
+                            pid, fy, wk, key, spec, ht, remaining, frac, by)
+
+    def _save_md_derived(self, cur, pid, fy, wk, key, by, md):
+        """Write the DERIVED machine × discipline roll-up (from the work items) so the existing
+        tblProjectMachineDisciplineProgress consumers are unchanged. `md` = {(spec, disc):
+        (remaining_sum|None, pct_frac|None)}."""
+        for (spec, disc), (rem_sum, frac) in md.items():
+            cur.execute("SELECT ProgressID FROM Reporting.tblProjectMachineDisciplineProgress "
+                        "WHERE ProjectID = ? AND YearWeekKey = ? AND SpecID = ? AND Discipline = ?",
+                        pid, key, spec, disc)
+            r = cur.fetchone()
+            if r:
+                cur.execute("UPDATE Reporting.tblProjectMachineDisciplineProgress "
+                            "SET RemainingHours = ?, PercentComplete = ?, EnteredBy = ?, "
+                            "CapturedAt = GETDATE() WHERE ProgressID = ?", rem_sum, frac, by, int(r[0]))
+            else:
+                cur.execute("INSERT INTO Reporting.tblProjectMachineDisciplineProgress "
+                            "(ProjectID, FiscalYear, WeekNo, YearWeekKey, SpecID, Discipline, "
+                            " RemainingHours, PercentComplete, EnteredBy, CapturedAt) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,GETDATE())",
+                            pid, fy, wk, key, spec, disc, rem_sum, frac, by)
 
     def _derive_discipline_pct(self, cells, actuals):
         """Roll the cells UP to a per-discipline % for the dashboard/scorecard run-out. Each cell's %
@@ -479,17 +679,24 @@ _DEMO_NAMES = {230219: "230219 - 5500 Ton Forging Press", 230312: "230312 - 2500
 class DemoPlanService(PlanService):
     # canned machine × discipline budget/actual per demo project: {spec: {disc: [budget, actual]}}
     # (spec 0 = the Overhead / Contingency group), so the grid + earned/CPI are exercisable.
-    _DEMO_GRID = {230219: {
-        10: {"Mechanical Engineering": [1800.0, 1700.0], "Manufacturing": [1400.0, 1500.0]},
-        20: {"Electrical Engineering": [1200.0, 1100.0], "Manufacturing": [900.0, 950.0]},
-        0:  {"Project Management": [300.0, 280.0]},
-    }}
-    _store = {   # persists across requests within the process; cells: {(spec, disc): remaining hours}
+    # canned WORK ITEMS per demo project: [{spec, ht, disc, wi, bud, act}] (spec 0 = Overhead group),
+    # so the nested machine → discipline → work-item grid + earned/CPI are exercisable without a DB.
+    _DEMO_ITEMS = {230219: [
+        {"spec": 10, "ht": 11, "disc": "Mechanical Engineering", "wi": "Mechanical Engineering",      "bud": 1080.0, "act": 1005.0},
+        {"spec": 10, "ht": 31, "disc": "Manufacturing",          "wi": "Mechanical Assembly",         "bud": 1400.0, "act": 1500.0},
+        {"spec": 10, "ht": 32, "disc": "Manufacturing",          "wi": "Fabrication/Welding (IW)",    "bud": 720.0,  "act": 695.0},
+        {"spec": 20, "ht": 21, "disc": "Electrical Engineering", "wi": "Electrical Programming",      "bud": 600.0,  "act": 560.0},
+        {"spec": 20, "ht": 22, "disc": "Electrical Engineering", "wi": "Electrical Shop Start-Up",    "bud": 240.0,  "act": 30.0},
+        {"spec": 20, "ht": 33, "disc": "Manufacturing",          "wi": "Electrical Wiring - Machine", "bud": 480.0,  "act": 470.0},
+        {"spec": 20, "ht": 34, "disc": "Manufacturing",          "wi": "Electrical Panel Building",   "bud": 0.0,    "act": 60.0},   # worked-but-unbudgeted
+        {"spec": 0,  "ht": 40, "disc": "Project Management",     "wi": "Project Coordination",        "bud": 300.0,  "act": 280.0},
+    ]}
+    _store = {   # persists across requests within the process; cells: {(spec, ht): remaining hours}
         230219: {"planned_ship": "2026-10-02",
                  "labour_runout": None, "material_runout": None, "rework_threshold": 0.015,
-                 "cells": {(10, "Mechanical Engineering"): 190.0, (10, "Manufacturing"): 375.0,
-                           (20, "Electrical Engineering"): 195.0, (20, "Manufacturing"): 315.0,
-                           (0, "Project Management"): 15.0}},
+                 "cells": {(10, 11): 120.0, (10, 31): 375.0, (10, 32): 40.0,
+                           (20, 21): 95.0, (20, 22): 210.0, (20, 33): 25.0, (20, 34): 40.0,
+                           (0, 40): 15.0}},
     }
 
     def list_projects(self):
@@ -513,15 +720,12 @@ class DemoPlanService(PlanService):
                 "labour_runout": None, "material_runout": None, "rework_threshold": None,
                 "week": week_key(_dt.date.today())[2],
                 "machines": []}
-        cells = (rec or {}).get("cells", {})     # {(spec, disc): remaining hours}
-        grid = DemoPlanService._DEMO_GRID.get(pid, {})
-        prog = {}                                 # derived % for display
-        for spec, dh in grid.items():
-            for disc, (b, a) in dh.items():
-                f = _pct_from_remaining(a, cells.get((spec, disc)))
-                if f is not None:
-                    prog[(spec, disc)] = _pct_out(f)
-        base["machines"] = LivePlanService._grid(grid, prog, dict(cells))
+        cells = (rec or {}).get("cells", {})     # {(spec, ht): remaining hours}
+        items = DemoPlanService._DEMO_ITEMS.get(pid, [])
+        base["machines"] = LivePlanService._grid_wi(items, dict(cells))
+        if any(it["pct"] is not None
+               for m in base["machines"] for d in m["disciplines"] for it in d["items"]):
+            base["exists"] = True
         if rec:
             base.update(planned_ship=rec["planned_ship"],
                         labour_runout=_ratio_out(rec["labour_runout"]),
@@ -534,13 +738,10 @@ class DemoPlanService(PlanService):
         cells = {}
         for c in (payload.get("machine_discipline_progress") or []):
             try:
-                spec = int(c.get("spec"))
+                spec, ht = int(c.get("spec")), int(c.get("hourtype"))
             except (TypeError, ValueError):
                 continue
-            disc = str(c.get("discipline") or "").strip()
-            remaining = _remaining_in(c.get("remaining"))
-            if disc:
-                cells[(spec, disc)] = remaining
+            cells[(spec, ht)] = _remaining_in(c.get("remaining"))
         DemoPlanService._store[pid] = {
             "planned_ship": (payload.get("planned_ship") or None),
             "labour_runout": _ratio_pct(payload.get("labour_runout")),
@@ -611,6 +812,27 @@ def _pct_from_remaining(actual, remaining):
     if eac <= 0:
         return 1.0                # 0 remaining and 0 actual → nothing left to do = complete
     return round(a / eac, 4)
+
+
+def _wi_metrics(bud, act, remaining):
+    """(pct, earned_hrs, cpi) for one work item. pct = actual/(actual+remaining); earned = pct×budget;
+    CPI = earned÷actual. pct is None until the PM declares a remaining; earned/CPI need a budget/actual."""
+    pct = _pct_from_remaining(act, remaining)
+    earned = round(pct * bud, 2) if (pct is not None and bud) else None
+    cpi = round(earned / act, 3) if (earned is not None and act) else None
+    return pct, earned, cpi
+
+
+def _budget_weighted(pairs):
+    """Roll a set of (fraction, weight) up to one budget-weighted fraction: Σ f×w ÷ Σ w. Weight is
+    budget (or actual for unbudgeted work). None fractions and zero weights are skipped; None if empty."""
+    num = den = 0.0
+    for f, w in pairs:
+        if f is None or not w:
+            continue
+        num += f * w
+        den += w
+    return round(num / den, 4) if den else None
 
 
 def _ratio_out(r):
