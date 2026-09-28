@@ -2593,16 +2593,16 @@ def _released_toorder_rows(df, as_of):
 def _released_toorder_result(df, as_of):
     proj = L("project")
     cols = [
-        QueryColumn("ProjectID", proj, "id", "left"),
-        QueryColumn("JobName", "Job", "text", "left", wrap=True),
+        QueryColumn("ProjectID", f"{proj} #", "id", "left"),
+        QueryColumn("JobName", proj, "text", "left", wrap=True),
         QueryColumn("Machine", "Machine", "text", "left"),
         QueryColumn("ItemNo", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
         QueryColumn("Qty", "Released Qty", "num", "right"),
-        QueryColumn("ReleaseDate", "Released", "date", "left"),
-        QueryColumn("AgeDays", "Age (days)", "int", "right"),
         QueryColumn("UnitCost", "Est. Unit", "money2", "right"),
         QueryColumn("ExtValue", "Est. Value", "money", "right"),
+        QueryColumn("ReleaseDate", "Released", "date", "left"),
+        QueryColumn("AgeDays", "Age (days)", "int", "right"),
     ]
     empty = df is None or df.empty
     items = 0 if empty else int(len(df))
@@ -2819,11 +2819,11 @@ def _po_to_order_result(df, window_label=""):
         QueryColumn("Buyer", "Buyer", "text", "left"),
         QueryColumn("Curr", "Curr", "text", "left"),
         QueryColumn("Qty", "Qty", "num", "right"),
-        QueryColumn("Price", "Unit Price", "num", "right"),
+        QueryColumn("Price", "Unit Price", "money2", "right"),
         QueryColumn("ExtValueCAD", "Ext. Value (CAD)", "money", "right"),
         QueryColumn("Required", "Need-by", "date", "left"),
         QueryColumn("Entered", "Requisitioned", "date", "left"),
-        QueryColumn("AgeDays", "Age (days)", "days", "right"),
+        QueryColumn("AgeDays", "Age (days)", "int", "right"),
     ]
     empty = df is None or df.empty
     n = 0 if empty else int(len(df))

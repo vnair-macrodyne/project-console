@@ -739,7 +739,7 @@ COLS_EXC = [
     ("PO",             "PO #",             10, "L", False),
     ("ProjectID",      "Project #",         8, "C", False),
     ("JobName",        "Project",          20, "L", False),
-    ("Code",           "Code",              6, "C", False),
+    ("Code",           "Machine",           7, "C", False),   # spec/machine code — label aligned with the other purchasing reports
     ("Item",           "Item",             11, "L", False),
     ("Category",       "Category",         16, "L", False),
     ("DrawingNo",      "Drawing",          16, "L", False),
