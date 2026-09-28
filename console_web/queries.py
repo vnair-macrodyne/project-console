@@ -186,10 +186,11 @@ def catalogue():
                  "booked ÷ available. Portfolio-wide (the whole workforce), independent of the "
                  "project selection.",
          "needs_projects": False},
-        # ── Purchasing (procurement pipeline: released → requisitioned → ordered) ──
-        # Three stages, oldest→newest in the flow. The other PO reports (PO Report / Status /
-        # Listing / Overdue POs / Late Vendors / By Buyer) were removed from the menu 2026-09-28
-        # per Vijay; their _q_* handlers remain (reachable by id) but are no longer listed.
+        # ── Purchasing (procurement pipeline: released → requisitioned → ordered, + consolidated) ──
+        # Pipeline stages oldest→newest, then the consolidated all-PO view last (po_listing =
+        # "All Purchase Orders", re-added 2026-09-28). The remaining PO reports (PO Report / Status /
+        # Overdue POs / Late Vendors / By Buyer) stay removed from the menu per Vijay; their _q_*
+        # handlers remain (reachable by id) but are no longer listed.
         {"id": "released_toorder", "menu": "Purchasing", "label": "Lines to Order",
          "desc": f"Released lines that have YET to be raised as a requisition — items engineering has "
                  f"RELEASED (from the BOM release log) with no requisition/PO raised yet on the "
@@ -204,6 +205,12 @@ def catalogue():
         {"id": "po_exceptions", "menu": "Purchasing", "label": "PO Exceptions",
          "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
                  "grouped by buyer. A forward-looking, at-risk view.",
+         "needs_projects": True},
+        {"id": "po_listing", "menu": "Purchasing", "label": "All Purchase Orders",
+         "desc": "Every purchase-order line across all statuses — Draft (raised, not yet issued), "
+                 "Open, Overdue, partial and Received — on active (non-cancelled) POs, one row per "
+                 "line, in the same full field layout as PO Exceptions. The consolidated PO view "
+                 "(actual POs only; pre-PO released lines are not included).",
          "needs_projects": True},
         # ── Project Management ─────────────────────────────────────────────────
         {"id": "bom_readiness", "menu": "Project Management", "label": "BOM Readiness",
@@ -2529,31 +2536,34 @@ def _spec_po_listing_result(items, label):
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
     rows = etospec.web_rows(etospec.COLS_EXC, grouped)
     if items is None or items.empty:
-        n = overdue = received = open_lines = 0
+        n = draft = overdue = received = open_lines = 0
         val = 0.0
     else:
         st = items["Status"].astype(str)
         n = len(items)
+        draft = int((st == "Draft").sum())
         overdue = int(st.str.startswith("Overdue").sum())
         received = int((st == "Received").sum())
         open_lines = int(st.str.startswith("Open").sum())
         val = float(items["ExtValue"].sum())
     cards = [Card("PO lines", "{:,}".format(n)),
+             Card("Draft", "{:,}".format(draft)),
              Card("Open", "{:,}".format(open_lines)),
              Card("Overdue", "{:,}".format(overdue), "bad" if overdue else "good"),
              Card("Received", "{:,}".format(received)),
              Card("Committed value", _fmt_money2(val))]
-    note = ("Every purchase-order line across all statuses (Open before need-by, Overdue, partial, "
-            "and Received) on active — i.e. not cancelled — POs, one row per line, in the same "
-            "per-line layout as Procurement Exceptions. Code = machine/spec; Category = item "
-            "category; Receipt Date = last receipt; Release Date = when the item's BOM was released "
-            "to purchasing (ETO release log, eng date as fallback); Last Activity = latest of order "
-            "date, last receipt and header revision (a last-activity signal, not an edit audit); "
-            "Status is derived. Planned Ship, Days to "
-            "Assembly, RFQ Date, Permit Dates and Lead Time are kept for the workbook "
-            "layout but ETO holds no maintained source, so they read blank. Excel export uses the "
-            "same workbook format as the exception report.")
-    return QueryResult("po_listing", "Purchasing — PO Listing (all statuses)", qcols, rows, cards, note,
+    note = ("Every purchase-order line across all statuses — Draft (raised but not yet issued: not "
+            "printed AND not emailed), Open (before need-by), Overdue, partial, and Received — on "
+            "active (not cancelled) POs, one row per line, in the same per-line layout as Procurement "
+            "Exceptions. This is actual POs only: pre-PO released lines (the Lines to Order stage) are "
+            "not included, since they have no PO. Code = machine/spec; Category = item category; "
+            "Receipt Date = last receipt; Release Date = when the item's BOM was released to purchasing "
+            "(ETO release log, eng date as fallback); Last Activity = latest of order date, last "
+            "receipt and header revision (a last-activity signal, not an edit audit); Status is "
+            "derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates and Lead Time are kept "
+            "for the workbook layout but ETO holds no maintained source, so they read blank. Excel "
+            "export uses the same workbook format as the exception report.")
+    return QueryResult("po_listing", "Purchasing — All Purchase Orders", qcols, rows, cards, note,
                        {"kind": "exceptions", "items": items, "label": label})
 
 
@@ -2601,7 +2611,7 @@ def _released_toorder_result(df, as_of):
         QueryColumn("Qty", "Released Qty", "num", "right"),
         QueryColumn("UnitCost", "Est. Unit", "money2", "right"),
         QueryColumn("ExtValue", "Est. Value", "money", "right"),
-        QueryColumn("ReleaseDate", "Released", "date", "left"),
+        QueryColumn("ReleaseDate", "Release Date", "date", "left"),
         QueryColumn("AgeDays", "Age (days)", "int", "right"),
     ]
     empty = df is None or df.empty
@@ -4437,6 +4447,10 @@ class DemoQueryService(QueryService):
         sel = set(self._sel(project_ids))
         src = _DEMO_EXC_RAW + _DEMO_POLIST_EXTRA
         raw = pd.DataFrame([r for r in src if r["ProjectID"] in sel], columns=_DEMO_EXC_COLS)
+        if not raw.empty:                       # demo issue state: printed/issued unless a known draft PO
+            raw["PurchasePrinted"] = 1
+            raw["PurchaseEmailed"] = 0
+            raw.loc[raw["PO"].astype(str).isin({"48505"}), ["PurchasePrinted", "PurchaseEmailed"]] = 0
         items = etospec.po_listing_detail(raw, today=_dt.date(2026, 7, 22))
         return _spec_po_listing_result(items, "As at Jul 22, 2026 (demo)")
 
@@ -4963,6 +4977,11 @@ _DEMO_POLIST_EXTRA = [
      "PO": "48410", "Vendor": "SICK", "Qty": 6, "Received": 0, "ExtValue": 9800.0,
      "DateRequired": "2026-08-30", "DateRevised": None, "ReceiptDate": None, "Ordered": "2026-07-15",
      "LeadDays": 45, "LLTFlag": 0, "OverFlag": 0, "EngReleaseDate": "2026-06-01"},
+    {"Buyer": "Ferreira, Sam", "ProjectID": 230312, "JobName": _D12[0], "Code": 20, "Item": "48505",
+     "Description": "VFD spare (draft PO, raised but not yet issued)", "Category": "Electrical / Controls",
+     "PO": "48505", "Vendor": "Siemens", "Qty": 2, "Received": 0, "ExtValue": 5400.0,
+     "DateRequired": "2026-09-15", "DateRevised": None, "ReceiptDate": None, "Ordered": None,
+     "LeadDays": 30, "LLTFlag": 0, "OverFlag": 0, "EngReleaseDate": "2026-07-01"},
 ]
 
 # Late Vendors — query_late_vendors output shape (OVERDUE open lines, not yet received)

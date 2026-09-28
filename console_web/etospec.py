@@ -936,7 +936,11 @@ def query_released_to_order(project_ids=None):
     """Buyers' 'still to place' worklist: items ENGINEERING has released (tblBOMReleaseHistory, net
     released qty > 0) that are STILL ON THE CURRENT BOM (vwEngBOM) and have NO purchase order yet on
     the project. Machine from the release log's SpecID; identity keyed by ItemID (any project's BOM,
-    item-master description fallback). Returns `UnitCostFallback` (item last/list cost) only — the
+    item-master description fallback). Release date = MIN(ReleasedDateTime), falling back to the eng
+    'Date Released Engineering' (PartCustom6) when there's no log row — same derivation the PO Exceptions
+    and PO Listing reports use, so the Release Date column is consistent across all of them (on THIS
+    report the fallback never fires: a released item always has a log row). Returns `UnitCostFallback`
+    (item last/list cost) only — the
     query layer overlays the staged MEDIAN historical PO price (Reporting.tblItemPriceRef) on top,
     falling back to this. Design-removed releases (no longer on the BOM) are dropped. Oldest first."""
     scope = ""
@@ -961,8 +965,9 @@ def query_released_to_order(project_ids=None):
                MAX(CAST(ItemListCost AS float)) AS ListCost
         FROM dbo.vwEngBOM WHERE ItemID IN {relset} GROUP BY ItemID
     ),
-    mast AS (     -- item-master description fallback (covers items on no BOM at all)
-        SELECT ItemID, MAX(ItemDescription) AS Description
+    mast AS (     -- item-master description + eng-release-date fallback (covers items on no BOM at all)
+        SELECT ItemID, MAX(ItemDescription) AS Description,
+               MAX(CAST([{_ENG_RELEASE_COL}] AS date)) AS EngDate   -- PartCustom6 'Date Released Engineering'
         FROM dbo.tblEngItemMaster WHERE ItemID IN {relset} GROUP BY ItemID
     ),
     ordered AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails{scope}),
@@ -971,7 +976,7 @@ def query_released_to_order(project_ids=None):
            itm.ItemNo AS ItemNo, rel.ItemID AS ItemID,
            COALESCE(itm.Description, mast.Description) AS Description,
            CAST(rel.Qty AS decimal(18,2)) AS Qty,
-           CAST(rel.ReleaseDate AS date) AS ReleaseDate,
+           COALESCE(CAST(rel.ReleaseDate AS date), mast.EngDate) AS ReleaseDate,   -- BOM release (MIN ReleasedDateTime), eng PartCustom6 fallback — consistent with PO Exceptions / PO Listing
            COALESCE(NULLIF(itm.LastCost, 0), NULLIF(itm.ListCost, 0)) AS UnitCostFallback
     FROM rel
     JOIN curbom cb ON cb.ProjectID = rel.ProjectID AND cb.ItemID = rel.ItemID  -- drop design-removed releases
@@ -1048,6 +1053,8 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         pod.ItemDescription             AS Description,
         pdd.ItemMasterCategoryDescription AS Category,
         poh.PurchaseOrderID             AS PO,
+        poh.PurchasePrinted             AS PurchasePrinted,   -- send flags: draft = not printed AND not emailed
+        poh.PurchaseEmailed             AS PurchaseEmailed,
         poh.CName                       AS Vendor,
         pod.PurchaseQty                 AS Qty,
         pod.Received                    AS Received,
@@ -1109,7 +1116,10 @@ def po_listing_detail(df, today=None):
         full = qty > 0 and recv >= qty
         part = recv > 0 and not full
         overdue = bool(needd and needd < today and not full)
-        if full:
+        draft = not _flag(r.get("PurchasePrinted")) and not _flag(r.get("PurchaseEmailed"))
+        if draft:
+            status = "Draft"                                         # raised but not yet issued (not printed AND not emailed)
+        elif full:
             status = "Received"                                      # fully received / closed
         elif overdue:
             status = "Overdue — partial" if part else "Overdue"
