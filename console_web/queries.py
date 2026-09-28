@@ -186,55 +186,31 @@ def catalogue():
                  "booked ÷ available. Portfolio-wide (the whole workforce), independent of the "
                  "project selection.",
          "needs_projects": False},
-        # ── Purchasing (the deployed PO reports) ───────────────────────────
-        {"id": "po_all", "menu": "Purchasing", "label": "PO Report",
-         "desc": f"All purchases per {proj.lower()} — total purchase value with the received "
-                 "(closed) and open portions, and the overdue part. Scoped to orders placed in "
-                 "the selected date range.",
+        # ── Purchasing (procurement pipeline: released → requisitioned → ordered) ──
+        # Three stages, oldest→newest in the flow. The other PO reports (PO Report / Status /
+        # Listing / Overdue POs / Late Vendors / By Buyer) were removed from the menu 2026-09-28
+        # per Vijay; their _q_* handlers remain (reachable by id) but are no longer listed.
+        {"id": "released_toorder", "menu": "Purchasing", "label": "Lines to Order",
+         "desc": f"Released lines that have YET to be raised as a requisition — items engineering has "
+                 f"RELEASED (from the BOM release log) with no requisition/PO raised yet on the "
+                 f"{proj.lower()}. One row per item with the release date, age since release, released "
+                 "qty and an estimated cost (historical PO price). Oldest release first.",
          "needs_projects": True},
-        {"id": "po_status", "menu": "Purchasing", "label": "PO Status",
-         "desc": f"Open purchase-order lines — On Order and Overdue — grouped by {proj.lower()} "
-                 "and machine, with an overdue-aging summary and total-purchases context.",
+        {"id": "po_to_order", "menu": "Purchasing", "label": "Purchase Requisitions",
+         "desc": f"Purchase requisitions in procurement with no PO issued yet — lines raised in ETO "
+                 f"but not yet sent to the vendor (not printed or emailed), grouped by {proj.lower()} "
+                 "and machine, with the age of each. The raised-but-not-ordered backlog.",
          "needs_projects": True},
-        {"id": "po_to_order", "menu": "Purchasing", "label": "Lines to Order",
-         "desc": f"Purchase-order lines entered in ETO but not yet issued (not printed or "
-                 f"emailed to the vendor) — the still-to-place backlog, grouped by {proj.lower()} "
-                 "and machine, with the age of each draft.",
-         "needs_projects": True},
-        {"id": "released_toorder", "menu": "Purchasing", "label": "Released — To Order",
-         "desc": f"Items engineering has RELEASED (from the BOM release log) with no purchase order "
-                 f"yet on the {proj.lower()} — the buyers' still-to-place worklist. One row per item "
-                 "with the release date, age since release, released qty and an estimated cost "
-                 "(historical PO price). Oldest release first.",
-         "needs_projects": True},
-        {"id": "bom_readiness", "menu": "Purchasing", "label": "BOM Readiness",
-         "desc": "Structured BOM readiness per machine — the on-prem \"Structured BOM - Readiness "
-                 "Detailed\" report, reproduced from ETO's own report engine so the numbers match "
-                 "exactly. Assembly/Total/Available/Procured quantities, still-to-procure, % "
-                 "available (Absolute method) and bin, exploded through the full assembly tree.",
-         "needs_projects": True},
-        {"id": "po_exceptions", "menu": "Purchasing", "label": "Procurement Exceptions",
+        {"id": "po_exceptions", "menu": "Purchasing", "label": "PO Exceptions",
          "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
                  "grouped by buyer. A forward-looking, at-risk view.",
          "needs_projects": True},
-        {"id": "po_listing", "menu": "Purchasing", "label": "PO Listing (all statuses)",
-         "desc": "Every purchase-order line across all statuses (Open, Overdue, partial, "
-                 "Received) on active — not cancelled — POs, in the same per-line layout as the "
-                 "Procurement Exceptions report. One row per PO line, grouped by buyer.",
-         "needs_projects": True},
-        {"id": "po_late", "menu": "Purchasing", "label": "Overdue POs",
-         "desc": "Open purchase-order lines whose need-by date has passed, grouped by vendor, "
-                 "with how many days late. The expediting view — what's still outstanding.",
-         "needs_projects": True},
-        {"id": "po_delivered", "menu": "Purchasing", "label": "Late Vendors",
-         "desc": "Vendor delivery scorecard — items that arrived after their need-by date, "
-                 "grouped by vendor, with how many days late. Choose the date range by when the "
-                 "orders were placed.",
-         "needs_projects": True},
-        {"id": "po_buyer", "menu": "Purchasing", "label": "By Buyer",
-         "desc": "Purchasing workload by buyer — purchase orders, lines and committed value, "
-                 "with the open and overdue portion for each buyer. Scoped to orders placed in "
-                 "the selected date range.",
+        # ── Project Management ─────────────────────────────────────────────────
+        {"id": "bom_readiness", "menu": "Project Management", "label": "BOM Readiness",
+         "desc": "Structured BOM readiness per machine — the on-prem \"Structured BOM - Readiness "
+                 "Detailed\" report, reproduced from ETO's own report engine so the numbers match "
+                 "exactly. Assembly/Total/Available/On-order quantities, still-to-procure, % "
+                 "available (Absolute method), exploded through the full assembly tree.",
          "needs_projects": True},
         # ── Inventory ─────────────────────────────────────────────────────
         {"id": "item_location", "menu": "Inventory", "label": "Item Location",
@@ -2638,15 +2614,16 @@ def _released_toorder_result(df, as_of):
              Card("Est. value", _fmt_money2(val)),
              Card("Oldest release", f"{oldest:,} days", "warn" if oldest > 30 else "neutral")]
     unpriced = items - priced
-    note = (f"Items engineering has RELEASED in the BOM (ETO release log) that have no purchase order "
-            f"yet on the selected {proj.lower()}s — the buyers' still-to-place worklist, oldest "
-            "release first. Released Qty is the net released quantity; Est. Unit / Est. Value are an "
-            "estimate from the MEDIAN historical PO price for the item (item last/list cost as "
-            "fallback), so treat them as planning figures, not quotes. Anything already on a PO for "
-            f"the {proj.lower()}, or since removed from the current BOM, is excluded."
+    note = (f"Released lines that have YET to be raised as a requisition — items engineering has "
+            f"RELEASED in the BOM (ETO release log) with no requisition or PO raised yet on the "
+            f"selected {proj.lower()}s. The earliest stage of the procurement pipeline, oldest release "
+            "first. Released Qty is the net released quantity; Est. Unit / Est. Value are an estimate "
+            "from the MEDIAN historical PO price for the item (item last/list cost as fallback), so "
+            "treat them as planning figures, not quotes. Anything already raised (a requisition/PO for "
+            f"the {proj.lower()}), or since removed from the current BOM, is excluded."
             + (f" Note: {unpriced:,} of {items:,} item(s) have no price on record yet, so Est. value "
                "is a lower bound." if unpriced else ""))
-    return QueryResult("released_toorder", "Purchasing — Released, To Order", cols, rows, cards, note)
+    return QueryResult("released_toorder", "Purchasing — Lines to Order", cols, rows, cards, note)
 
 
 def _spec_late_result(df, label):
@@ -2836,7 +2813,7 @@ def _po_to_order_result(df, window_label=""):
     cols = [
         QueryColumn("Item", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
-        QueryColumn("PO", "PO #", "id", "left"),
+        QueryColumn("PO", "Req #", "id", "left"),
         QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
         QueryColumn("Buyer", "Buyer", "text", "left"),
         QueryColumn("Curr", "Curr", "text", "left"),
@@ -2844,22 +2821,23 @@ def _po_to_order_result(df, window_label=""):
         QueryColumn("Price", "Unit Price", "num", "right"),
         QueryColumn("ExtValueCAD", "Ext. Value (CAD)", "money", "right"),
         QueryColumn("Required", "Need-by", "date", "left"),
-        QueryColumn("Entered", "PO Entered", "date", "left"),
+        QueryColumn("Entered", "Requisitioned", "date", "left"),
         QueryColumn("AgeDays", "Age (days)", "days", "right"),
     ]
     empty = df is None or df.empty
     n = 0 if empty else int(len(df))
     val = 0.0 if empty else float(df["ExtValueCAD"].fillna(0).sum())
     stale = 0 if empty else int((df["AgeDays"].fillna(0) > 90).sum())
-    cards = [Card("Lines to order", "{:,}".format(n)),
-             Card("To-order value", _fmt_money2(val)),
+    cards = [Card("Requisitions", "{:,}".format(n)),
+             Card("Requisition value", _fmt_money2(val)),
              Card("Stale (>90d)", "{:,}".format(stale), "warn" if stale else "good")]
-    note = ("Purchase-order lines entered in ETO but not yet issued to the vendor — the PO "
-            "has not been printed or emailed, so it is still to be placed. Grouped by "
+    note = ("Purchase requisitions raised in ETO but not yet issued as a PO to the vendor — the "
+            "requisition has not been printed or emailed, so no order has been placed. Grouped by "
             f"{proj.lower()} then machine/spec (ETO SpecID). Ext. Value is in Canadian dollars; "
-            "Age is days since the PO was entered — a large age flags a draft to review or "
-            "cancel." + (window_label or ""))
-    return QueryResult("po_to_order", "Purchasing — Lines to Order", cols,
+            "Age is days since the requisition was raised — a large age flags one to review or "
+            "cancel. (In ETO these are unsent draft purchase orders; Req # is the draft PO number.)"
+            + (window_label or ""))
+    return QueryResult("po_to_order", "Purchasing — Purchase Requisitions", cols,
                        _po_to_order_rows(df), cards, note)
 
 
