@@ -1076,7 +1076,8 @@ class LiveQueryService(QueryService):
         sql = f"""
         SELECT pod.ProjectID AS ProjectID, p.DisplayName AS JobName, pcust.CName AS Customer,
                pod.SpecID AS MachineCode, sp.SDescription AS MachineDesc,
-               pod.ItemID AS Item, pod.ItemDescription AS Description,
+               ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30))) AS Item,   -- part number (same source as PO Exceptions / Lines to Order), not the raw ItemID
+               pod.ItemDescription AS Description,
                poh.PurchaseOrderID AS PO, poh.CName AS Supplier,
                COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName,
                         CAST(poh.BuyerID AS varchar(20))) AS Buyer,
@@ -2790,7 +2791,7 @@ def _po_to_order_rows(df):
             for _, r in msub.iterrows():
                 rows.append({
                     "_kind": "detail",
-                    "Item": _int(r.get("Item")), "Description": r.get("Description"),
+                    "Item": r.get("Item"), "Description": r.get("Description"),   # part number (string), not an int ItemID
                     "PO": _int(r.get("PO")), "Supplier": r.get("Supplier"),
                     "Buyer": r.get("Buyer"), "Curr": r.get("Curr"),
                     "Qty": _num(r.get("Qty")), "Price": _num(r.get("Price")),
@@ -4756,23 +4757,23 @@ _DEMO_TOORDER_COLS = ["ProjectID", "JobName", "Customer", "MachineCode", "Item",
                       "PO", "Supplier", "Buyer", "Curr", "Qty", "Price", "ExtValueCAD",
                       "Required", "Entered", "AgeDays"]
 _DEMO_TOORDER = [
-    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10, "Item": 28041,
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10, "Item": "E28041",
      "Description": "Cylinder gland seals (spare set)", "PO": 48310, "Supplier": "Bosch Rexroth",
      "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 4, "Price": 180.0, "ExtValueCAD": 943.20,
      "Required": "2026-08-20", "Entered": "2026-07-22", "AgeDays": 3},
-    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10, "Item": 28115,
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10, "Item": "E28115",
      "Description": "Proximity sensors, M18", "PO": 48310, "Supplier": "Bosch Rexroth",
      "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 12, "Price": 46.0, "ExtValueCAD": 723.12,
      "Required": "2026-08-20", "Entered": "2026-07-22", "AgeDays": 3},
-    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 20, "Item": 30880,
+    {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 20, "Item": "E30880",
      "Description": "Guarding mesh panels", "PO": 48291, "Supplier": "Axelent",
      "Buyer": "Ferreira, Sam", "Curr": "CA", "Qty": 8, "Price": 240.0, "ExtValueCAD": 1920.00,
      "Required": "2026-09-04", "Entered": "2026-04-02", "AgeDays": 116},
-    {"ProjectID": 230312, "JobName": _D12[0], "Customer": _D12[1], "MachineCode": 10, "Item": 20142,
+    {"ProjectID": 230312, "JobName": _D12[0], "Customer": _D12[1], "MachineCode": 10, "Item": "E20142",
      "Description": "S7-1500 spare IO card", "PO": 48277, "Supplier": "Siemens",
      "Buyer": "Ferreira, Sam", "Curr": "US", "Qty": 2, "Price": 590.0, "ExtValueCAD": 1546.40,
      "Required": "2026-08-15", "Entered": "2026-07-25", "AgeDays": 0},
-    {"ProjectID": 240087, "JobName": _D87[0], "Customer": _D87[1], "MachineCode": 20, "Item": 51002,
+    {"ProjectID": 240087, "JobName": _D87[0], "Customer": _D87[1], "MachineCode": 20, "Item": "E51002",
      "Description": "Servo cable, 15m", "PO": 48305, "Supplier": "Nachi",
      "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 2, "Price": 210.0, "ExtValueCAD": 550.20,
      "Required": "2026-09-01", "Entered": "2026-07-18", "AgeDays": 7},
