@@ -1085,6 +1085,7 @@ class LiveQueryService(QueryService):
                pod.SpecID AS MachineCode, sp.SDescription AS MachineDesc,
                ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30))) AS Item,   -- part number (same source as PO Exceptions / Lines to Order), not the raw ItemID
                pod.ItemDescription AS Description,
+               eim.[PartCustom7] AS LLTFlag,   -- 'Long Lead Item' flag (caption-verified 2026-09-12)
                poh.PurchaseOrderID AS PO, poh.CName AS Supplier,
                COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName,
                         CAST(poh.BuyerID AS varchar(20))) AS Buyer,
@@ -1098,6 +1099,7 @@ class LiveQueryService(QueryService):
         LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
         LEFT JOIN tblEmployee bu    ON bu.EmployeeID = poh.BuyerID
         LEFT JOIN tblSpec     sp    ON sp.ProjectID = pod.ProjectID AND sp.SpecID = pod.SpecID
+        LEFT JOIN tblEngItemMaster eim ON eim.ItemID = pod.ItemID
         WHERE poh.PurchaseActive = 1 AND poh.PurchasePrinted = 0 AND poh.PurchaseEmailed = 0
           AND ISNULL(pod.Archived, 0) = 0{proj}{dtc}
         ORDER BY pod.ProjectID, pod.SpecID, poh.PurchaseOrderID, pod.ItemID
@@ -2592,6 +2594,7 @@ def _released_toorder_rows(df, as_of):
             "JobName": r.get("JobName"),
             "Machine": (_mc_label(r.get("MachineCode")) if pd.notna(r.get("MachineCode")) else ""),
             "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
+            "LLT": ("yes" if _num(r.get("LLTFlag")) else ""),   # PartCustom7 'Long Lead Item'
             "Qty": qty, "ReleaseDate": (reld.isoformat() if reld else ""),
             "AgeDays": age, "UnitCost": unit, "ExtValue": ext,
         })
@@ -2608,6 +2611,7 @@ def _released_toorder_result(df, as_of):
         QueryColumn("Machine", "Machine", "text", "left"),
         QueryColumn("ItemNo", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("LLT", "Long Lead", "text", "left"),
         QueryColumn("Qty", "Released Qty", "num", "right"),
         QueryColumn("UnitCost", "Est. Unit", "money2", "right"),
         QueryColumn("ExtValue", "Est. Value", "money", "right"),
@@ -2802,6 +2806,7 @@ def _po_to_order_rows(df):
                 rows.append({
                     "_kind": "detail",
                     "Item": r.get("Item"), "Description": r.get("Description"),   # part number (string), not an int ItemID
+                    "LLT": ("yes" if _num(r.get("LLTFlag")) else ""),   # PartCustom7 'Long Lead Item'
                     "PO": _int(r.get("PO")), "Supplier": r.get("Supplier"),
                     "Buyer": r.get("Buyer"), "Curr": r.get("Curr"),
                     "Qty": _num(r.get("Qty")), "Price": _num(r.get("Price")),
@@ -2824,6 +2829,7 @@ def _po_to_order_result(df, window_label=""):
     cols = [
         QueryColumn("Item", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("LLT", "Long Lead", "text", "left"),
         QueryColumn("PO", "Req #", "id", "left"),
         QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
         QueryColumn("Buyer", "Buyer", "text", "left"),
@@ -4750,11 +4756,11 @@ _DEMO_PO_STATUS = [
 
 # Released — To Order — _q_released_toorder output shape (released, no PO yet)
 _DEMO_RELTOORDER_COLS = ["ProjectID", "JobName", "MachineCode", "ItemNo", "ItemID", "Description",
-                         "Qty", "ReleaseDate", "UnitCost"]
+                         "Qty", "ReleaseDate", "UnitCost", "LLTFlag"]
 _DEMO_RELTOORDER = [
     {"ProjectID": 230219, "JobName": _D19[0], "MachineCode": 10.0, "ItemNo": "8094M0.0.0.0-01",
      "ItemID": 22160, "Description": "Machined tie rod, upper platen", "Qty": 8,
-     "ReleaseDate": "2026-05-12", "UnitCost": 412.50},
+     "ReleaseDate": "2026-05-12", "UnitCost": 412.50, "LLTFlag": 1},
     {"ProjectID": 230219, "JobName": _D19[0], "MachineCode": 10.0, "ItemNo": "E07165",
      "ItemID": 19191, "Description": "Proximity sensor, inductive M18", "Qty": 24,
      "ReleaseDate": "2026-06-30", "UnitCost": 58.90},
@@ -4769,7 +4775,7 @@ _DEMO_RELTOORDER = [
 # Lines to Order — _q_po_to_order output shape (draft POs: not printed, not emailed)
 _DEMO_TOORDER_COLS = ["ProjectID", "JobName", "Customer", "MachineCode", "Item", "Description",
                       "PO", "Supplier", "Buyer", "Curr", "Qty", "Price", "ExtValueCAD",
-                      "Required", "Entered", "AgeDays"]
+                      "Required", "Entered", "AgeDays", "LLTFlag"]
 _DEMO_TOORDER = [
     {"ProjectID": 230219, "JobName": _D19[0], "Customer": _D19[1], "MachineCode": 10, "Item": "E28041",
      "Description": "Cylinder gland seals (spare set)", "PO": 48310, "Supplier": "Bosch Rexroth",
@@ -4786,7 +4792,7 @@ _DEMO_TOORDER = [
     {"ProjectID": 230312, "JobName": _D12[0], "Customer": _D12[1], "MachineCode": 10, "Item": "E20142",
      "Description": "S7-1500 spare IO card", "PO": 48277, "Supplier": "Siemens",
      "Buyer": "Ferreira, Sam", "Curr": "US", "Qty": 2, "Price": 590.0, "ExtValueCAD": 1546.40,
-     "Required": "2026-08-15", "Entered": "2026-07-25", "AgeDays": 0},
+     "Required": "2026-08-15", "Entered": "2026-07-25", "AgeDays": 0, "LLTFlag": 1},
     {"ProjectID": 240087, "JobName": _D87[0], "Customer": _D87[1], "MachineCode": 20, "Item": "E51002",
      "Description": "Servo cable, 15m", "PO": 48305, "Supplier": "Nachi",
      "Buyer": "Nolan, Pat", "Curr": "US", "Qty": 2, "Price": 210.0, "ExtValueCAD": 550.20,

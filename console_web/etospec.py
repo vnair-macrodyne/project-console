@@ -754,6 +754,7 @@ COLS_EXC = [
     ("RFQDate",        "RFQ Date",         11, "C", False),
     ("PermitDates",    "Permit Dates",     12, "L", False),
     ("LeadTime",       "Lead Time",         8, "R", True),    # number; a historical fallback is italicised via _em, not the value
+    ("LLT",            "Long Lead",         9, "C", False),   # PartCustom7 'Long Lead Item' flag
     ("Oversized",      "Oversized",         8, "C", False),
     ("Inspected",      "Inspected",         8, "C", False),
     ("Critical",       "Critical",          8, "C", False),
@@ -895,6 +896,7 @@ def exc_detail(df, today=None):
             "PermitDates": "",                            # not in ETO
             "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[0],
             "LeadHist": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[1],   # web italicises a historical value
+            "LLT": ("yes" if _flag(r.get("LLTFlag")) else ""),          # PartCustom7 Long Lead Item
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path
@@ -965,9 +967,10 @@ def query_released_to_order(project_ids=None):
                MAX(CAST(ItemListCost AS float)) AS ListCost
         FROM dbo.vwEngBOM WHERE ItemID IN {relset} GROUP BY ItemID
     ),
-    mast AS (     -- item-master description + eng-release-date fallback (covers items on no BOM at all)
+    mast AS (     -- item-master description + eng-release-date + long-lead flag (covers items on no BOM at all)
         SELECT ItemID, MAX(ItemDescription) AS Description,
-               MAX(CAST([{_ENG_RELEASE_COL}] AS date)) AS EngDate   -- PartCustom6 'Date Released Engineering'
+               MAX(CAST([{_ENG_RELEASE_COL}] AS date)) AS EngDate,  -- PartCustom6 'Date Released Engineering'
+               MAX(CAST([{_LLT_FLAG_COL}] AS int)) AS LLTFlag       -- PartCustom7 'Long Lead Item'
         FROM dbo.tblEngItemMaster WHERE ItemID IN {relset} GROUP BY ItemID
     ),
     ordered AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails{scope}),
@@ -977,6 +980,7 @@ def query_released_to_order(project_ids=None):
            COALESCE(itm.Description, mast.Description) AS Description,
            CAST(rel.Qty AS decimal(18,2)) AS Qty,
            COALESCE(CAST(rel.ReleaseDate AS date), mast.EngDate) AS ReleaseDate,   -- BOM release (MIN ReleasedDateTime), eng PartCustom6 fallback — consistent with PO Exceptions / PO Listing
+           mast.LLTFlag AS LLTFlag,
            COALESCE(NULLIF(itm.LastCost, 0), NULLIF(itm.ListCost, 0)) AS UnitCostFallback
     FROM rel
     JOIN curbom cb ON cb.ProjectID = rel.ProjectID AND cb.ItemID = rel.ItemID  -- drop design-removed releases
@@ -1148,6 +1152,7 @@ def po_listing_detail(df, today=None):
             "PermitDates": "",                            # not in ETO
             "LeadTime": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[0],
             "LeadHist": _lead_display(r.get("LeadDays"), r.get("HistLeadDays"))[1],   # web italicises a historical value
+            "LLT": ("yes" if _flag(r.get("LLTFlag")) else ""),          # PartCustom7 Long Lead Item
             "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
             "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),   # PartCustom17 Requires Inspection
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),    # PartCustom14 Critical Path
