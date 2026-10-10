@@ -96,7 +96,8 @@ def _populate_sheet(ws, title, subtitle, col_defs, row_tuples, period_label):
                          top=Side(style="thin", color="CCCCCC"),
                          bottom=Side(style="thin", color="CCCCCC"))
 
-    for row_idx, (cells, row_type) in enumerate(row_tuples, data_start_row):
+    for row_idx, entry in enumerate(row_tuples, data_start_row):
+        cells, row_type = entry[0], entry[1]     # (cells, kind) or (cells, kind, em) — em is web-only
         ws.append(list(cells))
         for col_idx, (col_def, cell_val) in enumerate(zip(col_defs, cells), 1):
             cell = ws.cell(row=row_idx, column=col_idx)
@@ -737,6 +738,7 @@ _LLT_CRITICAL_DAYS = 90
 COLS_EXC = [
     ("Buyer",          "Buyer",            16, "L", False),
     ("PO",             "PO #",             10, "L", False),
+    ("PODate",         "PO Date",          11, "C", False),   # PO header date (2026-10-10)
     ("ProjectID",      "Project #",         8, "C", False),
     ("JobName",        "Project",          20, "L", False),
     ("Code",           "Machine",           7, "C", False),   # spec/machine code — label aligned with the other purchasing reports
@@ -744,6 +746,7 @@ COLS_EXC = [
     ("Category",       "Category",         16, "L", False),
     ("DrawingNo",      "Drawing",          16, "L", False),
     ("EngRelease",     "Release Date",     11, "C", False),
+    ("Stage",          "Release Stage",    14, "L", False),   # Prerelease / Release / both / Not released (2026-10-10)
     ("PlannedShip",    "Planned Ship",     11, "C", False),
     ("PlannedReceipt", "Planned Receipt",  12, "C", False),
     ("RevisedReceipt", "Revised Receipt",  12, "C", False),
@@ -762,6 +765,29 @@ COLS_EXC = [
 
 # column index of "Item" (the grand-total "N line(s)" sits here) — computed so it survives reorders
 _EXC_ITEM_IDX = next(i for i, c in enumerate(COLS_EXC) if c[0] == "Item")
+
+# All Purchase Orders — the release → RFQ → PO → receipt flow per line (trimmed 2026-10-10). Drawing,
+# Lead Time, Planned Ship, Days to Assembly, Permit Dates, Last Activity and the Oversized / Inspected /
+# Critical flags stay on PO Exceptions only.
+COLS_LIST = [
+    ("Buyer",          "Buyer",            16, "L", False),
+    ("ProjectID",      "Project #",         8, "C", False),
+    ("JobName",        "Project",          20, "L", False),
+    ("Code",           "Machine",           7, "C", False),
+    ("Item",           "Item",             11, "L", False),
+    ("Category",       "Category",         16, "L", False),
+    ("LLT",            "Long Lead",         9, "C", False),
+    ("Stage",          "Release Stage",    14, "L", False),
+    ("EngRelease",     "Release Date",     11, "C", False),
+    ("RFQDate",        "RFQ Date",         11, "C", False),
+    ("PO",             "PO #",             10, "L", False),
+    ("PODate",         "PO Date",          11, "C", False),
+    ("PlannedReceipt", "Planned Receipt",  12, "C", False),
+    ("RevisedReceipt", "Revised Receipt",  12, "C", False),
+    ("ReceiptDate",    "Receipt Date",     11, "C", False),
+    ("Status",         "Status",           12, "L", False),
+]
+_LIST_ITEM_IDX = next(i for i, c in enumerate(COLS_LIST) if c[0] == "Item")
 
 
 def _num_or_none(v):
@@ -884,6 +910,8 @@ def exc_detail(df, today=None):
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
+            "PODate": _iso(r.get("Ordered")),             # PO header date (entered date; ETO keeps no issue date)
+            "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),
             "PlannedShip": "",                            # ETO holds no maintained ship date
             "PlannedReceipt": (req.date().isoformat() if pd.notna(req) else ""),
             "RevisedReceipt": (rev.date().isoformat() if pd.notna(rev) else ""),
@@ -929,72 +957,129 @@ def _bom_release_join(project_ids, pod_alias="pod", alias="bomrel"):
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
         scope = f" WHERE ProjectID IN ({ids})"
-    return (f"LEFT JOIN (SELECT ProjectID, ItemID, MIN(ReleasedDateTime) AS BOMReleaseDate "
+    return (f"LEFT JOIN (SELECT ProjectID, ItemID, MIN(ReleasedDateTime) AS BOMReleaseDate, "
+            f"MAX(CASE WHEN [Type] = 'Prerelease' THEN 1 ELSE 0 END) AS HasPre, "
+            f"MAX(CASE WHEN [Type] = 'Release' THEN 1 ELSE 0 END) AS HasRel "
             f"FROM dbo.tblBOMReleaseHistory{scope} GROUP BY ProjectID, ItemID) {alias} "
             f"ON {alias}.ProjectID = {pod_alias}.ProjectID AND {alias}.ItemID = {pod_alias}.ItemID")
 
 
+def release_stage(has_pre, has_rel):
+    """Release Stage label from the release-log entry types for a (project, item).
+    Prerelease = the route long-lead parts take to purchasing (Vijay, 2026-10-10); Release = the
+    normal release. Verified 2026-10-10 (console_diag_prerelease.py Q8): Prerelease and Release
+    quantities are complementary shares of the BOM quantity, not repeats. Neither = no release-log
+    entry for that project and part (a purchase made without an engineering release)."""
+    p, r = _flag(has_pre), _flag(has_rel)
+    if p and r:
+        return "Prerelease + Release"
+    if p:
+        return "Prerelease"
+    if r:
+        return "Release"
+    return "Not released"
+
+
 def query_released_to_order(project_ids=None):
-    """Buyers' 'still to place' worklist: items ENGINEERING has released (tblBOMReleaseHistory, net
-    released qty > 0) that are STILL ON THE CURRENT BOM (vwEngBOM) and have NO purchase order yet on
-    the project. Machine from the release log's SpecID; identity keyed by ItemID (any project's BOM,
-    item-master description fallback). Release date = MIN(ReleasedDateTime), falling back to the eng
-    'Date Released Engineering' (PartCustom6) when there's no log row — same derivation the PO Exceptions
-    and PO Listing reports use, so the Release Date column is consistent across all of them (on THIS
-    report the fallback never fires: a released item always has a log row). Returns `UnitCostFallback`
-    (item last/list cost) only — the
-    query layer overlays the staged MEDIAN historical PO price (Reporting.tblItemPriceRef) on top,
-    falling back to this. Design-removed releases (no longer on the BOM) are dropped. Oldest first."""
+    """Lines to Order — released parts still to be ordered, per PROJECT + MACHINE + PART, by QUANTITY.
+    Reworked 2026-10-10 from probe evidence (console_diag_lines_to_order*.py, console_diag_prerelease.py):
+      * Released qty = net QuantityChange across Prerelease + Release + Unrelease rows for the machine
+        (the two types are complementary shares of the BOM qty — 94.3% / 83.2% match the BOM's own
+        required qty; adding them is correct, there is no double count).
+      * Ordered qty = PO qty on ACTIVE POs for the SAME machine. Previously a part dropped off as soon
+        as ANY PO existed for it anywhere on the project, which hid partly-ordered parts (155 on the
+        three sample projects) and parts ordered against another machine (33).
+      * To Order = released − ordered on that machine, listed only when > 0.
+      * Ordered elsewhere = qty on POs for the same part on OTHER machines of the project — shown, not
+        netted, so a buyer can see a part was bought under the wrong machine.
+      * Fabricated ASSEMBLIES are left out (vwEngProductStructure CatergoryMajor 'Fabrications' with
+        UOMType AS/SA): 11 of 513 were ever bought on the sample projects — they are built, not bought.
+        Purchased assemblies (e.g. an HPU) stay.
+      * Design-removed releases (no longer on the current BOM) stay dropped, as before.
+      * On hand = current shared stock for the part (vwInventory, all locations) — shown, not netted:
+        stock is a shared pool and may already be committed elsewhere.
+    Release Date = first log entry (either type); Stage from the entry types. Oldest release first."""
     scope = ""
+    pscope = ""
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
         scope = f" WHERE ProjectID IN ({ids})"
-    # released item set (scoped) — used to bound the identity lookups so they stay cheap
+        pscope = f" AND pod.ProjectID IN ({ids})"
     relset = f"(SELECT DISTINCT ItemID FROM dbo.tblBOMReleaseHistory{scope})"
     return f"""
     WITH rel AS (
-        SELECT ProjectID, ItemID, MIN(ReleasedDateTime) AS ReleaseDate,
-               SUM(CAST(QuantityChange AS float)) AS Qty,
-               MAX(CAST(SpecID AS float)) AS MachineCode          -- machine from the release log itself
+        SELECT ProjectID, CAST(SpecID AS float) AS SpecID, ItemID,
+               MIN(ReleasedDateTime) AS ReleaseDate,
+               SUM(CAST(QuantityChange AS float)) AS RelQty,
+               MAX(CASE WHEN [Type] = 'Prerelease' THEN 1 ELSE 0 END) AS HasPre,
+               MAX(CASE WHEN [Type] = 'Release' THEN 1 ELSE 0 END) AS HasRel
         FROM dbo.tblBOMReleaseHistory{scope}
-        GROUP BY ProjectID, ItemID
+        GROUP BY ProjectID, CAST(SpecID AS float), ItemID
         HAVING SUM(CAST(QuantityChange AS float)) > 0
     ),
-    itm AS (      -- item identity + cost, keyed by ItemID across ANY project's BOM (identity is
-                  -- item-level, so a part still resolves even if it's off THIS project's current BOM)
+    itm AS (      -- item identity + cost, keyed by ItemID across ANY project's BOM
         SELECT ItemID, MAX(ItemCompanyID) AS ItemNo, MAX(ItemDescription) AS Description,
                MAX(CAST(ItemLastCost AS float)) AS LastCost,
                MAX(CAST(ItemListCost AS float)) AS ListCost
         FROM dbo.vwEngBOM WHERE ItemID IN {relset} GROUP BY ItemID
     ),
     mast AS (     -- item-master description + eng-release-date + long-lead flag (covers items on no BOM at all)
-        SELECT ItemID, MAX(ItemDescription) AS Description,
+        SELECT ItemID, MAX(ItemCompanyID) AS ItemNo, MAX(ItemDescription) AS Description,
                MAX(CAST([{_ENG_RELEASE_COL}] AS date)) AS EngDate,  -- PartCustom6 'Date Released Engineering'
                MAX(CAST([{_LLT_FLAG_COL}] AS int)) AS LLTFlag       -- PartCustom7 'Long Lead Item'
         FROM dbo.tblEngItemMaster WHERE ItemID IN {relset} GROUP BY ItemID
     ),
-    ordered AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchaseOrderDetails{scope}),
-    curbom AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwEngBOM{scope})   -- items still on the current BOM
-    SELECT rel.ProjectID AS ProjectID, p.DisplayName AS JobName, rel.MachineCode AS MachineCode,
-           itm.ItemNo AS ItemNo, rel.ItemID AS ItemID,
+    po AS (       -- ordered qty per project + machine + part, active POs only
+        SELECT pod.ProjectID, CAST(pod.SpecID AS float) AS SpecID, pod.ItemID,
+               SUM(CAST(pod.PurchaseQty AS float)) AS POQty
+        FROM dbo.vwPurchaseOrderDetails pod
+        JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
+        WHERE poh.PurchaseActive = 1 AND pod.ItemID IS NOT NULL{pscope}
+        GROUP BY pod.ProjectID, CAST(pod.SpecID AS float), pod.ItemID
+    ),
+    poproj AS (SELECT ProjectID, ItemID, SUM(POQty) AS POQty FROM po GROUP BY ProjectID, ItemID),
+    curbom AS (SELECT DISTINCT ProjectID, ItemID FROM dbo.vwEngBOM{scope}),
+    fabasm AS (   -- fabricated assemblies: built in house, not bought
+        SELECT DISTINCT ProjectID, CAST(SpecID AS float) AS SpecID, ChildID AS ItemID
+        FROM dbo.vwEngProductStructure{scope}{" AND" if scope else " WHERE"} CatergoryMajor = 'Fabrications'
+          AND (UOMType LIKE 'AS%' OR UOMType = 'SA')
+    ),
+    stock AS (SELECT ItemID, SUM(CAST(QtyOnHand AS float)) AS OnHand
+              FROM dbo.vwInventory WHERE ItemID IN {relset} GROUP BY ItemID)
+    SELECT rel.ProjectID AS ProjectID, p.DisplayName AS JobName, rel.SpecID AS MachineCode,
+           COALESCE(itm.ItemNo, mast.ItemNo) AS ItemNo, rel.ItemID AS ItemID,
            COALESCE(itm.Description, mast.Description) AS Description,
-           CAST(rel.Qty AS decimal(18,2)) AS Qty,
-           COALESCE(CAST(rel.ReleaseDate AS date), mast.EngDate) AS ReleaseDate,   -- BOM release (MIN ReleasedDateTime), eng PartCustom6 fallback — consistent with PO Exceptions / PO Listing
+           CAST(rel.RelQty AS decimal(18,2)) AS Qty,
+           CAST(ISNULL(po.POQty, 0) AS decimal(18,2)) AS OrderedQty,
+           CAST(rel.RelQty - ISNULL(po.POQty, 0) AS decimal(18,2)) AS ToOrder,
+           CAST(ISNULL(pp.POQty, 0) - ISNULL(po.POQty, 0) AS decimal(18,2)) AS OrderedElsewhere,
+           CAST(ISNULL(stock.OnHand, 0) AS decimal(18,2)) AS OnHand,
+           rel.HasPre AS HasPre, rel.HasRel AS HasRel,
+           COALESCE(CAST(rel.ReleaseDate AS date), mast.EngDate) AS ReleaseDate,
            mast.LLTFlag AS LLTFlag,
            COALESCE(NULLIF(itm.LastCost, 0), NULLIF(itm.ListCost, 0)) AS UnitCostFallback
     FROM rel
-    JOIN curbom cb ON cb.ProjectID = rel.ProjectID AND cb.ItemID = rel.ItemID  -- drop design-removed releases
-    LEFT JOIN ordered o ON o.ProjectID = rel.ProjectID AND o.ItemID = rel.ItemID
+    JOIN curbom cb ON cb.ProjectID = rel.ProjectID AND cb.ItemID = rel.ItemID     -- drop design-removed releases
+    LEFT JOIN fabasm fa ON fa.ProjectID = rel.ProjectID AND fa.SpecID = rel.SpecID AND fa.ItemID = rel.ItemID
+    LEFT JOIN po ON po.ProjectID = rel.ProjectID AND po.SpecID = rel.SpecID AND po.ItemID = rel.ItemID
+    LEFT JOIN poproj pp ON pp.ProjectID = rel.ProjectID AND pp.ItemID = rel.ItemID
+    LEFT JOIN stock ON stock.ItemID = rel.ItemID
     LEFT JOIN itm  ON itm.ItemID = rel.ItemID
     LEFT JOIN mast ON mast.ItemID = rel.ItemID
     LEFT JOIN tblProjects p ON p.ProjectID = rel.ProjectID
-    WHERE o.ItemID IS NULL
-    ORDER BY rel.ReleaseDate ASC, rel.ProjectID
+    WHERE fa.ItemID IS NULL
+      AND rel.RelQty - ISNULL(po.POQty, 0) > 0
+    ORDER BY rel.ReleaseDate ASC, rel.ProjectID, rel.SpecID
     """
 
 
 def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None, date_to=None,
-                        all_statuses=False):
+                        all_statuses=False, include_hist=None):
+    # include_hist: run the (expensive) historical lead-time CTE. Defaults to include_leadtime. The
+    # All Purchase Orders report passes False — it shows no Lead Time column — while still keeping
+    # the item-master enrichment (Long Lead flag, Drawing, RFQ, eng-date fallback) that
+    # include_leadtime controls. (2026-10-10: turning include_leadtime off would have blanked those.)
+    include_hist = include_leadtime if include_hist is None else include_hist
     buyer_sel = "COALESCE(bu.EmpLastName + ', ' + bu.EmpFirstName, CAST(poh.BuyerID AS varchar(20)))"
     buyer_join = "LEFT JOIN tblEmployee bu ON bu.EmployeeID = poh.BuyerID"
     lead_sel = "eim.EstimatedLeadTime" if include_leadtime else "CAST(NULL AS int)"
@@ -1023,7 +1108,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     # pdd.LastReceivedDate) — bounded to 0..730 days to drop data-entry outliers. When a project set is
     # in scope, the history scan is limited to those projects' items (an item's spans across ALL its POs
     # still count — that's the point). Guarded to include_leadtime so the freight/no-enrich path is unchanged.
-    if include_leadtime:
+    if include_hist:
         scope = (f" AND pod2.ItemID IN (SELECT pod3.ItemID FROM vwPurchaseOrderDetails pod3 "
                  f"WHERE pod3.ProjectID IN ({ids}))") if ids else ""
         hist_cte = f"""WITH hist AS (
@@ -1077,7 +1162,9 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         {insp_sel}                      AS InspFlag,
         {draw_sel}                      AS DrawingRaw,
         {rfq_sel}                       AS RFQDate,
-        COALESCE(CAST(bomrel.BOMReleaseDate AS date), {rel_sel}) AS EngReleaseDate
+        COALESCE(CAST(bomrel.BOMReleaseDate AS date), {rel_sel}) AS EngReleaseDate,
+        bomrel.HasPre                   AS HasPre,       -- release-log entry types for project + part
+        bomrel.HasRel                   AS HasRel
     FROM vwPurchaseOrderHeader poh
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
     LEFT JOIN vwPurchaseOrderDetailsDetailed pdd ON pdd.PurchaseDetailID = pod.PurchaseDetailID
@@ -1140,6 +1227,8 @@ def po_listing_detail(df, today=None):
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
+            "PODate": _iso(r.get("Ordered")),             # PO header date (entered date; ETO keeps no issue date)
+            "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),
             "PlannedShip": "",                            # ETO holds no maintained ship date
             "PlannedReceipt": (req.date().isoformat() if pd.notna(req) else ""),
             "RevisedReceipt": (rev.date().isoformat() if pd.notna(rev) else ""),
@@ -1164,17 +1253,42 @@ def po_listing_detail(df, today=None):
 
 
 def po_listing_build_rows(items):
-    """(cells, kind) rows for the all-status PO listing — sorted buyer, then most-overdue first."""
+    """(cells, kind) rows for the all-status PO listing (COLS_LIST) — sorted buyer, then most-overdue first."""
     if items is None or items.empty:
-        return [(["No purchase-order lines for the selection."] + [""] * (len(COLS_EXC) - 1), "grand")]
+        return [(["No purchase-order lines for the selection."] + [""] * (len(COLS_LIST) - 1), "grand")]
     it = items.sort_values(["Buyer", "DaysLate"], ascending=[True, False])
-    rows = [([r[c[0]] for c in COLS_EXC], "detail", (["LeadTime"] if r.get("LeadHist") else None))
-            for _, r in it.iterrows()]
-    tot = [""] * len(COLS_EXC)
+    rows = [([r[c[0]] for c in COLS_LIST], "detail") for _, r in it.iterrows()]
+    tot = [""] * len(COLS_LIST)
     tot[0] = "GRAND TOTAL"
-    tot[_EXC_ITEM_IDX] = f"{len(it)} line(s)"
+    tot[_LIST_ITEM_IDX] = f"{len(it)} line(s)"
     rows.append((tot, "grand"))
     return rows
+
+
+def po_listing_book_bytes(items, label):
+    """Single AutoFiltered sheet for All Purchase Orders (COLS_LIST)."""
+    from openpyxl.worksheet.properties import PageSetupProperties
+    rows = po_listing_build_rows(items)
+    wb = Workbook(); wb.remove(wb.active)
+    ws = wb.create_sheet("All Purchase Orders")
+    _populate_sheet(ws, "All Purchase Orders",
+                    "Every PO line, all statuses — release, RFQ, PO and receipt dates per line",
+                    COLS_LIST, rows, label)
+    last_data = 3 + (len(items) if items is not None and not items.empty else 0)
+    if last_data >= 4:
+        ws.auto_filter.ref = f"A3:{get_column_letter(len(COLS_LIST))}{last_data}"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+def _iso(v):
+    """A date-ish value as YYYY-MM-DD, '' when missing."""
+    import pandas as pd
+    d = pd.to_datetime(v, errors="coerce")
+    return d.date().isoformat() if pd.notna(d) else ""
 
 
 def _blank(v):
