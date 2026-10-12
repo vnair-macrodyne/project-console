@@ -192,10 +192,9 @@ def catalogue():
         # Overdue POs / Late Vendors / By Buyer) stay removed from the menu per Vijay; their _q_*
         # handlers remain (reachable by id) but are no longer listed.
         {"id": "released_toorder", "menu": "Purchasing", "label": "Lines to Order",
-         "desc": f"Released parts still to be ordered — per {proj.lower()}, machine and part, the "
-                 "quantity engineering released minus the quantity already on POs for that machine. "
-                 "Shows release stage (Prerelease = long-lead route), long-lead flag, stock on hand "
-                 "and an estimated value. Oldest release first.",
+         "desc": f"ETO's own Items to Procure list for the selected {proj.lower()}s — what purchasing "
+                 "still has to supply (Requested, Procured, To Order), with RFQ, required and Mfg Begin "
+                 "dates, release stage and an estimated value. Oldest release first.",
          "needs_projects": True},
         {"id": "po_to_order", "menu": "Purchasing", "label": "Purchase Requisitions",
          "desc": f"Purchase requisitions in procurement with no PO issued yet — lines raised in ETO "
@@ -1050,21 +1049,61 @@ class LiveQueryService(QueryService):
         return out
 
     def _q_released_toorder(self, project_ids, date_from=None, date_to=None, **kw):
-        """Released-but-not-ordered worklist — items released in the BOM (tblBOMReleaseHistory), still
-        on the current BOM, with no PO yet on the project. Unit cost = staged MEDIAN historical PO
-        price (Reporting.tblItemPriceRef), falling back to the item's last/list cost. Oldest first."""
+        """Lines to Order = ETO's own "Items to Procure" list (EXEC dbo.uspPurchasingItemsToPurchase, no
+        parameters, whole company in ~1-3 s), filtered to the selected projects and Action = 'Procure'.
+        Verified 2026-10-12 (console_diag_eto_grids3.py): it reproduces Peter's 8 Oct ETO grid export —
+        427 of 459 rows identical (Requested = PurchaseQty, Procured = Assigned, Required = ToPurchase), the
+        rest since placed on POs. Replaces the release-log reconstruction (etospec.query_released_to_order),
+        which also listed parts ETO supplies from stock (354 vs ETO's 23 lines on 250005).
+        Added beside ETO's figures: release date / stage (release log), RFQ date (tblRFQHeader), category
+        (project structure), estimated unit cost (staged median PO price, else the item's last cost)."""
         import datetime as _dt
+        import pandas as pd
         pids = [int(p) for p in project_ids] if project_ids else []
         if not pids:
             return _released_toorder_result(None, _dt.date.today())
-        raw = self._df(etospec.query_released_to_order(pids))
-        if raw is not None and not raw.empty:
-            pmap = self._item_price_map(raw["ItemID"].tolist())
-            fb = raw["UnitCostFallback"] if "UnitCostFallback" in raw.columns else None
-            raw["UnitCost"] = [pmap.get(int(i)) if (i is not None and int(i) in pmap)
-                               else (fb.iloc[k] if fb is not None else None)
-                               for k, i in enumerate(raw["ItemID"])]
-        return _released_toorder_result(raw, _dt.date.today())
+        raw = self._readiness_df("SET NOCOUNT ON; EXEC dbo.uspPurchasingItemsToPurchase")
+        if raw is None or raw.empty:
+            return _released_toorder_result(None, _dt.date.today())
+        raw = raw[raw["ProjectID"].isin(pids) & (raw["Action"].astype(str).str.strip() == "Procure")].copy()
+        if raw.empty:
+            return _released_toorder_result(None, _dt.date.today())
+        ids = _ids_sql(pids)
+        raw["SpecKey"] = pd.to_numeric(raw["SpecID"], errors="coerce").astype(float)
+        rel = self._df(f"""SELECT ProjectID, CAST(SpecID AS float) AS SpecKey, ItemID AS ChildID,
+                                  MIN(ReleasedDateTime) AS ReleaseDate,
+                                  MAX(CASE WHEN [Type] = 'Prerelease' THEN 1 ELSE 0 END) AS HasPre,
+                                  MAX(CASE WHEN [Type] = 'Release' THEN 1 ELSE 0 END) AS HasRel
+                           FROM dbo.tblBOMReleaseHistory WHERE ProjectID IN ({ids})
+                           GROUP BY ProjectID, CAST(SpecID AS float), ItemID""")
+        if rel is not None and not rel.empty:
+            raw = raw.merge(rel, on=["ProjectID", "SpecKey", "ChildID"], how="left")
+        cat = self._df(f"""SELECT DISTINCT ProjectID, ChildID, CAST(CategoryDescription AS nvarchar(100)) AS Category
+                           FROM dbo.vwEngProductStructure WHERE ProjectID IN ({ids})""")
+        if cat is not None and not cat.empty:
+            raw = raw.merge(cat.drop_duplicates(["ProjectID", "ChildID"]), on=["ProjectID", "ChildID"], how="left")
+        rfq_ids = sorted({int(x) for x in raw["LastRFQID"].dropna().tolist() if int(x) > 0})
+        if rfq_ids:
+            rfq = self._df(f"SELECT RFQID AS LastRFQID, CAST(RFQDate AS date) AS RFQDate FROM dbo.tblRFQHeader "
+                           f"WHERE RFQID IN ({_ids_sql(rfq_ids)})")
+            if rfq is not None and not rfq.empty:
+                raw = raw.merge(rfq, on="LastRFQID", how="left")
+        pmap = self._item_price_map(raw["ItemID"].tolist())
+        raw["UnitCost"] = [pmap.get(int(i)) if (i is not None and int(i) in pmap)
+                           else (_num(c) or None) for i, c in zip(raw["ItemID"], raw["ItemLastCost"])]
+        df = pd.DataFrame({
+            "ProjectID": raw["ProjectID"], "JobName": raw.get("ProjectDescription"),
+            "MachineCode": raw["SpecKey"], "MachineDesc": raw.get("SDescription"),
+            "ItemNo": raw["ItemCompanyID"], "ItemID": raw["ItemID"], "Description": raw["ItemDescription"],
+            "Category": raw.get("Category"), "LLTFlag": raw.get("PartCustom7"),
+            "HasPre": raw.get("HasPre"), "HasRel": raw.get("HasRel"), "ReleaseDate": raw.get("ReleaseDate"),
+            "Qty": raw["PurchaseQty"], "OrderedQty": raw["Assigned"], "ToOrder": raw["ToPurchase"],
+            "OnOpenPO": raw.get("OnOrderQuantity"), "OnHand": raw.get("OnHand"),
+            "RFQNo": raw.get("LastRFQID"), "RFQDate": raw.get("RFQDate"),
+            "RequiredDate": raw.get("RequiredDate"), "MfgBegin": raw.get("MfgBegin"),
+            "LastSupplier": raw.get("LastSupplier"), "UnitCost": raw["UnitCost"],
+        })
+        return _released_toorder_result(df, _dt.date.today())
 
     def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
         """Draft PO lines — entered in ETO but not yet issued (not printed AND not emailed
@@ -2573,14 +2612,19 @@ def _spec_po_listing_result(items, label):
 
 
 def _released_toorder_rows(df, as_of):
-    """Flat, sortable detail rows — one per project + machine + part still to order, oldest release
-    first, with age since release and an estimated value of the quantity still to order."""
+    """Flat, sortable detail rows — one per project + machine + part ETO lists as still to procure,
+    oldest release first, with age since release and an estimated value of the To Order quantity."""
     import pandas as pd
     if df is None or df.empty:
         return []
     d = df.copy()
-    d["_rel"] = pd.to_datetime(d["ReleaseDate"], errors="coerce")
+    d["_rel"] = pd.to_datetime(d["ReleaseDate"], errors="coerce") if "ReleaseDate" in d.columns else pd.NaT
     d = d.sort_values(["_rel", "ProjectID"], na_position="last")
+
+    def _d(v):
+        x = pd.to_datetime(v, errors="coerce")
+        return x.date().isoformat() if pd.notna(x) else ""
+
     out, tot_val, n = [], 0.0, 0
     for _, r in d.iterrows():
         rel = r["_rel"]
@@ -2591,29 +2635,30 @@ def _released_toorder_rows(df, as_of):
         to_order = _num(r.get("ToOrder"))
         if to_order is None and qty is not None:
             to_order = qty - ordered
-        elsewhere = _num(r.get("OrderedElsewhere")) or 0.0
         unit = _num(r.get("UnitCost"))
         ext = round((to_order or 0) * (unit or 0), 2) if (to_order is not None and unit is not None) else None
         tot_val += ext or 0.0
         n += 1
-        tone = {}
-        if elsewhere > 0:
-            tone["OrderedElsewhere"] = "warn"
+        rfq = _num(r.get("RFQNo"))
         out.append({
             "_kind": "detail",
             "ProjectID": (int(r.get("ProjectID")) if pd.notna(r.get("ProjectID")) else None),
             "JobName": r.get("JobName"),
             "Machine": (_mc_label(r.get("MachineCode")) if pd.notna(r.get("MachineCode")) else ""),
             "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
-            "LastSupplier": r.get("LastSupplier"),
+            "Category": (r.get("Category") if isinstance(r.get("Category"), str) else ""),
+            "LastSupplier": (r.get("LastSupplier") if isinstance(r.get("LastSupplier"), str) else ""),
             "LLT": ("yes" if _num(r.get("LLTFlag")) else ""),   # PartCustom7 'Long Lead Item'
-            "Stage": etospec.release_stage(r.get("HasPre"), r.get("HasRel") if "HasRel" in r else 1),
+            "Stage": (etospec.release_stage(r.get("HasPre") if pd.notna(r.get("HasPre")) else 0,
+                                            r.get("HasRel") if pd.notna(r.get("HasRel")) else 1)
+                      if reld else "Not released"),
             "Qty": qty, "OrderedQty": ordered, "ToOrder": to_order,
-            "OrderedElsewhere": (elsewhere or None),
+            "OnOpenPO": (_num(r.get("OnOpenPO")) or None),
             "OnHand": (_num(r.get("OnHand")) or None),
+            "RFQNo": (int(rfq) if rfq else None), "RFQDate": _d(r.get("RFQDate")),
+            "RequiredDate": _d(r.get("RequiredDate")), "MfgBegin": _d(r.get("MfgBegin")),
             "ReleaseDate": (reld.isoformat() if reld else ""),
             "AgeDays": age, "UnitCost": unit, "ExtValue": ext,
-            **({"_tone": tone} if tone else {}),
         })
     out.append({"_kind": "grand", "ItemNo": f"{n} line(s) to order",
                 "ExtValue": round(tot_val, 2)})
@@ -2628,16 +2673,21 @@ def _released_toorder_result(df, as_of):
         QueryColumn("Machine", "Machine", "text", "left"),
         QueryColumn("ItemNo", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
-        QueryColumn("LastSupplier", "Last Supplier", "text", "left", wrap=True),
+        QueryColumn("Category", "Category", "text", "left"),
         QueryColumn("LLT", "Long Lead", "text", "left"),
         QueryColumn("Stage", "Release Stage", "text", "left"),
         QueryColumn("ReleaseDate", "Release Date", "date", "left"),
         QueryColumn("AgeDays", "Age (days)", "int", "right"),
-        QueryColumn("Qty", "Released Qty", "num", "right"),
-        QueryColumn("OrderedQty", "Ordered Qty", "num", "right"),
+        QueryColumn("Qty", "Requested", "num", "right"),
+        QueryColumn("OrderedQty", "Procured", "num", "right"),
         QueryColumn("ToOrder", "To Order", "num", "right"),
-        QueryColumn("OrderedElsewhere", "Ordered on Other Machine", "num", "right"),
-        QueryColumn("OnHand", "On Hand (all stock)", "num", "right"),
+        QueryColumn("OnOpenPO", "On Open PO", "num", "right"),
+        QueryColumn("OnHand", "On Hand", "num", "right"),
+        QueryColumn("RFQNo", "RFQ #", "id", "left"),
+        QueryColumn("RFQDate", "RFQ Date", "date", "left"),
+        QueryColumn("RequiredDate", "Required Date", "date", "left"),
+        QueryColumn("MfgBegin", "Mfg Begin", "date", "left"),
+        QueryColumn("LastSupplier", "Last Supplier", "text", "left", wrap=True),
         QueryColumn("UnitCost", "Est. Unit", "money2", "right"),
         QueryColumn("ExtValue", "Est. Value", "money", "right"),
     ]
@@ -2649,26 +2699,23 @@ def _released_toorder_result(df, as_of):
     ages = [r.get("AgeDays") for r in det if r.get("AgeDays") is not None]
     oldest = max(ages) if ages else 0
     partial = sum(1 for r in det if (r.get("OrderedQty") or 0) > 0)
+    rfq = sum(1 for r in det if r.get("RFQNo"))
     llt = sum(1 for r in det if r.get("LLT"))
     cards = [Card("Lines to order", "{:,}".format(items)),
-             Card("Partly ordered", "{:,}".format(partial), "warn" if partial else "good"),
+             Card("Partly procured", "{:,}".format(partial), "warn" if partial else "good"),
+             Card("With an RFQ", "{:,}".format(rfq)),
              Card("Long lead", "{:,}".format(llt), "warn" if llt else "neutral"),
              Card("Est. value", _fmt_money2(val)),
              Card("Oldest release", f"{oldest:,} days", "warn" if oldest > 30 else "neutral")]
     unpriced = items - priced
-    note = (f"Released parts still to be ordered, one row per {proj.lower()}, machine and part. "
-            "Released Qty = the net quantity engineering released for that machine (Prerelease and "
-            "Release entries together — each covers part of the BOM quantity). Ordered Qty = the "
-            "quantity on active POs for the same machine; To Order = Released minus Ordered, and a "
-            "line shows only while it is above zero, so a part ordered short stays listed. Ordered on "
-            "Other Machine = the same part on POs for another machine of the project (not netted — "
-            "check whether it was bought under the wrong machine). On Hand = current stock of the part "
-            "across all locations (shared stock, not netted). Release Stage = Prerelease (the long-lead "
-            "route), Release, or both. Last Supplier = the supplier on the part's most recent PO (item "
-            "master), as a starting point — no PO exists yet for these lines. Fabricated assemblies are left out (built in house, not bought); "
-            "parts removed from the current BOM are left out. Est. Unit / Est. Value use the median "
-            "historical PO price for the part (last or list cost as fallback) on the To Order quantity "
-            "— planning figures, not quotes."
+    note = ("ETO's own Items to Procure list (the same figures as ETO's Purchasing grid), for the selected "
+            f"{proj.lower()}s, lines ETO marks Procure. Requested = quantity ETO says purchasing must supply; "
+            "Procured = quantity already assigned (on POs or from stock); To Order = Requested minus "
+            "Procured. On Open PO and On Hand are ETO's figures for the part. RFQ # / RFQ Date = the part's "
+            "last RFQ. Required Date and Mfg Begin are ETO's dates where entered. Release Stage / Release "
+            "Date come from the release log (Not released = no release-log entry, e.g. a non-BOM request). "
+            "Est. Unit / Est. Value use the median historical PO price for the part (last cost as fallback) "
+            "on the To Order quantity — planning figures, not quotes."
             + (f" {unpriced:,} of {items:,} line(s) have no price on record, so Est. value is a lower "
                "bound." if unpriced else ""))
     return QueryResult("released_toorder", "Purchasing — Lines to Order", cols, rows, cards, note)
