@@ -2506,29 +2506,27 @@ def _spec_po_status_result(pdf, label):
 
 def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
     """items = exc_detail output — one row per OPEN, OVERDUE PO line (per-line detail)."""
+    import pandas as pd
     grouped = etospec.exc_detail_build_rows(items)
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
     rows = etospec.web_rows(etospec.COLS_EXC, grouped)
     n = 0 if items is None or items.empty else len(items)
-    val = 0.0 if not n else float(items["ExtValue"].sum())
+    val = 0.0 if not n else float(pd.to_numeric(items["Cost"], errors="coerce").fillna(0).sum()) if "Cost" in items.columns else float(items["ExtValue"].sum())
     cards = [Card("Overdue lines", "{:,}".format(n), "bad" if n else "good"),
-             Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
+             Card("At-risk value (CAD)", _fmt_money2(val), "bad" if val else "good")]
     note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
-            "line. Code = machine/spec; Category = item category; Drawing = the item's drawing file "
-            "name (from the engineering item master); RFQ Date = the item's last RFQ on this project; "
-            "Lead Time = maintained estimated lead-time days, or — shown in ITALICS — a HISTORICAL "
-            "fallback (the item's average actual order→receipt span across its PO history, bounded to "
-            "0–730 days) when the estimate is blank; an italic value is calculated from past deliveries, "
-            "not a maintained estimate; Oversized / Inspected / Critical = the item's 'Oversize Permit Required' / 'Requires "
-            "Inspection' / 'Critical Path' flags. Receipt Date "
-            "= last receipt; PO Date = the date the PO was entered; Release Date = the first "
-            "release-log entry for the project and part; Release Stage = Prerelease (the long-lead "
-            "route), Release, both, or Not released (bought without an engineering release); Last Activity = latest of order date, last receipt "
-            "and header revision (a last-activity signal, not an edit audit — ETO keeps no PO edit "
-            "timestamp). Status is derived. Oversized / Inspected / Critical read blank "
-            "where the ETO item hasn't been maintained; Lead Time reads blank only when neither a "
-            "maintained estimate nor any receipt history exists for the item. Planned Ship, Days to Assembly and Permit "
-            "Dates are shown for the workbook layout but ETO holds no source for them."
+            "line, in the column layout Peter / Jason specified (8 Oct 2026). Cost = the PO line's extended "
+            "value in CAD (PO currency x the PO's exchange rate). Code = machine. RFQ Date = the part's last "
+            "RFQ on this project and machine. Drawing = the part's drawing file (engineering item master). "
+            "Release Date = the first release-log entry for the project and part. Receipt Date = last "
+            "receipt. Last Activity = latest of order date, last receipt and PO header revision (ETO keeps "
+            "no PO edit timestamp). Mfg Begins = the machine's Mfg Begin date in ETO (blank where not "
+            "entered). Lead Time = maintained lead-time days, or in italics a historical average of the "
+            "part's order-to-receipt days. Oversized / Inspected / Critical / LLT = the item master's "
+            "'Oversize Permit Required' / 'Requires Inspection' / 'Critical Path' / 'Long Lead Item' flags. "
+            "Status is derived. Purchasing Requisition # is blank until its source is confirmed. Planned "
+            "Ship, Permit Dates, Oversized and Inspected are greyed in the specification: their rules are to "
+            "be set."
             + ("" if enriched else
                " NOTE: item enrichment (Drawing / RFQ / Lead / flags) was unavailable this run"
                + (f" — {enrich_err}" if enrich_err else "") + ", so those columns are blank."))
@@ -4491,6 +4489,7 @@ class DemoQueryService(QueryService):
                            columns=_DEMO_EXC_COLS)
         if not raw.empty:                       # demo: a release date stands in for a Release entry
             raw["HasRel"] = raw["EngReleaseDate"].notna().astype(int)
+            raw["ExtValueCAD"] = raw["ExtValue"]     # demo POs are CAD
         items = etospec.exc_detail(raw, today=_dt.date(2026, 7, 22))
         return _spec_po_exc_result(items, "As at Jul 22, 2026 (demo)", True)
 

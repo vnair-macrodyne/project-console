@@ -735,34 +735,34 @@ _LLT_CRITICAL_DAYS = 90
 # Planned/Revised/Receipt dates, Status(derived), Lead time, Oversized. BLANK — ETO holds no source:
 # Planned Ship (BudgetShipRelease empty), Days to Assembly (MfgBegin empty), RFQ Date, Permit Dates,
 # Last Updated (no PO-line modified timestamp). Kept as columns so the layout matches the workbook.
-COLS_EXC = [
-    ("Buyer",          "Buyer",            16, "L", False),
-    ("PO",             "PO #",             10, "L", False),
-    ("PODate",         "PO Date",          11, "C", False),   # PO header date (2026-10-10)
-    ("ProjectID",      "Project #",         8, "C", False),
-    ("JobName",        "Project",          20, "L", False),
-    ("Code",           "Machine",           7, "C", False),   # spec/machine code — label aligned with the other purchasing reports
-    ("Item",           "Item",             11, "L", False),
-    ("Description",    "Description",      28, "L", False),   # PO line description (feedback 2026-10-12)
-    ("Vendor",         "Vendor",           20, "L", False),   # PO supplier (feedback 2026-10-12)
-    ("Category",       "Category",         16, "L", False),
-    ("DrawingNo",      "Drawing",          16, "L", False),
-    ("EngRelease",     "Release Date",     11, "C", False),
-    ("Stage",          "Release Stage",    14, "L", False),   # Prerelease / Release / both / Not released (2026-10-10)
-    ("PlannedShip",    "Planned Ship",     11, "C", False),
-    ("PlannedReceipt", "Planned Receipt",  12, "C", False),
-    ("RevisedReceipt", "Revised Receipt",  12, "C", False),
-    ("ReceiptDate",    "Receipt Date",     11, "C", False),
-    ("Status",         "Status",           12, "L", False),
-    ("LastUpdated",    "Last Activity",    11, "C", False),
-    ("DaysToAssembly", "Days to Assembly",  8, "R", True),
-    ("RFQDate",        "RFQ Date",         11, "C", False),
-    ("PermitDates",    "Permit Dates",     12, "L", False),
-    ("LeadTime",       "Lead Time",         8, "R", True),    # number; a historical fallback is italicised via _em, not the value
-    ("LLT",            "Long Lead",         9, "C", False),   # PartCustom7 'Long Lead Item' flag
-    ("Oversized",      "Oversized",         8, "C", False),
-    ("Inspected",      "Inspected",         8, "C", False),
-    ("Critical",       "Critical",          8, "C", False),
+COLS_EXC = [   # Peter's layout, in his order ("Sextant_po_exceptions_20260912_Column_Corrections_20261008.xlsx")
+    ("Buyer",          "Buyer",                    16, "L", False),
+    ("ReqNo",          "Purchasing Requisition #", 14, "L", False),   # source to be confirmed with Peter — blank for now
+    ("RFQDate",        "RFQ Date",                 11, "C", False),
+    ("PO",             "PO #",                     10, "L", False),
+    ("Cost",           "Cost",                     12, "R", True),    # PO line extended value in CAD (PO currency x PO rate)
+    ("Vendor",         "Vendor",                   20, "L", False),
+    ("ProjectID",      "Project #",                 8, "C", False),
+    ("JobName",        "Project",                  20, "L", False),
+    ("Code",           "Code",                      7, "C", False),   # machine / spec
+    ("Item",           "Item",                     11, "L", False),
+    ("Description",    "Description",              28, "L", False),
+    ("Category",       "Category",                 16, "L", False),
+    ("DrawingNo",      "Drawing",                  16, "L", False),
+    ("EngRelease",     "Release Date",             11, "C", False),
+    ("PlannedShip",    "Planned Ship",             11, "C", False),   # greyed by Peter: rule to come
+    ("PlannedReceipt", "Planned Receipt",          12, "C", False),
+    ("RevisedReceipt", "Revised Receipt",          12, "C", False),
+    ("ReceiptDate",    "Receipt Date",             11, "C", False),
+    ("Status",         "Status",                   12, "L", False),
+    ("LastUpdated",    "Last Activity",            11, "C", False),
+    ("MfgBegin",       "Mfg Begins",               11, "C", False),   # tblSpec.MfgBegin for the line's machine
+    ("PermitDates",    "Permit Dates",             12, "L", False),   # greyed by Peter: rule to come
+    ("LeadTime",       "Lead Time",                 8, "R", True),    # number; a historical fallback is italicised via _em
+    ("Oversized",      "Oversized",                 8, "C", False),   # greyed by Peter: rule to come
+    ("Inspected",      "Inspected",                 8, "C", False),   # greyed by Peter: rule to come
+    ("Critical",       "Critical",                  8, "C", False),
+    ("LLT",            "LLT",                       9, "C", False),   # PartCustom7 'Long Lead Item'
 ]
 
 # column index of "Item" (the grand-total "N line(s)" sits here) — computed so it survives reorders
@@ -913,6 +913,9 @@ def exc_detail(df, today=None):
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
+            "ReqNo": "",                                  # source to be confirmed (Peter) — ETO has no requisition record
+            "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
+            "MfgBegin": _iso(r.get("MfgBegin")),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
@@ -1157,6 +1160,9 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         pod.PurchaseQty                 AS Qty,
         pod.Received                    AS Received,
         pod.ExtendedPrice               AS ExtValue,
+        CAST(pod.ExtendedPrice * CASE WHEN poh.PurchaseCurrRate > 0 THEN poh.PurchaseCurrRate ELSE 1 END
+             AS decimal(20,2))          AS ExtValueCAD,
+        CAST(sp.MfgBegin AS date)       AS MfgBegin,      -- machine's Mfg Begin (tblSpec, composite key)
         CAST(pod.DateRequired AS date)  AS DateRequired,
         CAST(pod.DateRevised  AS date)  AS DateRevised,
         CAST(pdd.LastReceivedDate AS date) AS ReceiptDate,
@@ -1178,6 +1184,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
     LEFT JOIN vwPurchaseOrderDetailsDetailed pdd ON pdd.PurchaseDetailID = pod.PurchaseDetailID
     LEFT JOIN tblProjects p ON p.ProjectID = pod.ProjectID
+    LEFT JOIN tblSpec sp ON sp.ProjectID = pod.ProjectID AND sp.SpecID = pod.SpecID
     {buyer_join}
     {lead_join}
     {hist_join}
@@ -1235,6 +1242,9 @@ def po_listing_detail(df, today=None):
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
+            "ReqNo": "",                                  # source to be confirmed (Peter) — ETO has no requisition record
+            "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
+            "MfgBegin": _iso(r.get("MfgBegin")),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
