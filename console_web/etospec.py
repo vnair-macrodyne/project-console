@@ -743,6 +743,8 @@ COLS_EXC = [
     ("JobName",        "Project",          20, "L", False),
     ("Code",           "Machine",           7, "C", False),   # spec/machine code — label aligned with the other purchasing reports
     ("Item",           "Item",             11, "L", False),
+    ("Description",    "Description",      28, "L", False),   # PO line description (feedback 2026-10-12)
+    ("Vendor",         "Vendor",           20, "L", False),   # PO supplier (feedback 2026-10-12)
     ("Category",       "Category",         16, "L", False),
     ("DrawingNo",      "Drawing",          16, "L", False),
     ("EngRelease",     "Release Date",     11, "C", False),
@@ -775,6 +777,8 @@ COLS_LIST = [
     ("JobName",        "Project",          20, "L", False),
     ("Code",           "Machine",           7, "C", False),
     ("Item",           "Item",             11, "L", False),
+    ("Description",    "Description",      28, "L", False),
+    ("Vendor",         "Vendor",           20, "L", False),
     ("Category",       "Category",         16, "L", False),
     ("LLT",            "Long Lead",         9, "C", False),
     ("Stage",          "Release Stage",    14, "L", False),
@@ -907,6 +911,8 @@ def exc_detail(df, today=None):
             "JobName": ("" if _blank(r.get("JobName")) else str(r.get("JobName"))),
             "Code": _spec_code(r.get("Code")),
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
+            "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
+            "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
@@ -1025,6 +1031,7 @@ def query_released_to_order(project_ids=None):
     ),
     mast AS (     -- item-master description + eng-release-date + long-lead flag (covers items on no BOM at all)
         SELECT ItemID, MAX(ItemCompanyID) AS ItemNo, MAX(ItemDescription) AS Description,
+               MAX(LastSupplierCompanyID) AS LastSupplierID,               -- supplier on the part's last PO
                MAX(CAST([{_ENG_RELEASE_COL}] AS date)) AS EngDate,  -- PartCustom6 'Date Released Engineering'
                MAX(CAST([{_LLT_FLAG_COL}] AS int)) AS LLTFlag       -- PartCustom7 'Long Lead Item'
         FROM dbo.tblEngItemMaster WHERE ItemID IN {relset} GROUP BY ItemID
@@ -1057,6 +1064,7 @@ def query_released_to_order(project_ids=None):
            rel.HasPre AS HasPre, rel.HasRel AS HasRel,
            COALESCE(CAST(rel.ReleaseDate AS date), mast.EngDate) AS ReleaseDate,
            mast.LLTFlag AS LLTFlag,
+           sup.CName AS LastSupplier,
            COALESCE(NULLIF(itm.LastCost, 0), NULLIF(itm.ListCost, 0)) AS UnitCostFallback
     FROM rel
     JOIN curbom cb ON cb.ProjectID = rel.ProjectID AND cb.ItemID = rel.ItemID     -- drop design-removed releases
@@ -1066,6 +1074,7 @@ def query_released_to_order(project_ids=None):
     LEFT JOIN stock ON stock.ItemID = rel.ItemID
     LEFT JOIN itm  ON itm.ItemID = rel.ItemID
     LEFT JOIN mast ON mast.ItemID = rel.ItemID
+    LEFT JOIN tblCompany sup ON sup.CompanyID = mast.LastSupplierID
     LEFT JOIN tblProjects p ON p.ProjectID = rel.ProjectID
     WHERE fa.ItemID IS NULL
       AND rel.RelQty - ISNULL(po.POQty, 0) > 0
@@ -1224,6 +1233,8 @@ def po_listing_detail(df, today=None):
             "JobName": ("" if _blank(r.get("JobName")) else str(r.get("JobName"))),
             "Code": _spec_code(r.get("Code")),
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
+            "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
+            "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),

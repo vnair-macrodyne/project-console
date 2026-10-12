@@ -2607,6 +2607,7 @@ def _released_toorder_rows(df, as_of):
             "JobName": r.get("JobName"),
             "Machine": (_mc_label(r.get("MachineCode")) if pd.notna(r.get("MachineCode")) else ""),
             "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
+            "LastSupplier": r.get("LastSupplier"),
             "LLT": ("yes" if _num(r.get("LLTFlag")) else ""),   # PartCustom7 'Long Lead Item'
             "Stage": etospec.release_stage(r.get("HasPre"), r.get("HasRel") if "HasRel" in r else 1),
             "Qty": qty, "OrderedQty": ordered, "ToOrder": to_order,
@@ -2629,6 +2630,7 @@ def _released_toorder_result(df, as_of):
         QueryColumn("Machine", "Machine", "text", "left"),
         QueryColumn("ItemNo", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("LastSupplier", "Last Supplier", "text", "left", wrap=True),
         QueryColumn("LLT", "Long Lead", "text", "left"),
         QueryColumn("Stage", "Release Stage", "text", "left"),
         QueryColumn("ReleaseDate", "Release Date", "date", "left"),
@@ -2664,7 +2666,8 @@ def _released_toorder_result(df, as_of):
             "Other Machine = the same part on POs for another machine of the project (not netted — "
             "check whether it was bought under the wrong machine). On Hand = current stock of the part "
             "across all locations (shared stock, not netted). Release Stage = Prerelease (the long-lead "
-            "route), Release, or both. Fabricated assemblies are left out (built in house, not bought); "
+            "route), Release, or both. Last Supplier = the supplier on the part's most recent PO (item "
+            "master), as a starting point — no PO exists yet for these lines. Fabricated assemblies are left out (built in house, not bought); "
             "parts removed from the current BOM are left out. Est. Unit / Est. Value use the median "
             "historical PO price for the part (last or list cost as fallback) on the To Order quantity "
             "— planning figures, not quotes."
