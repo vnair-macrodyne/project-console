@@ -208,8 +208,8 @@ def catalogue():
         {"id": "po_listing", "menu": "Purchasing", "label": "All Purchase Orders",
          "desc": "Every purchase-order line across all statuses — Draft, Open, Overdue, partial and "
                  "Received — on active POs, one row per line, following the flow: release stage and "
-                 "date, RFQ date, PO date, planned / revised / actual receipt. Flags lines bought "
-                 "without an engineering release.",
+                 "date, RFQ date, PO date, planned / revised / actual receipt. Lines with no release-log "
+                 "entry (bought through a Non-BOM request) show as Not released.",
          "needs_projects": True},
         # ── Project Management ─────────────────────────────────────────────────
         {"id": "bom_readiness", "menu": "Project Management", "label": "BOM Readiness",
@@ -1102,7 +1102,15 @@ class LiveQueryService(QueryService):
             "RFQNo": raw.get("LastRFQID"), "RFQDate": raw.get("RFQDate"),
             "RequiredDate": raw.get("RequiredDate"), "MfgBegin": raw.get("MfgBegin"),
             "LastSupplier": raw.get("LastSupplier"), "UnitCost": raw["UnitCost"],
+            # carried for make_procurement_omnibus.py (not shown on Lines to Order)
+            "DrawingRaw": raw.get("Drawing"), "OverFlag": raw.get("PartCustom8"),
+            "InspFlag": raw.get("PartCustom17"), "CritFlag": raw.get("PartCustom14"),
+            "EstLead": raw.get("EstimatedLeadTime"),
         })
+        names = self._df(f"SELECT ProjectID, DisplayName FROM dbo.tblProjects WHERE ProjectID IN ({ids})")
+        if names is not None and not names.empty:     # same project label as the other purchasing reports
+            nm = {int(a): b for a, b in names.itertuples(index=False)}
+            df["JobName"] = [nm.get(int(p), j) for p, j in zip(df["ProjectID"], df["JobName"])]
         return _released_toorder_result(df, _dt.date.today())
 
     def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
@@ -2685,6 +2693,12 @@ def _released_toorder_rows(df, as_of):
             "RequiredDate": _d(r.get("RequiredDate")), "MfgBegin": _d(r.get("MfgBegin")),
             "ReleaseDate": (reld.isoformat() if reld else ""),
             "AgeDays": age, "UnitCost": unit, "ExtValue": ext,
+            # hidden on Lines to Order; used by make_procurement_omnibus.py
+            "DrawingNo": etospec._drawing_file(r.get("DrawingRaw")) if "DrawingRaw" in r else "",
+            "Oversized": "yes" if _num(r.get("OverFlag")) else "",
+            "Inspected": "yes" if _num(r.get("InspFlag")) else "",
+            "Critical": "yes" if _num(r.get("CritFlag")) else "",
+            "LeadTime": (_num(r.get("EstLead")) or None),
         })
     out.append({"_kind": "grand", "ItemNo": f"{n} line(s) to order",
                 "ExtValue": round(tot_val, 2)})
@@ -4576,6 +4590,7 @@ class DemoQueryService(QueryService):
             raw["PurchaseEmailed"] = 0
             raw.loc[raw["PO"].astype(str).isin({"48505"}), ["PurchasePrinted", "PurchaseEmailed"]] = 0
             raw["HasRel"] = raw["EngReleaseDate"].notna().astype(int)
+            raw["ExtValueCAD"] = raw["ExtValue"]     # demo POs are CAD
         items = etospec.po_listing_detail(raw, today=_dt.date(2026, 7, 22))
         return _spec_po_listing_result(items, "As at Jul 22, 2026 (demo)")
 
