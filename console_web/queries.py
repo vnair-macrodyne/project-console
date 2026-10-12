@@ -2587,7 +2587,9 @@ def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
             "entered). Lead Time = maintained lead-time days, or in italics a historical average of the "
             "part's order-to-receipt days. Oversized / Inspected / Critical / LLT = the item master's "
             "'Oversize Permit Required' / 'Requires Inspection' / 'Critical Path' / 'Long Lead Item' flags. "
-            "Status is derived. Purchasing Requisition # is blank until its source is confirmed. Planned "
+            "Status is derived. Purchasing Requisition # = the PO number as raised in ETO (a draft PO is the "
+            "requisition; ETO keeps the same number once the PO is issued); PO # shows only once the PO has "
+            "been sent (printed or emailed). Planned "
             "Ship, Permit Dates, Oversized and Inspected are greyed in the specification: their rules are to "
             "be set."
             + ("" if enriched else

@@ -737,7 +737,7 @@ _LLT_CRITICAL_DAYS = 90
 # Last Updated (no PO-line modified timestamp). Kept as columns so the layout matches the workbook.
 COLS_EXC = [   # Peter's layout, in his order ("Sextant_po_exceptions_20260912_Column_Corrections_20261008.xlsx")
     ("Buyer",          "Buyer",                    16, "L", False),
-    ("ReqNo",          "Purchasing Requisition #", 14, "L", False),   # source to be confirmed with Peter — blank for now
+    ("ReqNo",          "Purchasing Requisition #", 14, "L", False),   # the draft PO number (ETO keeps one number from draft to issued PO)
     ("RFQDate",        "RFQ Date",                 11, "C", False),
     ("PO",             "PO #",                     10, "L", False),
     ("Cost",           "Cost",                     12, "R", True),    # PO line extended value in CAD (PO currency x PO rate)
@@ -913,12 +913,13 @@ def exc_detail(df, today=None):
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
-            "ReqNo": "",                                  # source to be confirmed (Peter) — ETO has no requisition record
+            "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
             "MfgBegin": _iso(r.get("MfgBegin")),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
-            "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
+            "PO": ("" if _blank(r.get("PO")) or (not _flag(r.get("PurchasePrinted")) and not _flag(r.get("PurchaseEmailed")))
+                   else str(r.get("PO"))),                # PO # only once issued (printed or emailed); a draft is a requisition
             "PODate": _iso(r.get("Ordered")),             # PO header date (entered date; ETO keeps no issue date)
             "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),
             "PlannedShip": "",                            # ETO holds no maintained ship date
@@ -1267,7 +1268,7 @@ def po_listing_detail(df, today=None):
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
-            "ReqNo": "",                                  # source to be confirmed (Peter) — ETO has no requisition record
+            "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
             "MfgBegin": _iso(r.get("MfgBegin")),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
