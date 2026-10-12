@@ -1155,7 +1155,10 @@ class LiveQueryService(QueryService):
         enriched = True
         enrich_err = None
         try:
-            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto))
+            # enrichment WITHOUT the in-query history CTE (84-122 s for 3 projects, 2026-10-12);
+            # the historical lead time is fetched below for this report's own parts only.
+            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto, include_hist=False))
+            self._attach_hist_lead(raw)
         except Exception as e:
             # Don't swallow silently: a bad enrichment column would otherwise blank RFQ / Lead / flags
             # with no trace. Log it and surface it on the report note so it's diagnosable.
@@ -1169,6 +1172,27 @@ class LiveQueryService(QueryService):
         items = etospec.exc_detail(raw, today=as_of)
         return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}",
                                    enriched, enrich_err)
+
+    def _attach_hist_lead(self, raw):
+        """Fill HistLeadDays / HistLeadN on the exception rows from etospec.query_hist_lead, scoped to
+        the parts on OPEN, OVERDUE lines (the only rows the report keeps), in chunks of 900 ids."""
+        import datetime as _dt
+        import pandas as pd
+        if raw is None or raw.empty or "ItemID" not in raw.columns:
+            return
+        today = pd.Timestamp(_dt.date.today())
+        need = pd.to_datetime(raw["DateRevised"], errors="coerce").fillna(
+            pd.to_datetime(raw["DateRequired"], errors="coerce"))
+        ids = sorted({int(i) for i in raw.loc[need < today, "ItemID"].dropna().tolist()})
+        hl, hn = {}, {}
+        for k in range(0, len(ids), 900):
+            h = self._df(etospec.query_hist_lead(ids[k:k + 900]))
+            if h is not None and not h.empty:
+                for r in h.itertuples(index=False):
+                    hl[int(r.ItemID)] = r.HistLead
+                    hn[int(r.ItemID)] = r.HistN
+        raw["HistLeadDays"] = [hl.get(int(i)) if pd.notna(i) else None for i in raw["ItemID"]]
+        raw["HistLeadN"] = [hn.get(int(i)) if pd.notna(i) else None for i in raw["ItemID"]]
 
     def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt

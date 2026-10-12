@@ -1151,6 +1151,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         p.DisplayName                   AS JobName,
         pod.SpecID                      AS Code,
         ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30)))                      AS Item,
+        pod.ItemID                      AS ItemID,
         pod.ItemDescription             AS Description,
         pdd.ItemMasterCategoryDescription AS Category,
         poh.PurchaseOrderID             AS PO,
@@ -1192,6 +1193,30 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     {_bom_release_join(project_ids)}
     WHERE poh.PurchaseActive = 1{"" if all_statuses else _RECV_OPEN_CLAUSE}{proj}{_po_date_window(date_from, date_to)}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
+    """
+
+
+def query_hist_lead(item_ids):
+    """HISTORICAL lead time for a given set of parts: per ItemID, the average of its actual PO
+    order -> last-receipt days across ALL its POs (any project), bounded to 0..730 days. Same rule as
+    the hist CTE in query_po_exceptions, but run as a separate, item-scoped query (2026-10-12): inside
+    the main query it took 84-122 s for three projects; scoped to the report's own parts it reads only
+    those parts' PO history. Returns ItemID, HistLead, HistN."""
+    ids = ",".join(str(int(i)) for i in item_ids)
+    return f"""
+    SELECT x.ItemID,
+           CAST(ROUND(AVG(CAST(x.LeadDays AS float)), 0) AS int) AS HistLead,
+           COUNT_BIG(*) AS HistN
+    FROM (
+        SELECT pod2.ItemID, DATEDIFF(day, poh2.PurchaseDate, pdd2.LastReceivedDate) AS LeadDays
+        FROM vwPurchaseOrderDetails pod2
+        JOIN vwPurchaseOrderHeader poh2 ON poh2.PurchaseOrderID = pod2.PurchaseOrderID
+        JOIN vwPurchaseOrderDetailsDetailed pdd2 ON pdd2.PurchaseDetailID = pod2.PurchaseDetailID
+        WHERE pod2.ItemID IN ({ids})
+          AND pdd2.LastReceivedDate IS NOT NULL AND poh2.PurchaseDate IS NOT NULL
+          AND DATEDIFF(day, poh2.PurchaseDate, pdd2.LastReceivedDate) BETWEEN 0 AND 730
+    ) x
+    GROUP BY x.ItemID
     """
 
 
