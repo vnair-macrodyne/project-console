@@ -307,10 +307,15 @@ def _flatten(result):
 
 
 def _put_cell(cell, raw, ctype):
-    """Write a value with the right number format so numbers stay numeric (pivot-friendly)."""
+    """Write a value with the right number format so numbers stay numeric (pivot-friendly).
+    Text from ETO can carry control characters an .xlsx cell cannot hold (e.g. in a part
+    description, seen 2026-10-12); they are stripped rather than failing the whole export."""
     if raw is None or raw == "":
         cell.value = ""
         return
+    if isinstance(raw, str):
+        from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+        raw = ILLEGAL_CHARACTERS_RE.sub("", raw)
     if ctype in ("hours", "int", "days") and isinstance(raw, (int, float)):
         cell.value = raw
         cell.number_format = "#,##0"
