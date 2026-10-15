@@ -17,7 +17,7 @@ Workbook tabs
   Info                   — run time, projects, stage counts, column notes
 
 Run from the repo root where ETO and the Reporting DB are reachable:
-    python make_procurement_omnibus.py                      # all projects tracked in the console
+    python make_procurement_omnibus.py                      # all projects active on Sextant (budget-current, minus Remove-from-Console)
     python make_procurement_omnibus.py 250005 260178        # or name projects
 Writes Procurement_Omnibus_<YYYYMMDD>.xlsx here and prints a summary.
 """
@@ -27,12 +27,34 @@ STAGES = ["To procure", "Requisition (draft PO)", "On order", "Received"]
 
 
 def tracked_projects():
+    """Projects ACTIVE on Sextant = budget-current MINUS Remove-from-Console exclusions — the exact
+    set the console's project selector shows (queries.py LiveQueryService.list_projects)."""
     from console.infra.connections import console_connection
     c = console_connection(); cur = c.cursor()
     cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent ORDER BY ProjectID")
     ids = [int(r[0]) for r in cur.fetchall()]
+    try:
+        cur.execute("SELECT ProjectID FROM Reporting.tblConsoleProjectExclusion")
+        excl = {int(r[0]) for r in cur.fetchall()}
+    except Exception:
+        excl = set()
     c.close()
-    return ids
+    return [p for p in ids if p not in excl]
+
+
+def po_order_dates(pids):
+    """{PurchaseOrderID (str): order date} for every PO touching the given projects — the PO header
+    PurchaseDate (one date per PO), merged onto the Omnibus PO rows by PO number."""
+    from console.infra.connections import eto_connection
+    ids = ",".join(str(int(p)) for p in pids)
+    c = eto_connection(); cur = c.cursor()
+    cur.execute("SELECT DISTINCT poh.PurchaseOrderID, CAST(poh.PurchaseDate AS date) "
+                "FROM dbo.vwPurchaseOrderHeader poh "
+                "JOIN dbo.vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID "
+                f"WHERE pod.ProjectID IN ({ids})")
+    m = {str(r[0]): r[1] for r in cur.fetchall()}
+    c.close()
+    return m
 
 
 def num(v):
@@ -43,7 +65,7 @@ def num(v):
         return None
 
 
-def omnibus_rows(lto, items, cols_exc):
+def omnibus_rows(lto, items, cols_exc, podates):
     import pandas as pd
     out = []
     for r in lto.rows:
@@ -52,7 +74,7 @@ def omnibus_rows(lto, items, cols_exc):
         q = num(r.get("ToOrder"))
         out.append({
             "Stage": "To procure", "Buyer": "", "ReqNo": "", "RFQDate": r.get("RFQDate") or "",
-            "PO": "", "Cost": None, "Vendor": "",
+            "PO": "", "OrderDate": "", "Cost": None, "Vendor": "",
             "ProjectID": "" if r.get("ProjectID") is None else str(r.get("ProjectID")),
             "JobName": r.get("JobName") or "", "Code": r.get("Machine") or "", "Item": r.get("ItemNo") or "",
             "Description": r.get("Description") or "", "Category": r.get("Category") or "",
@@ -71,6 +93,7 @@ def omnibus_rows(lto, items, cols_exc):
             for k, *_ in cols_exc:
                 v = r.get(k)
                 row[k] = None if (isinstance(v, float) and pd.isna(v)) else v
+            row["OrderDate"] = podates.get(str(r.get("PO")), "")   # PO header PurchaseDate, by PO number
             if stage == "Requisition (draft PO)":
                 row["PO"] = ""          # a draft is a requisition: its number shows under Purchasing Requisition #
             out.append(row)
@@ -131,8 +154,9 @@ def main():
     exc = svc.run("po_exceptions", pids)
     lst = svc.run("po_listing", pids)
     items = (lst.export or {}).get("items")
-    omni = omnibus_rows(lto, items, etospec.COLS_EXC)
-    omni_cols = [("Stage", "Stage", "text", "left")] + \
+    podates = po_order_dates(pids)
+    omni = omnibus_rows(lto, items, etospec.COLS_EXC, podates)
+    omni_cols = [("Stage", "Stage", "text", "left"), ("OrderDate", "Order Date", "date", "left")] + \
         [(k, l, t, a) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
     det = lambda res: sum(1 for x in res.rows if x.get("_kind") == "detail")
     counts = {s: sum(1 for x in omni if x["Stage"] == s) for s in STAGES}
@@ -148,6 +172,8 @@ def main():
     info = [("Procurement Omnibus", None),
             ("Generated", time.strftime("%Y-%m-%d %H:%M")),
             ("Source", "ETO production database (read-only), through the Sextant purchasing reports"),
+            ("Scope", "Projects active on Sextant at run time: budgeted in the console and not Removed-from-Console "
+                      "(the same set the project selector shows). Override by naming project numbers on the command line."),
             ("Projects", ", ".join(str(p) for p in pids)),
             ("", None)] + [(f"{s} (lines)", f"{counts[s]:,}") for s in STAGES] + [
             ("Overdue (on order)", f"{overdue:,}"),
@@ -158,6 +184,7 @@ def main():
                       "received. Received = fully received."),
             ("Purchasing Requisition #", "The PO number as raised in ETO. A draft PO is the requisition; ETO keeps the same number once the PO is sent."),
             ("PO #", "Shown once the PO has been printed or emailed."),
+            ("Order Date", "The PO header PurchaseDate — when the PO was placed (for a draft, the date it was raised in ETO). Blank on 'To procure' lines (no PO yet)."),
             ("Cost", "PO line total in CAD. Blank until a PO exists."),
             ("Release Date", "First release-log entry for the project and part; blank for parts bought through a Non-BOM request."),
             ("Mfg Begins", "The machine's Mfg Begin date in ETO, where entered."),
