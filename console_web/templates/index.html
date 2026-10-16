@@ -142,11 +142,8 @@
   table.exec .c-pid{min-width:62px;max-width:62px}
   table.exec .c-proj{min-width:210px;max-width:210px;text-align:left}
   /* word-boundary wrapping (never break inside words unless unavoidable) */
-  /* display/padding reset: the page-layout class .wrap (display:flex, padding 18px 22px) shares this
-     name — without the reset a wrapping cell stops being a table cell, and two adjacent wrapping
-     columns stack into one, shifting every later column left (seen on Lines to Order, 2026-10-12). */
-  td.wrap{display:table-cell;padding:9px 13px;gap:0;white-space:normal;overflow-wrap:break-word;word-break:normal;
-    max-width:280px;min-width:150px;vertical-align:middle}
+  td.wrap{white-space:normal;overflow-wrap:break-word;word-break:normal;max-width:280px;min-width:150px;
+    vertical-align:middle}
   .csub{font-size:11px;color:var(--muted);font-weight:400;margin-top:2px;line-height:1.25;
     overflow-wrap:break-word;word-break:normal}
   .pill{padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600;display:inline-block}

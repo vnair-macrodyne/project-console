@@ -192,9 +192,10 @@ def catalogue():
         # Overdue POs / Late Vendors / By Buyer) stay removed from the menu per Vijay; their _q_*
         # handlers remain (reachable by id) but are no longer listed.
         {"id": "released_toorder", "menu": "Purchasing", "label": "Lines to Order",
-         "desc": f"ETO's own Items to Procure list for the selected {proj.lower()}s — what purchasing "
-                 "still has to supply (Requested, Procured, To Order), with RFQ, required and Mfg Begin "
-                 "dates, release stage and an estimated value. Oldest release first.",
+         "desc": f"Released lines that have YET to be raised as a requisition — items engineering has "
+                 f"RELEASED (from the BOM release log) with no requisition/PO raised yet on the "
+                 f"{proj.lower()}. One row per item with the release date, age since release, released "
+                 "qty and an estimated cost (historical PO price). Oldest release first.",
          "needs_projects": True},
         {"id": "po_to_order", "menu": "Purchasing", "label": "Purchase Requisitions",
          "desc": f"Purchase requisitions in procurement with no PO issued yet — lines raised in ETO "
@@ -206,10 +207,10 @@ def catalogue():
                  "grouped by buyer. A forward-looking, at-risk view.",
          "needs_projects": True},
         {"id": "po_listing", "menu": "Purchasing", "label": "All Purchase Orders",
-         "desc": "Every purchase-order line across all statuses — Draft, Open, Overdue, partial and "
-                 "Received — on active POs, one row per line, following the flow: release stage and "
-                 "date, RFQ date, PO date, planned / revised / actual receipt. Lines with no release-log "
-                 "entry (bought through a Non-BOM request) show as Not released.",
+         "desc": "Every purchase-order line across all statuses — Draft (raised, not yet issued), "
+                 "Open, Overdue, partial and Received — on active (non-cancelled) POs, one row per "
+                 "line, in the same full field layout as PO Exceptions. The consolidated PO view "
+                 "(actual POs only; pre-PO released lines are not included).",
          "needs_projects": True},
         # ── Project Management ─────────────────────────────────────────────────
         {"id": "bom_readiness", "menu": "Project Management", "label": "BOM Readiness",
@@ -1049,69 +1050,21 @@ class LiveQueryService(QueryService):
         return out
 
     def _q_released_toorder(self, project_ids, date_from=None, date_to=None, **kw):
-        """Lines to Order = ETO's own "Items to Procure" list (EXEC dbo.uspPurchasingItemsToPurchase, no
-        parameters, whole company in ~1-3 s), filtered to the selected projects and Action = 'Procure'.
-        Verified 2026-10-12 (console_diag_eto_grids3.py): it reproduces Peter's 8 Oct ETO grid export —
-        427 of 459 rows identical (Requested = PurchaseQty, Procured = Assigned, Required = ToPurchase), the
-        rest since placed on POs. Replaces the release-log reconstruction (etospec.query_released_to_order),
-        which also listed parts ETO supplies from stock (354 vs ETO's 23 lines on 250005).
-        Added beside ETO's figures: release date / stage (release log), RFQ date (tblRFQHeader), category
-        (project structure), estimated unit cost (staged median PO price, else the item's last cost)."""
+        """Released-but-not-ordered worklist — items released in the BOM (tblBOMReleaseHistory), still
+        on the current BOM, with no PO yet on the project. Unit cost = staged MEDIAN historical PO
+        price (Reporting.tblItemPriceRef), falling back to the item's last/list cost. Oldest first."""
         import datetime as _dt
-        import pandas as pd
         pids = [int(p) for p in project_ids] if project_ids else []
         if not pids:
             return _released_toorder_result(None, _dt.date.today())
-        raw = self._readiness_df("SET NOCOUNT ON; EXEC dbo.uspPurchasingItemsToPurchase")
-        if raw is None or raw.empty:
-            return _released_toorder_result(None, _dt.date.today())
-        raw = raw[raw["ProjectID"].isin(pids) & (raw["Action"].astype(str).str.strip() == "Procure")].copy()
-        if raw.empty:
-            return _released_toorder_result(None, _dt.date.today())
-        ids = _ids_sql(pids)
-        raw["SpecKey"] = pd.to_numeric(raw["SpecID"], errors="coerce").astype(float)
-        rel = self._df(f"""SELECT ProjectID, CAST(SpecID AS float) AS SpecKey, ItemID AS ChildID,
-                                  MIN(ReleasedDateTime) AS ReleaseDate,
-                                  MAX(CASE WHEN [Type] = 'Prerelease' THEN 1 ELSE 0 END) AS HasPre,
-                                  MAX(CASE WHEN [Type] = 'Release' THEN 1 ELSE 0 END) AS HasRel
-                           FROM dbo.tblBOMReleaseHistory WHERE ProjectID IN ({ids})
-                           GROUP BY ProjectID, CAST(SpecID AS float), ItemID""")
-        if rel is not None and not rel.empty:
-            raw = raw.merge(rel, on=["ProjectID", "SpecKey", "ChildID"], how="left")
-        cat = self._df(f"""SELECT DISTINCT ProjectID, ChildID, CAST(CategoryDescription AS nvarchar(100)) AS Category
-                           FROM dbo.vwEngProductStructure WHERE ProjectID IN ({ids})""")
-        if cat is not None and not cat.empty:
-            raw = raw.merge(cat.drop_duplicates(["ProjectID", "ChildID"]), on=["ProjectID", "ChildID"], how="left")
-        rfq_ids = sorted({int(x) for x in raw["LastRFQID"].dropna().tolist() if int(x) > 0})
-        if rfq_ids:
-            rfq = self._df(f"SELECT RFQID AS LastRFQID, CAST(RFQDate AS date) AS RFQDate FROM dbo.tblRFQHeader "
-                           f"WHERE RFQID IN ({_ids_sql(rfq_ids)})")
-            if rfq is not None and not rfq.empty:
-                raw = raw.merge(rfq, on="LastRFQID", how="left")
-        pmap = self._item_price_map(raw["ItemID"].tolist())
-        raw["UnitCost"] = [pmap.get(int(i)) if (i is not None and int(i) in pmap)
-                           else (_num(c) or None) for i, c in zip(raw["ItemID"], raw["ItemLastCost"])]
-        df = pd.DataFrame({
-            "ProjectID": raw["ProjectID"], "JobName": raw.get("ProjectDescription"),
-            "MachineCode": raw["SpecKey"], "MachineDesc": raw.get("SDescription"),
-            "ItemNo": raw["ItemCompanyID"], "ItemID": raw["ItemID"], "Description": raw["ItemDescription"],
-            "Category": raw.get("Category"), "LLTFlag": raw.get("PartCustom7"),
-            "HasPre": raw.get("HasPre"), "HasRel": raw.get("HasRel"), "ReleaseDate": raw.get("ReleaseDate"),
-            "Qty": raw["PurchaseQty"], "OrderedQty": raw["Assigned"], "ToOrder": raw["ToPurchase"],
-            "OnOpenPO": raw.get("OnOrderQuantity"), "OnHand": raw.get("OnHand"),
-            "RFQNo": raw.get("LastRFQID"), "RFQDate": raw.get("RFQDate"),
-            "RequiredDate": raw.get("RequiredDate"), "MfgBegin": raw.get("MfgBegin"),
-            "LastSupplier": raw.get("LastSupplier"), "UnitCost": raw["UnitCost"],
-            # carried for make_procurement_omnibus.py (not shown on Lines to Order)
-            "DrawingRaw": raw.get("Drawing"), "OverFlag": raw.get("PartCustom8"),
-            "InspFlag": raw.get("PartCustom17"), "CritFlag": raw.get("PartCustom14"),
-            "EstLead": raw.get("EstimatedLeadTime"),
-        })
-        names = self._df(f"SELECT ProjectID, DisplayName FROM dbo.tblProjects WHERE ProjectID IN ({ids})")
-        if names is not None and not names.empty:     # same project label as the other purchasing reports
-            nm = {int(a): b for a, b in names.itertuples(index=False)}
-            df["JobName"] = [nm.get(int(p), j) for p, j in zip(df["ProjectID"], df["JobName"])]
-        return _released_toorder_result(df, _dt.date.today())
+        raw = self._df(etospec.query_released_to_order(pids))
+        if raw is not None and not raw.empty:
+            pmap = self._item_price_map(raw["ItemID"].tolist())
+            fb = raw["UnitCostFallback"] if "UnitCostFallback" in raw.columns else None
+            raw["UnitCost"] = [pmap.get(int(i)) if (i is not None and int(i) in pmap)
+                               else (fb.iloc[k] if fb is not None else None)
+                               for k, i in enumerate(raw["ItemID"])]
+        return _released_toorder_result(raw, _dt.date.today())
 
     def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
         """Draft PO lines — entered in ETO but not yet issued (not printed AND not emailed
@@ -1139,12 +1092,9 @@ class LiveQueryService(QueryService):
                poh.PurchaseCurr AS Curr, pod.PurchaseQty AS Qty, pod.PurchasePrice AS Price,
                CAST(pod.ExtendedPrice * {rate} AS decimal(20,2)) AS ExtValueCAD,
                CAST(pod.DateRequired AS date) AS Required, CAST(poh.PurchaseDate AS date) AS Entered,
-               DATEDIFF(day, poh.PurchaseDate, GETDATE()) AS AgeDays,
-               CAST(bomrel.BOMReleaseDate AS date) AS ReleaseDate,   -- first release-log entry, project + part
-               bomrel.HasPre AS HasPre, bomrel.HasRel AS HasRel
+               DATEDIFF(day, poh.PurchaseDate, GETDATE()) AS AgeDays
         FROM vwPurchaseOrderHeader poh
         JOIN vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
-        {etospec._bom_release_join(pids)}
         LEFT JOIN tblProjects p     ON p.ProjectID = pod.ProjectID
         LEFT JOIN tblCompany  pcust ON pcust.CompanyID = p.CompanyID
         LEFT JOIN tblEmployee bu    ON bu.EmployeeID = poh.BuyerID
@@ -1163,10 +1113,7 @@ class LiveQueryService(QueryService):
         enriched = True
         enrich_err = None
         try:
-            # enrichment WITHOUT the in-query history CTE (84-122 s for 3 projects, 2026-10-12);
-            # the historical lead time is fetched below for this report's own parts only.
-            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto, include_hist=False))
-            self._attach_hist_lead(raw)
+            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto))
         except Exception as e:
             # Don't swallow silently: a bad enrichment column would otherwise blank RFQ / Lead / flags
             # with no trace. Log it and surface it on the report note so it's diagnosable.
@@ -1181,34 +1128,12 @@ class LiveQueryService(QueryService):
         return _spec_po_exc_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}",
                                    enriched, enrich_err)
 
-    def _attach_hist_lead(self, raw):
-        """Fill HistLeadDays / HistLeadN on the exception rows from etospec.query_hist_lead, scoped to
-        the parts on OPEN, OVERDUE lines (the only rows the report keeps), in chunks of 900 ids."""
-        import datetime as _dt
-        import pandas as pd
-        if raw is None or raw.empty or "ItemID" not in raw.columns:
-            return
-        today = pd.Timestamp(_dt.date.today())
-        need = pd.to_datetime(raw["DateRevised"], errors="coerce").fillna(
-            pd.to_datetime(raw["DateRequired"], errors="coerce"))
-        ids = sorted({int(i) for i in raw.loc[need < today, "ItemID"].dropna().tolist()})
-        hl, hn = {}, {}
-        for k in range(0, len(ids), 900):
-            h = self._df(etospec.query_hist_lead(ids[k:k + 900]))
-            if h is not None and not h.empty:
-                for r in h.itertuples(index=False):
-                    hl[int(r.ItemID)] = r.HistLead
-                    hn[int(r.ItemID)] = r.HistN
-        raw["HistLeadDays"] = [hl.get(int(i)) if pd.notna(i) else None for i in raw["ItemID"]]
-        raw["HistLeadN"] = [hn.get(int(i)) if pd.notna(i) else None for i in raw["ItemID"]]
-
     def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
         pids = [int(p) for p in project_ids] if project_ids else None
         dfrom, dto = _as_date(date_from), _as_date(date_to)
         try:
-            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto, all_statuses=True,
-                                                       include_hist=False))   # no Lead Time column here
+            raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto, all_statuses=True))
         except Exception:
             raw = self._df(etospec.query_po_exceptions(False, pids, dfrom, dto, all_statuses=True))
         as_of = _dt.date.today()
@@ -2577,29 +2502,28 @@ def _spec_po_status_result(pdf, label):
 
 def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
     """items = exc_detail output — one row per OPEN, OVERDUE PO line (per-line detail)."""
-    import pandas as pd
     grouped = etospec.exc_detail_build_rows(items)
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
     rows = etospec.web_rows(etospec.COLS_EXC, grouped)
     n = 0 if items is None or items.empty else len(items)
-    val = 0.0 if not n else float(pd.to_numeric(items["Cost"], errors="coerce").fillna(0).sum()) if "Cost" in items.columns else float(items["ExtValue"].sum())
+    val = 0.0 if not n else float(items["ExtValue"].sum())
     cards = [Card("Overdue lines", "{:,}".format(n), "bad" if n else "good"),
-             Card("At-risk value (CAD)", _fmt_money2(val), "bad" if val else "good")]
+             Card("At-risk value", _fmt_money2(val), "bad" if val else "good")]
     note = ("Open purchase-order lines past their need-by date (revised else required), one row per "
-            "line, in the column layout Peter / Jason specified (8 Oct 2026). Cost = the PO line's extended "
-            "value in CAD (PO currency x the PO's exchange rate). Code = machine. RFQ Date = the part's last "
-            "RFQ on this project and machine. Drawing = the part's drawing file (engineering item master). "
-            "Release Date = the first release-log entry for the project and part. Receipt Date = last "
-            "receipt. Last Activity = latest of order date, last receipt and PO header revision (ETO keeps "
-            "no PO edit timestamp). Mfg Begins = the machine's Mfg Begin date in ETO (blank where not "
-            "entered). Lead Time = maintained lead-time days, or in italics a historical average of the "
-            "part's order-to-receipt days. Oversized / Inspected / Critical / LLT = the item master's "
-            "'Oversize Permit Required' / 'Requires Inspection' / 'Critical Path' / 'Long Lead Item' flags. "
-            "Status is derived. Purchasing Requisition # = the PO number as raised in ETO (a draft PO is the "
-            "requisition; ETO keeps the same number once the PO is issued); PO # shows only once the PO has "
-            "been sent (printed or emailed). Planned "
-            "Ship, Permit Dates, Oversized and Inspected are greyed in the specification: their rules are to "
-            "be set."
+            "line. Code = machine/spec; Category = item category; Drawing = the item's drawing file "
+            "name (from the engineering item master); RFQ Date = the item's last RFQ on this project; "
+            "Lead Time = maintained estimated lead-time days, or — shown in ITALICS — a HISTORICAL "
+            "fallback (the item's average actual order→receipt span across its PO history, bounded to "
+            "0–730 days) when the estimate is blank; an italic value is calculated from past deliveries, "
+            "not a maintained estimate; Oversized / Inspected / Critical = the item's 'Oversize Permit Required' / 'Requires "
+            "Inspection' / 'Critical Path' flags. Receipt Date "
+            "= last receipt; Release Date = when the item's BOM was released to purchasing (ETO "
+            "release log, eng date as fallback); Last Activity = latest of order date, last receipt "
+            "and header revision (a last-activity signal, not an edit audit — ETO keeps no PO edit "
+            "timestamp). Status is derived. Oversized / Inspected / Critical read blank "
+            "where the ETO item hasn't been maintained; Lead Time reads blank only when neither a "
+            "maintained estimate nor any receipt history exists for the item. Planned Ship, Days to Assembly and Permit "
+            "Dates are shown for the workbook layout but ETO holds no source for them."
             + ("" if enriched else
                " NOTE: item enrichment (Drawing / RFQ / Lead / flags) was unavailable this run"
                + (f" — {enrich_err}" if enrich_err else "") + ", so those columns are blank."))
@@ -2609,12 +2533,12 @@ def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
 
 def _spec_po_listing_result(items, label):
     """items = po_listing_detail output — one row per PO line, ALL statuses (active POs only).
-    Trimmed layout (etospec.COLS_LIST, 2026-10-10): the release → RFQ → PO → receipt flow per line."""
+    Same 19-column exception layout; the Excel export reuses the exceptions workbook writer."""
     grouped = etospec.po_listing_build_rows(items)
-    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_LIST)]
-    rows = etospec.web_rows(etospec.COLS_LIST, grouped)
+    qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
+    rows = etospec.web_rows(etospec.COLS_EXC, grouped)
     if items is None or items.empty:
-        n = draft = overdue = received = open_lines = unreleased = 0
+        n = draft = overdue = received = open_lines = 0
         val = 0.0
     else:
         st = items["Status"].astype(str)
@@ -2623,84 +2547,58 @@ def _spec_po_listing_result(items, label):
         overdue = int(st.str.startswith("Overdue").sum())
         received = int((st == "Received").sum())
         open_lines = int(st.str.startswith("Open").sum())
-        unreleased = int((items["Stage"].astype(str) == "Not released").sum()) if "Stage" in items.columns else 0
         val = float(items["ExtValue"].sum())
     cards = [Card("PO lines", "{:,}".format(n)),
              Card("Draft", "{:,}".format(draft)),
              Card("Open", "{:,}".format(open_lines)),
              Card("Overdue", "{:,}".format(overdue), "bad" if overdue else "good"),
              Card("Received", "{:,}".format(received)),
-             Card("Not released", "{:,}".format(unreleased), "warn" if unreleased else "good"),
              Card("Committed value", _fmt_money2(val))]
-    note = ("Every purchase-order line on active (not cancelled) POs, all statuses, one row per line: "
-            "Draft (raised but not yet sent: not printed and not emailed), Open (before need-by), "
-            "Overdue, partial, and Received. Actual POs only; released parts with no PO yet are on "
-            "Lines to Order. Release Stage = how engineering released the part to purchasing on this "
-            "project: Prerelease (the long-lead route), Release, both, or Not released (no release-log "
-            "entry for the project and part — bought without an engineering release). Release Date = "
-            "the first release-log entry. RFQ Date = the part's last RFQ on this project and machine. "
-            "PO Date = the date the PO was entered (ETO keeps no separate sent date). Receipt Date = "
-            "last receipt. Status is derived. Freight lines are left out.")
+    note = ("Every purchase-order line across all statuses — Draft (raised but not yet issued: not "
+            "printed AND not emailed), Open (before need-by), Overdue, partial, and Received — on "
+            "active (not cancelled) POs, one row per line, in the same per-line layout as Procurement "
+            "Exceptions. This is actual POs only: pre-PO released lines (the Lines to Order stage) are "
+            "not included, since they have no PO. Code = machine/spec; Category = item category; "
+            "Receipt Date = last receipt; Release Date = when the item's BOM was released to purchasing "
+            "(ETO release log, eng date as fallback); Last Activity = latest of order date, last "
+            "receipt and header revision (a last-activity signal, not an edit audit); Status is "
+            "derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates and Lead Time are kept "
+            "for the workbook layout but ETO holds no maintained source, so they read blank. Excel "
+            "export uses the same workbook format as the exception report.")
     return QueryResult("po_listing", "Purchasing — All Purchase Orders", qcols, rows, cards, note,
-                       {"kind": "po_listing", "items": items, "label": label})
+                       {"kind": "exceptions", "items": items, "label": label})
 
 
 def _released_toorder_rows(df, as_of):
-    """Flat, sortable detail rows — one per project + machine + part ETO lists as still to procure,
-    oldest release first, with age since release and an estimated value of the To Order quantity."""
+    """Flat, sortable detail rows — one per released-but-unordered item, oldest release first, with
+    age since release and an estimated extended cost. Grand total pinned last."""
     import pandas as pd
     if df is None or df.empty:
         return []
     d = df.copy()
-    d["_rel"] = pd.to_datetime(d["ReleaseDate"], errors="coerce") if "ReleaseDate" in d.columns else pd.NaT
+    d["_rel"] = pd.to_datetime(d["ReleaseDate"], errors="coerce")
     d = d.sort_values(["_rel", "ProjectID"], na_position="last")
-
-    def _d(v):
-        x = pd.to_datetime(v, errors="coerce")
-        return x.date().isoformat() if pd.notna(x) else ""
-
     out, tot_val, n = [], 0.0, 0
     for _, r in d.iterrows():
         rel = r["_rel"]
         reld = rel.date() if pd.notna(rel) else None
         age = (as_of - reld).days if reld else None
         qty = _num(r.get("Qty"))
-        ordered = _num(r.get("OrderedQty")) or 0.0
-        to_order = _num(r.get("ToOrder"))
-        if to_order is None and qty is not None:
-            to_order = qty - ordered
         unit = _num(r.get("UnitCost"))
-        ext = round((to_order or 0) * (unit or 0), 2) if (to_order is not None and unit is not None) else None
+        ext = round((qty or 0) * (unit or 0), 2) if (qty is not None and unit is not None) else None
         tot_val += ext or 0.0
         n += 1
-        rfq = _num(r.get("RFQNo"))
         out.append({
             "_kind": "detail",
             "ProjectID": (int(r.get("ProjectID")) if pd.notna(r.get("ProjectID")) else None),
             "JobName": r.get("JobName"),
             "Machine": (_mc_label(r.get("MachineCode")) if pd.notna(r.get("MachineCode")) else ""),
             "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
-            "Category": (r.get("Category") if isinstance(r.get("Category"), str) else ""),
-            "LastSupplier": (r.get("LastSupplier") if isinstance(r.get("LastSupplier"), str) else ""),
             "LLT": ("yes" if _num(r.get("LLTFlag")) else ""),   # PartCustom7 'Long Lead Item'
-            "Stage": (etospec.release_stage(r.get("HasPre") if pd.notna(r.get("HasPre")) else 0,
-                                            r.get("HasRel") if pd.notna(r.get("HasRel")) else 1)
-                      if reld else "Not released"),
-            "Qty": qty, "OrderedQty": ordered, "ToOrder": to_order,
-            "OnOpenPO": (_num(r.get("OnOpenPO")) or None),
-            "OnHand": (_num(r.get("OnHand")) or None),
-            "RFQNo": (int(rfq) if rfq else None), "RFQDate": _d(r.get("RFQDate")),
-            "RequiredDate": _d(r.get("RequiredDate")), "MfgBegin": _d(r.get("MfgBegin")),
-            "ReleaseDate": (reld.isoformat() if reld else ""),
+            "Qty": qty, "ReleaseDate": (reld.isoformat() if reld else ""),
             "AgeDays": age, "UnitCost": unit, "ExtValue": ext,
-            # hidden on Lines to Order; used by make_procurement_omnibus.py
-            "DrawingNo": etospec._drawing_file(r.get("DrawingRaw")) if "DrawingRaw" in r else "",
-            "Oversized": "yes" if _num(r.get("OverFlag")) else "",
-            "Inspected": "yes" if _num(r.get("InspFlag")) else "",
-            "Critical": "yes" if _num(r.get("CritFlag")) else "",
-            "LeadTime": (_num(r.get("EstLead")) or None),
         })
-    out.append({"_kind": "grand", "ItemNo": f"{n} line(s) to order",
+    out.append({"_kind": "grand", "ItemNo": f"{n} item(s) to order",
                 "ExtValue": round(tot_val, 2)})
     return out
 
@@ -2713,51 +2611,33 @@ def _released_toorder_result(df, as_of):
         QueryColumn("Machine", "Machine", "text", "left"),
         QueryColumn("ItemNo", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
-        QueryColumn("Category", "Category", "text", "left"),
         QueryColumn("LLT", "Long Lead", "text", "left"),
-        QueryColumn("Stage", "Release Stage", "text", "left"),
-        QueryColumn("ReleaseDate", "Release Date", "date", "left"),
-        QueryColumn("AgeDays", "Age (days)", "int", "right"),
-        QueryColumn("Qty", "Requested", "num", "right"),
-        QueryColumn("OrderedQty", "Procured", "num", "right"),
-        QueryColumn("ToOrder", "To Order", "num", "right"),
-        QueryColumn("OnOpenPO", "On Open PO", "num", "right"),
-        QueryColumn("OnHand", "On Hand", "num", "right"),
-        QueryColumn("RFQNo", "RFQ #", "id", "left"),
-        QueryColumn("RFQDate", "RFQ Date", "date", "left"),
-        QueryColumn("RequiredDate", "Required Date", "date", "left"),
-        QueryColumn("MfgBegin", "Mfg Begin", "date", "left"),
-        QueryColumn("LastSupplier", "Last Supplier", "text", "left", wrap=True),
+        QueryColumn("Qty", "Released Qty", "num", "right"),
         QueryColumn("UnitCost", "Est. Unit", "money2", "right"),
         QueryColumn("ExtValue", "Est. Value", "money", "right"),
+        QueryColumn("ReleaseDate", "Release Date", "date", "left"),
+        QueryColumn("AgeDays", "Age (days)", "int", "right"),
     ]
+    empty = df is None or df.empty
+    items = 0 if empty else int(len(df))
     rows = _released_toorder_rows(df, as_of)
-    det = [r for r in rows if r.get("_kind") == "detail"]
-    items = len(det)
-    val = sum((_num(r.get("ExtValue")) or 0) for r in det)
-    priced = sum(1 for r in det if _num(r.get("ExtValue")) is not None)
-    ages = [r.get("AgeDays") for r in det if r.get("AgeDays") is not None]
+    val = sum((_num(r.get("ExtValue")) or 0) for r in rows if r.get("_kind") == "detail")
+    priced = sum(1 for r in rows if r.get("_kind") == "detail" and _num(r.get("ExtValue")) is not None)
+    ages = [r.get("AgeDays") for r in rows if r.get("_kind") == "detail" and r.get("AgeDays") is not None]
     oldest = max(ages) if ages else 0
-    partial = sum(1 for r in det if (r.get("OrderedQty") or 0) > 0)
-    rfq = sum(1 for r in det if r.get("RFQNo"))
-    llt = sum(1 for r in det if r.get("LLT"))
-    cards = [Card("Lines to order", "{:,}".format(items)),
-             Card("Partly procured", "{:,}".format(partial), "warn" if partial else "good"),
-             Card("With an RFQ", "{:,}".format(rfq)),
-             Card("Long lead", "{:,}".format(llt), "warn" if llt else "neutral"),
+    cards = [Card("Items to order", "{:,}".format(items)),
              Card("Est. value", _fmt_money2(val)),
              Card("Oldest release", f"{oldest:,} days", "warn" if oldest > 30 else "neutral")]
     unpriced = items - priced
-    note = ("ETO's own Items to Procure list (the same figures as ETO's Purchasing grid), for the selected "
-            f"{proj.lower()}s, lines ETO marks Procure. Requested = quantity ETO says purchasing must supply; "
-            "Procured = quantity already assigned (on POs or from stock); To Order = Requested minus "
-            "Procured. On Open PO and On Hand are ETO's figures for the part. RFQ # / RFQ Date = the part's "
-            "last RFQ. Required Date and Mfg Begin are ETO's dates where entered. Release Stage / Release "
-            "Date come from the release log (Not released = no release-log entry, e.g. a non-BOM request). "
-            "Est. Unit / Est. Value use the median historical PO price for the part (last cost as fallback) "
-            "on the To Order quantity — planning figures, not quotes."
-            + (f" {unpriced:,} of {items:,} line(s) have no price on record, so Est. value is a lower "
-               "bound." if unpriced else ""))
+    note = (f"Released lines that have YET to be raised as a requisition — items engineering has "
+            f"RELEASED in the BOM (ETO release log) with no requisition or PO raised yet on the "
+            f"selected {proj.lower()}s. The earliest stage of the procurement pipeline, oldest release "
+            "first. Released Qty is the net released quantity; Est. Unit / Est. Value are an estimate "
+            "from the MEDIAN historical PO price for the item (item last/list cost as fallback), so "
+            "treat them as planning figures, not quotes. Anything already raised (a requisition/PO for "
+            f"the {proj.lower()}), or since removed from the current BOM, is excluded."
+            + (f" Note: {unpriced:,} of {items:,} item(s) have no price on record yet, so Est. value "
+               "is a lower bound." if unpriced else ""))
     return QueryResult("released_toorder", "Purchasing — Lines to Order", cols, rows, cards, note)
 
 
@@ -2927,9 +2807,6 @@ def _po_to_order_rows(df):
                     "_kind": "detail",
                     "Item": r.get("Item"), "Description": r.get("Description"),   # part number (string), not an int ItemID
                     "LLT": ("yes" if _num(r.get("LLTFlag")) else ""),   # PartCustom7 'Long Lead Item'
-                    "Stage": etospec.release_stage(r.get("HasPre"), r.get("HasRel") if "HasRel" in r else 1),
-                    "ReleaseDate": (str(r.get("ReleaseDate"))[:10] if r.get("ReleaseDate") not in (None, "")
-                                    and str(r.get("ReleaseDate")) not in ("NaT", "nan", "None") else None),
                     "PO": _int(r.get("PO")), "Supplier": r.get("Supplier"),
                     "Buyer": r.get("Buyer"), "Curr": r.get("Curr"),
                     "Qty": _num(r.get("Qty")), "Price": _num(r.get("Price")),
@@ -2953,8 +2830,6 @@ def _po_to_order_result(df, window_label=""):
         QueryColumn("Item", "Item", "id", "left"),
         QueryColumn("Description", "Description", "text", "left", wrap=True),
         QueryColumn("LLT", "Long Lead", "text", "left"),
-        QueryColumn("Stage", "Release Stage", "text", "left"),
-        QueryColumn("ReleaseDate", "Release Date", "date", "left"),
         QueryColumn("PO", "Req #", "id", "left"),
         QueryColumn("Supplier", "Supplier", "text", "left", wrap=True),
         QueryColumn("Buyer", "Buyer", "text", "left"),
@@ -2977,9 +2852,7 @@ def _po_to_order_result(df, window_label=""):
             "requisition has not been printed or emailed, so no order has been placed. Grouped by "
             f"{proj.lower()} then machine/spec (ETO SpecID). Ext. Value is in Canadian dollars; "
             "Age is days since the requisition was raised — a large age flags one to review or "
-            "cancel. (In ETO these are unsent draft purchase orders; Req # is the draft PO number.) "
-            "Release Stage / Release Date = how and when engineering released the part on this "
-            f"{proj.lower()}; Not released = no release-log entry for the {proj.lower()} and part."
+            "cancel. (In ETO these are unsent draft purchase orders; Req # is the draft PO number.)"
             + (window_label or ""))
     return QueryResult("po_to_order", "Purchasing — Purchase Requisitions", cols,
                        _po_to_order_rows(df), cards, note)
@@ -3286,9 +3159,7 @@ def _bom_readiness_result(blocks):
             "this item per its parent assembly; Total Required = qty needed across the whole machine; "
             "Available (in stock) = on-hand inventory the proc can allocate (TotalAvailable = Received "
             "minus Pulled — i.e. what's physically in stores, not on order); On Order = qty already on "
-            "purchase orders (PurchaseQty); To Procure = ETO's 'To Be Proc' figure (OutstandingQty) = "
-            "required minus in stock — it does NOT subtract quantity already on order, so a part on an "
-            "open PO still shows here until it is received (verified 2026-10-09; "
+            "purchase orders (PurchaseQty); To Procure = qty still to be procured (OutstandingQty; "
             "negative = over-supplied, matching the PDF's parenthesised figures). The vendor's binary "
             "\"% Available\" is split into two: Ready = the Absolute readiness flag (✓ when this line is "
             "fully covered — the report's all-or-nothing 100%/0% measure); Fill % = the gradient that "
@@ -4574,9 +4445,6 @@ class DemoQueryService(QueryService):
         sel = set(self._sel(project_ids))
         raw = pd.DataFrame([r for r in _DEMO_EXC_RAW if r["ProjectID"] in sel],
                            columns=_DEMO_EXC_COLS)
-        if not raw.empty:                       # demo: a release date stands in for a Release entry
-            raw["HasRel"] = raw["EngReleaseDate"].notna().astype(int)
-            raw["ExtValueCAD"] = raw["ExtValue"]     # demo POs are CAD
         items = etospec.exc_detail(raw, today=_dt.date(2026, 7, 22))
         return _spec_po_exc_result(items, "As at Jul 22, 2026 (demo)", True)
 
@@ -4589,8 +4457,6 @@ class DemoQueryService(QueryService):
             raw["PurchasePrinted"] = 1
             raw["PurchaseEmailed"] = 0
             raw.loc[raw["PO"].astype(str).isin({"48505"}), ["PurchasePrinted", "PurchaseEmailed"]] = 0
-            raw["HasRel"] = raw["EngReleaseDate"].notna().astype(int)
-            raw["ExtValueCAD"] = raw["ExtValue"]     # demo POs are CAD
         items = etospec.po_listing_detail(raw, today=_dt.date(2026, 7, 22))
         return _spec_po_listing_result(items, "As at Jul 22, 2026 (demo)")
 
