@@ -746,6 +746,8 @@ COLS_EXC = [   # Peter's layout, in his order ("Sextant_po_exceptions_20260912_C
     ("JobName",        "Project",                  20, "L", False),
     ("Code",           "Code",                      7, "C", False),   # machine / spec
     ("Item",           "Item",                     11, "L", False),
+    ("Manufacturer",   "Manufacturer",             18, "L", False),   # tblEngItemMaster.Manufacturer
+    ("MfgPartNo",      "Mfg Part #",               16, "L", False),   # tblEngItemMaster.ManufacturerPartNumber
     ("Description",    "Description",              28, "L", False),
     ("Category",       "Category",                 16, "L", False),
     ("DrawingNo",      "Drawing",                  16, "L", False),
@@ -912,6 +914,8 @@ def exc_detail(df, today=None):
             "Code": _spec_code(r.get("Code")),
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
+            "Manufacturer": ("" if _blank(r.get("Manufacturer")) else str(r.get("Manufacturer")).strip()),
+            "MfgPartNo": ("" if _blank(r.get("MfgPartNo")) else str(r.get("MfgPartNo")).strip()),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
@@ -1111,6 +1115,8 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     crit_sel = f"eim.[{_CRITICAL_COL}]" if include_leadtime else "CAST(NULL AS bit)"
     insp_sel = f"eim.[{_INSPECTED_COL}]" if include_leadtime else "CAST(NULL AS bit)"
     draw_sel = "eim.Drawing" if include_leadtime else "CAST(NULL AS nvarchar(400))"
+    mfr_sel = "eim.Manufacturer" if include_leadtime else "CAST(NULL AS nvarchar(255))"
+    mpn_sel = "eim.ManufacturerPartNumber" if include_leadtime else "CAST(NULL AS nvarchar(100))"
     proj = ""
     ids = ""
     if project_ids:
@@ -1178,6 +1184,8 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         {crit_sel}                      AS CritFlag,
         {insp_sel}                      AS InspFlag,
         {draw_sel}                      AS DrawingRaw,
+        {mfr_sel}                       AS Manufacturer,
+        {mpn_sel}                       AS MfgPartNo,
         {rfq_sel}                       AS RFQDate,
         COALESCE(CAST(bomrel.BOMReleaseDate AS date), {rel_sel}) AS EngReleaseDate,
         bomrel.HasPre                   AS HasPre,       -- release-log entry types for project + part
@@ -1267,6 +1275,8 @@ def po_listing_detail(df, today=None):
             "Code": _spec_code(r.get("Code")),
             "Item": ("" if _blank(r.get("Item")) else str(r.get("Item"))),
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
+            "Manufacturer": ("" if _blank(r.get("Manufacturer")) else str(r.get("Manufacturer")).strip()),
+            "MfgPartNo": ("" if _blank(r.get("MfgPartNo")) else str(r.get("MfgPartNo")).strip()),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
@@ -1300,14 +1310,14 @@ def po_listing_detail(df, today=None):
 
 
 def po_listing_build_rows(items):
-    """(cells, kind) rows for the all-status PO listing (COLS_LIST) — sorted buyer, then most-overdue first."""
+    """(cells, kind) rows for the all-status PO listing (COLS_EXC, full per-line layout) — sorted buyer, then most-overdue first."""
     if items is None or items.empty:
-        return [(["No purchase-order lines for the selection."] + [""] * (len(COLS_LIST) - 1), "grand")]
+        return [(["No purchase-order lines for the selection."] + [""] * (len(COLS_EXC) - 1), "grand")]
     it = items.sort_values(["Buyer", "DaysLate"], ascending=[True, False])
-    rows = [([r[c[0]] for c in COLS_LIST], "detail") for _, r in it.iterrows()]
-    tot = [""] * len(COLS_LIST)
+    rows = [([r[c[0]] for c in COLS_EXC], "detail") for _, r in it.iterrows()]
+    tot = [""] * len(COLS_EXC)
     tot[0] = "GRAND TOTAL"
-    tot[_LIST_ITEM_IDX] = f"{len(it)} line(s)"
+    tot[_EXC_ITEM_IDX] = f"{len(it)} line(s)"
     rows.append((tot, "grand"))
     return rows
 
@@ -1320,10 +1330,10 @@ def po_listing_book_bytes(items, label):
     ws = wb.create_sheet("All Purchase Orders")
     _populate_sheet(ws, "All Purchase Orders",
                     "Every PO line, all statuses — release, RFQ, PO and receipt dates per line",
-                    COLS_LIST, rows, label)
+                    COLS_EXC, rows, label)
     last_data = 3 + (len(items) if items is not None and not items.empty else 0)
     if last_data >= 4:
-        ws.auto_filter.ref = f"A3:{get_column_letter(len(COLS_LIST))}{last_data}"
+        ws.auto_filter.ref = f"A3:{get_column_letter(len(COLS_EXC))}{last_data}"
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
