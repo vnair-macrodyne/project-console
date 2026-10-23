@@ -186,31 +186,16 @@ def catalogue():
                  "booked ÷ available. Portfolio-wide (the whole workforce), independent of the "
                  "project selection.",
          "needs_projects": False},
-        # ── Purchasing (procurement pipeline: released → requisitioned → ordered, + consolidated) ──
-        # Pipeline stages oldest→newest, then the consolidated all-PO view last (po_listing =
-        # "All Purchase Orders", re-added 2026-09-28). The remaining PO reports (PO Report / Status /
-        # Overdue POs / Late Vendors / By Buyer) stay removed from the menu per Vijay; their _q_*
-        # handlers remain (reachable by id) but are no longer listed.
-        {"id": "released_toorder", "menu": "Purchasing", "label": "Lines to Order",
-         "desc": f"Released lines that have YET to be raised as a requisition — items engineering has "
-                 f"RELEASED (from the BOM release log) with no requisition/PO raised yet on the "
-                 f"{proj.lower()}. One row per item with the release date, age since release, released "
-                 "qty and an estimated cost (historical PO price). Oldest release first.",
-         "needs_projects": True},
-        {"id": "po_to_order", "menu": "Purchasing", "label": "Purchase Requisitions",
-         "desc": f"Purchase requisitions in procurement with no PO issued yet — lines raised in ETO "
-                 f"but not yet sent to the vendor (not printed or emailed), grouped by {proj.lower()} "
-                 "and machine, with the age of each. The raised-but-not-ordered backlog.",
-         "needs_projects": True},
-        {"id": "po_exceptions", "menu": "Purchasing", "label": "PO Exceptions",
-         "desc": "Open purchase-order lines that are past their need-by date, one row per item, "
-                 "grouped by buyer. A forward-looking, at-risk view.",
-         "needs_projects": True},
-        {"id": "po_listing", "menu": "Purchasing", "label": "All Purchase Orders",
-         "desc": "Every purchase-order line across all statuses — Draft (raised, not yet issued), "
-                 "Open, Overdue, partial and Received — on active (non-cancelled) POs, one row per "
-                 "line, in the same full field layout as PO Exceptions. The consolidated PO view "
-                 "(actual POs only; pre-PO released lines are not included).",
+        # ── Purchasing ──────────────────────────────────────────────────────────
+        # One report: the Purchasing Exception Report (po_listing), scoped to the active-projects list
+        # (Reporting.tblActiveProject). Lines to Order / Purchase Requisitions / PO Exceptions were
+        # removed from the menu per Peter (2026-10-16); their _q_* handlers remain (reachable by id,
+        # reversible), as do the older PO reports (PO Report / Status / Overdue POs / Late Vendors / By Buyer).
+        {"id": "po_listing", "menu": "Purchasing", "label": "Purchasing Exception Report",
+         "desc": "Every purchase-order line across all statuses — Draft, Open, Overdue, partial and "
+                 "Received — on active POs for the ACTIVE projects (the open-projects list), one row per "
+                 "line, following the flow: release stage and date, RFQ date, PO date, planned / revised "
+                 "/ actual receipt. Jason's prioritisation view.",
          "needs_projects": True},
         # ── Project Management ─────────────────────────────────────────────────
         {"id": "bom_readiness", "menu": "Project Management", "label": "BOM Readiness",
@@ -563,6 +548,17 @@ class LiveQueryService(QueryService):
         except Exception:
             return set()
 
+    def _active_ids(self):
+        """Active / open projects (Reporting.tblActiveProject, sql/020) — the open-projects list from
+        the Exec Dashboard, refreshed by console_seed_active_project.py. Guarded: an empty set if the
+        table/migration isn't present, so the console behaves as before until it's seeded."""
+        try:
+            cur = self._console_conn().cursor()
+            cur.execute("SELECT ProjectID FROM Reporting.tblActiveProject")
+            return {int(r[0]) for r in cur.fetchall()}
+        except Exception:
+            return set()
+
     def list_projects(self):
         conn = self._console_conn()
         cur = conn.cursor()
@@ -570,11 +566,14 @@ class LiveQueryService(QueryService):
                     "ORDER BY ProjectID")
         excl = self._excluded_ids()
         ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
+        active = self._active_ids()          # the open-projects list IS the console's project list
+        if active:                           # seeded -> console-wide shows ONLY active (open) projects
+            ids = [p for p in ids if p in active]
         ov = self._overlay_map()
         out = []
         for pid in ids:
             rec = ov.get(str(pid), {})
-            out.append({"id": pid, "label": str(pid),
+            out.append({"id": pid, "label": str(pid), "active": True,
                         "ship": _iso(rec.get("CustAgreedDate") or rec.get("POShipDate"))})
         return out
 
@@ -1130,8 +1129,13 @@ class LiveQueryService(QueryService):
 
     def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
-        pids = [int(p) for p in project_ids] if project_ids else None
         dfrom, dto = _as_date(date_from), _as_date(date_to)
+        pids = [int(p) for p in project_ids] if project_ids else None
+        active = self._active_ids()          # Purchasing Exception Report = ACTIVE projects only
+        if active:
+            pids = [p for p in pids if p in active] if pids else sorted(active)
+            if not pids:                     # selection has no active projects -> nothing to show
+                return _spec_po_listing_result(None, f"As at {_dt.date.today():%b %d, %Y}{_po_window_label(dfrom, dto)}")
         try:
             raw = self._df(etospec.query_po_exceptions(True, pids, dfrom, dto, all_statuses=True))
         except Exception:
@@ -2565,7 +2569,7 @@ def _spec_po_listing_result(items, label):
             "derived. Planned Ship, Days to Assembly, RFQ Date, Permit Dates and Lead Time are kept "
             "for the workbook layout but ETO holds no maintained source, so they read blank. Excel "
             "export uses the same workbook format as the exception report.")
-    return QueryResult("po_listing", "Purchasing — All Purchase Orders", qcols, rows, cards, note,
+    return QueryResult("po_listing", "Purchasing — Purchasing Exception Report", qcols, rows, cards, note,
                        {"kind": "exceptions", "items": items, "label": label})
 
 
@@ -4178,7 +4182,7 @@ _PROC_KEYS = ["TotalLineItems", "LLTPOrdered", "LLTPRelLate", "LLTPOrdLate",
 
 class DemoQueryService(QueryService):
     def list_projects(self):
-        return [{"id": pid, "label": str(pid), "ship": d["ship"]}
+        return [{"id": pid, "label": str(pid), "active": True, "ship": d["ship"]}
                 for pid, d in sorted(_DEMO.items())]
 
     def _demo_exec_rows(self, project_ids):

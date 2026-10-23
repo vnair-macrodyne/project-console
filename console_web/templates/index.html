@@ -287,7 +287,8 @@ async function boot(){
   };
 
   state.projects = await (await fetch('/api/projects')).json();
-  state.selProjects = new Set(state.projects.map(p=>p.id));   // default: all projects
+  const _act = state.projects.filter(p=>p.active);             // active = the open-projects list (tblActiveProject)
+  state.selProjects = new Set((_act.length?_act:state.projects).map(p=>p.id));  // default: active projects (all, if none flagged)
   renderProjects();
 
   state.selQuery = state.queries[0].id;                        // default: Executive
