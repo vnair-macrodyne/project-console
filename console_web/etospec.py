@@ -1031,6 +1031,12 @@ def query_released_to_order(project_ids=None):
         GROUP BY ProjectID, CAST(SpecID AS float), ItemID
         HAVING SUM(CAST(QuantityChange AS float)) > 0
     ),
+    relwho AS (   -- releaser of the FIRST release per project+machine+part (matches ReleaseDate = MIN)
+        SELECT ProjectID, CAST(SpecID AS float) AS SpecID, ItemID, ReleasedByEmployeeID,
+               ROW_NUMBER() OVER (PARTITION BY ProjectID, CAST(SpecID AS float), ItemID
+                   ORDER BY ReleasedDateTime ASC, BOMReleaseHistoryID ASC) AS rn
+        FROM dbo.tblBOMReleaseHistory{scope}
+    ),
     itm AS (      -- item identity + cost, keyed by ItemID across ANY project's BOM
         SELECT ItemID, MAX(ItemCompanyID) AS ItemNo, MAX(ItemDescription) AS Description,
                MAX(CAST(ItemLastCost AS float)) AS LastCost,
@@ -1071,6 +1077,7 @@ def query_released_to_order(project_ids=None):
            CAST(ISNULL(stock.OnHand, 0) AS decimal(18,2)) AS OnHand,
            rel.HasPre AS HasPre, rel.HasRel AS HasRel,
            COALESCE(CAST(rel.ReleaseDate AS date), mast.EngDate) AS ReleaseDate,
+           remp.EmpLastName + ', ' + remp.EmpFirstName AS ReleasedBy,
            mast.LLTFlag AS LLTFlag,
            sup.CName AS LastSupplier,
            COALESCE(NULLIF(itm.LastCost, 0), NULLIF(itm.ListCost, 0)) AS UnitCostFallback
@@ -1082,6 +1089,8 @@ def query_released_to_order(project_ids=None):
     LEFT JOIN stock ON stock.ItemID = rel.ItemID
     LEFT JOIN itm  ON itm.ItemID = rel.ItemID
     LEFT JOIN mast ON mast.ItemID = rel.ItemID
+    LEFT JOIN relwho rw ON rw.ProjectID = rel.ProjectID AND rw.SpecID = rel.SpecID AND rw.ItemID = rel.ItemID AND rw.rn = 1
+    LEFT JOIN tblEmployee remp ON remp.EmployeeID = rw.ReleasedByEmployeeID
     LEFT JOIN tblCompany sup ON sup.CompanyID = mast.LastSupplierID
     LEFT JOIN tblProjects p ON p.ProjectID = rel.ProjectID
     WHERE fa.ItemID IS NULL

@@ -2600,6 +2600,7 @@ def _released_toorder_rows(df, as_of):
             "ItemNo": r.get("ItemNo"), "Description": r.get("Description"),
             "LLT": ("yes" if _num(r.get("LLTFlag")) else ""),   # PartCustom7 'Long Lead Item'
             "Qty": qty, "ReleaseDate": (reld.isoformat() if reld else ""),
+            "ReleasedBy": (r.get("ReleasedBy") if pd.notna(r.get("ReleasedBy")) else ""),
             "AgeDays": age, "UnitCost": unit, "ExtValue": ext,
         })
     out.append({"_kind": "grand", "ItemNo": f"{n} item(s) to order",
@@ -2620,6 +2621,7 @@ def _released_toorder_result(df, as_of):
         QueryColumn("UnitCost", "Est. Unit", "money2", "right"),
         QueryColumn("ExtValue", "Est. Value", "money", "right"),
         QueryColumn("ReleaseDate", "Release Date", "date", "left"),
+        QueryColumn("ReleasedBy", "Released by", "text", "left"),
         QueryColumn("AgeDays", "Age (days)", "int", "right"),
     ]
     empty = df is None or df.empty
@@ -4760,20 +4762,20 @@ _DEMO_PO_STATUS = [
 
 # Released — To Order — _q_released_toorder output shape (released, no PO yet)
 _DEMO_RELTOORDER_COLS = ["ProjectID", "JobName", "MachineCode", "ItemNo", "ItemID", "Description",
-                         "Qty", "ReleaseDate", "UnitCost", "LLTFlag"]
+                         "Qty", "ReleaseDate", "UnitCost", "LLTFlag", "ReleasedBy"]
 _DEMO_RELTOORDER = [
     {"ProjectID": 230219, "JobName": _D19[0], "MachineCode": 10.0, "ItemNo": "8094M0.0.0.0-01",
      "ItemID": 22160, "Description": "Machined tie rod, upper platen", "Qty": 8,
-     "ReleaseDate": "2026-05-12", "UnitCost": 412.50, "LLTFlag": 1},
+     "ReleaseDate": "2026-05-12", "UnitCost": 412.50, "LLTFlag": 1, "ReleasedBy": "Tam, SzeWai"},
     {"ProjectID": 230219, "JobName": _D19[0], "MachineCode": 10.0, "ItemNo": "E07165",
      "ItemID": 19191, "Description": "Proximity sensor, inductive M18", "Qty": 24,
-     "ReleaseDate": "2026-06-30", "UnitCost": 58.90},
+     "ReleaseDate": "2026-06-30", "UnitCost": 58.90, "ReleasedBy": "Rozik, Greg"},
     {"ProjectID": 230312, "JobName": _D12[0], "MachineCode": 20.0, "ItemNo": "8156M0.0.0.0-01",
      "ItemID": 22353, "Description": "Guide bushing, hardened", "Qty": 12,
-     "ReleaseDate": "2026-07-15", "UnitCost": 133.00},
+     "ReleaseDate": "2026-07-15", "UnitCost": 133.00, "ReleasedBy": "Ferns, Rob"},
     {"ProjectID": 240087, "JobName": _D87[0], "MachineCode": 30.0, "ItemNo": "E02206",
      "ItemID": 15651, "Description": "Mushroom head pushbutton, red", "Qty": 6,
-     "ReleaseDate": "2026-07-20", "UnitCost": 18.99},
+     "ReleaseDate": "2026-07-20", "UnitCost": 18.99, "ReleasedBy": "Redel, Tom"},
 ]
 
 # Lines to Order — _q_po_to_order output shape (draft POs: not printed, not emailed)
