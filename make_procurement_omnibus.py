@@ -57,6 +57,30 @@ def po_order_dates(pids):
     return m
 
 
+def released_by(pids):
+    """{(ProjectID str, part number): latest releaser 'Last, First'} — who most recently released
+    the part to purchasing, from tblBOMReleaseHistory.ReleasedByEmployeeID -> tblEmployee."""
+    from console.infra.connections import eto_connection
+    ids = ",".join(str(int(p)) for p in pids)
+    c = eto_connection(); cur = c.cursor()
+    cur.execute(f"""
+        WITH rw AS (
+          SELECT h.ProjectID, h.ItemID, h.ReleasedByEmployeeID,
+                 ROW_NUMBER() OVER (PARTITION BY h.ProjectID, h.ItemID
+                     ORDER BY h.ReleasedDateTime DESC, h.BOMReleaseHistoryID DESC) AS rn
+          FROM dbo.tblBOMReleaseHistory h WHERE h.ProjectID IN ({ids})
+        )
+        SELECT rw.ProjectID, eim.ItemCompanyID,
+               e.EmpLastName + ', ' + e.EmpFirstName AS ReleasedBy
+        FROM rw
+        JOIN dbo.tblEngItemMaster eim ON eim.ItemID = rw.ItemID
+        JOIN dbo.tblEmployee e ON e.EmployeeID = rw.ReleasedByEmployeeID
+        WHERE rw.rn = 1""")
+    m = {(str(r[0]), r[1]): r[2] for r in cur.fetchall()}
+    c.close()
+    return m
+
+
 def num(v):
     try:
         f = float(v)
@@ -65,7 +89,7 @@ def num(v):
         return None
 
 
-def omnibus_rows(lto, items, cols_exc, podates):
+def omnibus_rows(lto, items, cols_exc, podates, relby):
     import pandas as pd
     out = []
     for r in lto.rows:
@@ -84,6 +108,7 @@ def omnibus_rows(lto, items, cols_exc, podates):
             "LastUpdated": "", "MfgBegin": r.get("MfgBegin") or "", "PermitDates": "",
             "LeadTime": num(r.get("LeadTime")), "Oversized": r.get("Oversized") or "",
             "Inspected": r.get("Inspected") or "", "Critical": r.get("Critical") or "", "LLT": r.get("LLT") or "",
+            "ReleasedBy": relby.get((str(r.get("ProjectID")), r.get("ItemNo")), ""),
         })
     if items is not None and not items.empty:
         for _, r in items.iterrows():
@@ -94,6 +119,7 @@ def omnibus_rows(lto, items, cols_exc, podates):
                 v = r.get(k)
                 row[k] = None if (isinstance(v, float) and pd.isna(v)) else v
             row["OrderDate"] = podates.get(str(r.get("PO")), "")   # PO header PurchaseDate, by PO number
+            row["ReleasedBy"] = relby.get((str(row.get("ProjectID")), row.get("Item")), "")
             if stage == "Requisition (draft PO)":
                 row["PO"] = ""          # a draft is a requisition: its number shows under Purchasing Requisition #
             out.append(row)
@@ -155,9 +181,11 @@ def main():
     lst = svc.run("po_listing", pids)
     items = (lst.export or {}).get("items")
     podates = po_order_dates(pids)
-    omni = omnibus_rows(lto, items, etospec.COLS_EXC, podates)
+    relby = released_by(pids)
+    omni = omnibus_rows(lto, items, etospec.COLS_EXC, podates, relby)
     omni_cols = [("Stage", "Stage", "text", "left"), ("OrderDate", "Order Date", "date", "left")] + \
-        [(k, l, t, a) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
+        [(k, l, t, a) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)] + \
+        [("ReleasedBy", "Released by", "text", "left")]
     det = lambda res: sum(1 for x in res.rows if x.get("_kind") == "detail")
     counts = {s: sum(1 for x in omni if x["Stage"] == s) for s in STAGES}
     overdue = sum(1 for x in omni if str(x.get("Status") or "").startswith("Overdue"))
@@ -187,6 +215,7 @@ def main():
             ("Order Date", "The PO header PurchaseDate — when the PO was placed (for a draft, the date it was raised in ETO). Blank on 'To procure' lines (no PO yet)."),
             ("Cost", "PO line total in CAD. Blank until a PO exists."),
             ("Release Date", "First release-log entry for the project and part; blank for parts bought through a Non-BOM request."),
+            ("Released by", "Who most recently released the part to purchasing (latest BOM release-log entry)."),
             ("Mfg Begins", "The machine's Mfg Begin date in ETO, where entered."),
             ("Lead Time", "ETO estimated lead time in days; on overdue PO lines, the part's average historical order-to-receipt days where no estimate exists."),
             ("Planned Ship, Permit Dates", "Blank: rules to be set."),
