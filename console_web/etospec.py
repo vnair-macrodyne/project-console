@@ -1031,10 +1031,10 @@ def query_released_to_order(project_ids=None):
         GROUP BY ProjectID, CAST(SpecID AS float), ItemID
         HAVING SUM(CAST(QuantityChange AS float)) > 0
     ),
-    relwho AS (   -- releaser of the FIRST release per project+machine+part (matches ReleaseDate = MIN)
+    relwho AS (   -- releaser of the LATEST release per project+machine+part (most recent to touch it)
         SELECT ProjectID, CAST(SpecID AS float) AS SpecID, ItemID, ReleasedByEmployeeID,
                ROW_NUMBER() OVER (PARTITION BY ProjectID, CAST(SpecID AS float), ItemID
-                   ORDER BY ReleasedDateTime ASC, BOMReleaseHistoryID ASC) AS rn
+                   ORDER BY ReleasedDateTime DESC, BOMReleaseHistoryID DESC) AS rn
         FROM dbo.tblBOMReleaseHistory{scope}
     ),
     itm AS (      -- item identity + cost, keyed by ItemID across ANY project's BOM
