@@ -58,8 +58,8 @@ def po_order_dates(pids):
 
 
 def released_by(pids):
-    """{(ProjectID str, part number): latest releaser 'Last, First'} — who most recently released
-    the part to purchasing, from tblBOMReleaseHistory.ReleasedByEmployeeID -> tblEmployee."""
+    """{(ProjectID str, part number): (latest releaser 'Last, First', # release events)} — who most
+    recently released the part and how many times (tblBOMReleaseHistory -> tblEmployee)."""
     from console.infra.connections import eto_connection
     ids = ",".join(str(int(p)) for p in pids)
     c = eto_connection(); cur = c.cursor()
@@ -67,16 +67,17 @@ def released_by(pids):
         WITH rw AS (
           SELECT h.ProjectID, h.ItemID, h.ReleasedByEmployeeID,
                  ROW_NUMBER() OVER (PARTITION BY h.ProjectID, h.ItemID
-                     ORDER BY h.ReleasedDateTime DESC, h.BOMReleaseHistoryID DESC) AS rn
+                     ORDER BY h.ReleasedDateTime DESC, h.BOMReleaseHistoryID DESC) AS rn,
+                 COUNT(*) OVER (PARTITION BY h.ProjectID, h.ItemID) AS RelCount
           FROM dbo.tblBOMReleaseHistory h WHERE h.ProjectID IN ({ids})
         )
         SELECT rw.ProjectID, eim.ItemCompanyID,
-               e.EmpLastName + ', ' + e.EmpFirstName AS ReleasedBy
+               e.EmpLastName + ', ' + e.EmpFirstName AS ReleasedBy, rw.RelCount
         FROM rw
         JOIN dbo.tblEngItemMaster eim ON eim.ItemID = rw.ItemID
         JOIN dbo.tblEmployee e ON e.EmployeeID = rw.ReleasedByEmployeeID
         WHERE rw.rn = 1""")
-    m = {(str(r[0]), r[1]): r[2] for r in cur.fetchall()}
+    m = {(str(r[0]), r[1]): (r[2], r[3]) for r in cur.fetchall()}
     c.close()
     return m
 
@@ -108,7 +109,8 @@ def omnibus_rows(lto, items, cols_exc, podates, relby):
             "LastUpdated": "", "MfgBegin": r.get("MfgBegin") or "", "PermitDates": "",
             "LeadTime": num(r.get("LeadTime")), "Oversized": r.get("Oversized") or "",
             "Inspected": r.get("Inspected") or "", "Critical": r.get("Critical") or "", "LLT": r.get("LLT") or "",
-            "ReleasedBy": relby.get((str(r.get("ProjectID")), r.get("ItemNo")), ""),
+            "ReleasedBy": relby.get((str(r.get("ProjectID")), r.get("ItemNo")), ("", None))[0],
+            "RelCount": relby.get((str(r.get("ProjectID")), r.get("ItemNo")), ("", None))[1],
         })
     if items is not None and not items.empty:
         for _, r in items.iterrows():
@@ -119,7 +121,8 @@ def omnibus_rows(lto, items, cols_exc, podates, relby):
                 v = r.get(k)
                 row[k] = None if (isinstance(v, float) and pd.isna(v)) else v
             row["OrderDate"] = podates.get(str(r.get("PO")), "")   # PO header PurchaseDate, by PO number
-            row["ReleasedBy"] = relby.get((str(row.get("ProjectID")), row.get("Item")), "")
+            rb = relby.get((str(row.get("ProjectID")), row.get("Item")), ("", None))
+            row["ReleasedBy"] = rb[0]; row["RelCount"] = rb[1]
             if stage == "Requisition (draft PO)":
                 row["PO"] = ""          # a draft is a requisition: its number shows under Purchasing Requisition #
             out.append(row)
@@ -185,7 +188,7 @@ def main():
     omni = omnibus_rows(lto, items, etospec.COLS_EXC, podates, relby)
     omni_cols = [("Stage", "Stage", "text", "left"), ("OrderDate", "Order Date", "date", "left")] + \
         [(k, l, t, a) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)] + \
-        [("ReleasedBy", "Released by", "text", "left")]
+        [("ReleasedBy", "Released by", "text", "left"), ("RelCount", "# Releases", "int", "right")]
     det = lambda res: sum(1 for x in res.rows if x.get("_kind") == "detail")
     counts = {s: sum(1 for x in omni if x["Stage"] == s) for s in STAGES}
     overdue = sum(1 for x in omni if str(x.get("Status") or "").startswith("Overdue"))
@@ -216,6 +219,7 @@ def main():
             ("Cost", "PO line total in CAD. Blank until a PO exists."),
             ("Release Date", "First release-log entry for the project and part; blank for parts bought through a Non-BOM request."),
             ("Released by", "Who most recently released the part to purchasing (latest BOM release-log entry)."),
+            ("# Releases", "How many times the part has been released on the project (BOM release-log events)."),
             ("Mfg Begins", "The machine's Mfg Begin date in ETO, where entered."),
             ("Lead Time", "ETO estimated lead time in days; on overdue PO lines, the part's average historical order-to-receipt days where no estimate exists."),
             ("Planned Ship, Permit Dates", "Blank: rules to be set."),

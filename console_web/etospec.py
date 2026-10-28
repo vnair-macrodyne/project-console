@@ -752,6 +752,8 @@ COLS_EXC = [   # Peter's layout, in his order ("Sextant_po_exceptions_20260912_C
     ("Category",       "Category",                 16, "L", False),
     ("DrawingNo",      "Drawing",                  16, "L", False),
     ("EngRelease",     "Release Date",             11, "C", False),
+    ("ReleasedBy",     "Released by",              18, "L", False),   # latest releaser (tblBOMReleaseHistory -> tblEmployee)
+    ("RelCount",       "# Releases",                9, "R", True),    # times the part was released on the project
     ("PlannedShip",    "Planned Ship",             11, "C", False),   # greyed by Peter: rule to come
     ("PlannedReceipt", "Planned Receipt",          12, "C", False),
     ("RevisedReceipt", "Revised Receipt",          12, "C", False),
@@ -916,6 +918,8 @@ def exc_detail(df, today=None):
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
             "Manufacturer": ("" if _blank(r.get("Manufacturer")) else str(r.get("Manufacturer")).strip()),
             "MfgPartNo": ("" if _blank(r.get("MfgPartNo")) else str(r.get("MfgPartNo")).strip()),
+            "ReleasedBy": ("" if _blank(r.get("ReleasedBy")) else str(r.get("ReleasedBy")).strip()),
+            "RelCount": (int(r.get("RelCount")) if _num_or_none(r.get("RelCount")) is not None else None),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
@@ -972,6 +976,7 @@ def _bom_release_join(project_ids, pod_alias="pod", alias="bomrel"):
         ids = ",".join(str(int(p)) for p in project_ids)
         scope = f" WHERE ProjectID IN ({ids})"
     return (f"LEFT JOIN (SELECT ProjectID, ItemID, MIN(ReleasedDateTime) AS BOMReleaseDate, "
+            f"COUNT(*) AS RelCount, "
             f"MAX(CASE WHEN [Type] = 'Prerelease' THEN 1 ELSE 0 END) AS HasPre, "
             f"MAX(CASE WHEN [Type] = 'Release' THEN 1 ELSE 0 END) AS HasRel "
             f"FROM dbo.tblBOMReleaseHistory{scope} GROUP BY ProjectID, ItemID) {alias} "
@@ -1031,10 +1036,11 @@ def query_released_to_order(project_ids=None):
         GROUP BY ProjectID, CAST(SpecID AS float), ItemID
         HAVING SUM(CAST(QuantityChange AS float)) > 0
     ),
-    relwho AS (   -- releaser of the LATEST release per project+machine+part (most recent to touch it)
-        SELECT ProjectID, CAST(SpecID AS float) AS SpecID, ItemID, ReleasedByEmployeeID,
-               ROW_NUMBER() OVER (PARTITION BY ProjectID, CAST(SpecID AS float), ItemID
-                   ORDER BY ReleasedDateTime DESC, BOMReleaseHistoryID DESC) AS rn
+    relwho AS (   -- latest releaser + total release count per project + part (item-level)
+        SELECT ProjectID, ItemID, ReleasedByEmployeeID,
+               ROW_NUMBER() OVER (PARTITION BY ProjectID, ItemID
+                   ORDER BY ReleasedDateTime DESC, BOMReleaseHistoryID DESC) AS rn,
+               COUNT(*) OVER (PARTITION BY ProjectID, ItemID) AS RelCount
         FROM dbo.tblBOMReleaseHistory{scope}
     ),
     itm AS (      -- item identity + cost, keyed by ItemID across ANY project's BOM
@@ -1078,6 +1084,7 @@ def query_released_to_order(project_ids=None):
            rel.HasPre AS HasPre, rel.HasRel AS HasRel,
            COALESCE(CAST(rel.ReleaseDate AS date), mast.EngDate) AS ReleaseDate,
            remp.EmpLastName + ', ' + remp.EmpFirstName AS ReleasedBy,
+           rw.RelCount AS RelCount,
            mast.LLTFlag AS LLTFlag,
            sup.CName AS LastSupplier,
            COALESCE(NULLIF(itm.LastCost, 0), NULLIF(itm.ListCost, 0)) AS UnitCostFallback
@@ -1089,7 +1096,7 @@ def query_released_to_order(project_ids=None):
     LEFT JOIN stock ON stock.ItemID = rel.ItemID
     LEFT JOIN itm  ON itm.ItemID = rel.ItemID
     LEFT JOIN mast ON mast.ItemID = rel.ItemID
-    LEFT JOIN relwho rw ON rw.ProjectID = rel.ProjectID AND rw.SpecID = rel.SpecID AND rw.ItemID = rel.ItemID AND rw.rn = 1
+    LEFT JOIN relwho rw ON rw.ProjectID = rel.ProjectID AND rw.ItemID = rel.ItemID AND rw.rn = 1
     LEFT JOIN tblEmployee remp ON remp.EmployeeID = rw.ReleasedByEmployeeID
     LEFT JOIN tblCompany sup ON sup.CompanyID = mast.LastSupplierID
     LEFT JOIN tblProjects p ON p.ProjectID = rel.ProjectID
@@ -1131,6 +1138,13 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     if project_ids:
         ids = ",".join(str(int(p)) for p in project_ids)
         proj = f" AND pod.ProjectID IN ({ids})"
+    rel_scope = f" WHERE ProjectID IN ({ids})" if ids else ""
+    relby_join = ("LEFT JOIN (SELECT ProjectID, ItemID, ReleasedByEmployeeID, "
+                  "ROW_NUMBER() OVER (PARTITION BY ProjectID, ItemID "
+                  "ORDER BY ReleasedDateTime DESC, BOMReleaseHistoryID DESC) AS rn "
+                  f"FROM dbo.tblBOMReleaseHistory{rel_scope}) rwx "
+                  "ON rwx.ProjectID = pod.ProjectID AND rwx.ItemID = pod.ItemID AND rwx.rn = 1 "
+                  "LEFT JOIN tblEmployee remp ON remp.EmployeeID = rwx.ReleasedByEmployeeID")
     # HISTORICAL lead time (fallback when EstimatedLeadTime is blank): per ItemID, the average of the
     # item's actual PO order→receipt spans — DATEDIFF(order date poh.PurchaseDate → last receipt
     # pdd.LastReceivedDate) — bounded to 0..730 days to drop data-entry outliers. When a project set is
@@ -1197,6 +1211,8 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         {mpn_sel}                       AS MfgPartNo,
         {rfq_sel}                       AS RFQDate,
         COALESCE(CAST(bomrel.BOMReleaseDate AS date), {rel_sel}) AS EngReleaseDate,
+        remp.EmpLastName + ', ' + remp.EmpFirstName AS ReleasedBy,
+        bomrel.RelCount                 AS RelCount,
         bomrel.HasPre                   AS HasPre,       -- release-log entry types for project + part
         bomrel.HasRel                   AS HasRel
     FROM vwPurchaseOrderHeader poh
@@ -1209,6 +1225,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
     {hist_join}
     {rfq_join}
     {_bom_release_join(project_ids)}
+    {relby_join}
     WHERE poh.PurchaseActive = 1{"" if all_statuses else _RECV_OPEN_CLAUSE}{proj}{_po_date_window(date_from, date_to)}
     ORDER BY Buyer, pod.ProjectID, poh.PurchaseOrderID, pod.ItemID
     """
@@ -1286,6 +1303,8 @@ def po_listing_detail(df, today=None):
             "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
             "Manufacturer": ("" if _blank(r.get("Manufacturer")) else str(r.get("Manufacturer")).strip()),
             "MfgPartNo": ("" if _blank(r.get("MfgPartNo")) else str(r.get("MfgPartNo")).strip()),
+            "ReleasedBy": ("" if _blank(r.get("ReleasedBy")) else str(r.get("ReleasedBy")).strip()),
+            "RelCount": (int(r.get("RelCount")) if _num_or_none(r.get("RelCount")) is not None else None),
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
