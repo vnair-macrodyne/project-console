@@ -735,28 +735,28 @@ _LLT_CRITICAL_DAYS = 90
 # Planned/Revised/Receipt dates, Status(derived), Lead time, Oversized. BLANK — ETO holds no source:
 # Planned Ship (BudgetShipRelease empty), Days to Assembly (MfgBegin empty), RFQ Date, Permit Dates,
 # Last Updated (no PO-line modified timestamp). Kept as columns so the layout matches the workbook.
-COLS_EXC = [   # Peter's re-ordered export layout (Col_Numbering_Sextant_po_listing_20261028.xlsx): cols 1-28, then Released by / # Releases appended
+COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, row-1 numbering): cols 1-28, then Released by / # Releases appended
     ("Buyer",          "Buyer",                    16, "L", False),
+    ("ProjectID",      "Project #",                 8, "C", False),
+    ("JobName",        "Project",                  20, "L", False),
+    ("Item",           "Item",                     11, "L", False),
+    ("Description",    "Description",              28, "L", False),
+    ("EngRelease",     "Release Date",             11, "C", False),
     ("ReqNo",          "Purchasing Requisition #", 14, "L", False),   # the draft PO number (ETO keeps one number from draft to issued PO)
     ("RFQDate",        "RFQ Date",                 11, "C", False),
     ("PO",             "PO #",                     10, "L", False),
     ("PODate",         "Order Date",               11, "C", False),   # PO header PurchaseDate (Peter col 5; added 2026-10-29)
-    ("Cost",           "Cost",                     12, "R", True),    # PO line extended value in CAD (PO currency x PO rate)
-    ("Vendor",         "Vendor",                   20, "L", False),
-    ("ProjectID",      "Project #",                 8, "C", False),
-    ("JobName",        "Project",                  20, "L", False),
-    ("Code",           "Code",                      7, "C", False),   # machine / spec
-    ("Item",           "Item",                     11, "L", False),
-    ("Manufacturer",   "Manufacturer",             18, "L", False),   # tblEngItemMaster.Manufacturer
-    ("MfgPartNo",      "Mfg Part #",               16, "L", False),   # tblEngItemMaster.ManufacturerPartNumber
-    ("Description",    "Description",              28, "L", False),
-    ("Category",       "Category",                 16, "L", False),
-    ("DrawingNo",      "Drawing",                  16, "L", False),
-    ("EngRelease",     "Release Date",             11, "C", False),
     ("PlannedReceipt", "Planned Receipt",          12, "C", False),
     ("RevisedReceipt", "Revised Receipt",          12, "C", False),
-    ("ReceiptDate",    "Receipt Date",             11, "C", False),
     ("LastUpdated",    "Last Activity",            11, "C", False),
+    ("ReceiptDate",    "Receipt Date",             11, "C", False),
+    ("Cost",           "Cost",                     12, "R", True),    # PO line extended value in CAD (PO currency x PO rate)
+    ("Vendor",         "Vendor",                   20, "L", False),
+    ("Code",           "Code",                      7, "C", False),   # machine / spec
+    ("Manufacturer",   "Manufacturer",             18, "L", False),   # tblEngItemMaster.Manufacturer
+    ("MfgPartNo",      "Mfg Part #",               16, "L", False),   # tblEngItemMaster.ManufacturerPartNumber
+    ("Category",       "Category",                 16, "L", False),
+    ("DrawingNo",      "Drawing",                  16, "L", False),
     ("MfgBegin",       "Mfg Begins",               11, "C", False),   # tblSpec.MfgBegin for the line's machine
     ("PermitDates",    "Permit Dates",             12, "L", False),   # greyed by Peter: rule to come
     ("LeadTime",       "Lead Time",                 8, "R", True),    # number; a historical fallback is italicised via _em
