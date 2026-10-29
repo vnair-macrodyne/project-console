@@ -94,7 +94,7 @@ class QueryResult:
 _QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "spec_budget", "data_completeness", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum", "lab_util",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
-              "po_delivered", "po_buyer", "released_toorder", "bom_readiness", "item_location", "inventory_value",
+              "po_delivered", "po_buyer", "released_toorder", "bom_readiness", "project_types", "project_types_detail", "item_location", "inventory_value",
               "inventory_by_site", "inventory_alloc", "inventory_contention", "inventory_returns",
               "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
@@ -204,6 +204,16 @@ def catalogue():
                  "exactly. Assembly/Total/Available/On-order quantities, still-to-procure, % "
                  "available (Absolute method), exploded through the full assembly tree.",
          "needs_projects": True},
+        {"id": "project_types", "menu": "Project Management", "label": "Project Types",
+         "desc": "Project count and share by type (Forging, SMC, Metalforming, Mechanical "
+                 "Retrofits, ...), grouped into Category Groups. The classification is maintained "
+                 "in Sextant, seeded from the ETO Project Types sheet; a project appears once it "
+                 "has been classified.",
+         "needs_projects": False},
+        {"id": "project_types_detail", "menu": "Project Management", "label": "Project Types — Projects",
+         "desc": "Every classified project and its type — Project #, Company, Description, "
+                 "Category and Category Group. The per-project companion to Project Types.",
+         "needs_projects": False},
         # ── Inventory ─────────────────────────────────────────────────────
         {"id": "item_location", "menu": "Inventory", "label": "Item Location",
          "desc": f"Current on-hand inventory for the items purchased on the selected "
@@ -921,6 +931,49 @@ class LiveQueryService(QueryService):
                            f"selection — BOM Readiness explodes the full BOM per machine (heavy), so "
                            f"narrow to 1–2 projects to see the rest.  " + result.note)
         return result
+
+    def _project_categories(self):
+        """{ProjectID -> (Category, CategoryGroup, group_sort)} from the Sextant store
+        (Reporting.tblProjectCategory + tlkpProjectCategoryGroup, seeded by sql/021). Defensive:
+        returns {} if the seed tables are not present yet, so the app still runs."""
+        try:
+            cur = self._console_conn().cursor()
+            cur.execute("SELECT pc.ProjectID, pc.Category, g.CategoryGroup, g.GroupSort "
+                        "FROM Reporting.tblProjectCategory pc "
+                        "LEFT JOIN Reporting.tlkpProjectCategoryGroup g ON g.Category = pc.Category")
+            out = {}
+            for pid, cat, grp, gsort in cur.fetchall():
+                g = grp or "Misc"
+                out[int(pid)] = (cat, g, int(gsort) if gsort is not None else _pt_group_sort(g))
+            return out
+        except Exception:
+            return {}
+
+    def _project_meta(self, pids):
+        """{ProjectID -> (Company, Description)} live from ETO for the given projects."""
+        if not pids:
+            return {}
+        ids = ",".join(str(int(p)) for p in pids)
+        try:
+            df = self._df("SELECT p.ProjectID AS ProjectID, c.CName AS Company, "
+                          "p.PDescription AS Descr, p.DisplayName AS DisplayName "
+                          "FROM dbo.tblProjects p "
+                          "LEFT JOIN dbo.tblCompany c ON c.CompanyID = p.CompanyID "
+                          f"WHERE p.ProjectID IN ({ids})")
+            out = {}
+            for _i, r in df.iterrows():
+                desc = r.get("Descr") or r.get("DisplayName") or ""
+                out[int(r["ProjectID"])] = (r.get("Company") or "", str(desc).strip())
+            return out
+        except Exception:
+            return {}
+
+    def _q_project_types(self, project_ids, **kw):
+        return _project_types_summary_result(self._project_categories())
+
+    def _q_project_types_detail(self, project_ids, **kw):
+        cats = self._project_categories()
+        return _project_types_detail_result(cats, self._project_meta(list(cats.keys())))
 
     def _q_data_completeness(self, project_ids, **kw):
         """Population rate of the tracked team-maintained fields, scoped to ACTIVE projects
@@ -3270,6 +3323,111 @@ def _data_completeness_result(df):
     return QueryResult("data_completeness", "Data Completeness — field population", cols, rows, cards, note)
 
 
+# ── Project Types (project classification: Sextant store seeded from the 2026-09-17 sheet) ──
+_PT_GROUP_ORDER = ["Core Press Types", "Retrofit / Upgrades", "Systems",
+                   "Subsystems", "Engineering", "Aftermarket", "Misc"]
+
+
+def _pt_group_sort(g):
+    return _PT_GROUP_ORDER.index(g) + 1 if g in _PT_GROUP_ORDER else 99
+
+
+def _project_types_summary_result(cats):
+    """cats: {ProjectID -> (Category, CategoryGroup, group_sort)}. Project count and % by category,
+    grouped into Category Groups: one self-contained detail row per category (survives the flat
+    Excel export), a per-group subtotal, a grand total, and summary cards."""
+    from collections import defaultdict
+    cols = [
+        QueryColumn("Grp", "Category Group", "text", "left"),
+        QueryColumn("Category", "Category", "text", "left"),
+        QueryColumn("Count", "Projects", "int", "right"),
+        QueryColumn("Pct", "% of Total", "pct", "right"),
+    ]
+    total = len(cats)
+    by_cat = defaultdict(int)
+    cat_grp = {}
+    for _pid, (cat, grp, gsort) in cats.items():
+        by_cat[cat] += 1
+        cat_grp[cat] = (grp, gsort)
+    groups = {}
+    for cat, n in by_cat.items():
+        grp, gsort = cat_grp[cat]
+        groups.setdefault((gsort, grp), []).append((cat, n))
+    rows = []
+    for (gsort, grp) in sorted(groups):
+        cin = sorted(groups[(gsort, grp)], key=lambda cn: (-cn[1], cn[0]))
+        gtotal = sum(n for _c, n in cin)
+        for cat, n in cin:
+            rows.append({"_kind": "detail", "Grp": grp, "Category": cat,
+                         "Count": n, "Pct": (n / total if total else None)})
+        rows.append({"_kind": "l1_sub", "Category": f"{grp} — {gtotal} project(s)",
+                     "Count": gtotal, "Pct": (gtotal / total if total else None)})
+    rows.append({"_kind": "grand", "Category": f"GRAND TOTAL — {total} project(s)",
+                 "Count": total, "Pct": (1.0 if total else None)})
+    gtotals = {}
+    for cat, n in by_cat.items():
+        gtotals[cat_grp[cat][0]] = gtotals.get(cat_grp[cat][0], 0) + n
+    biggest = max(gtotals.items(), key=lambda kv: kv[1]) if gtotals else ("—", 0)
+    cards = [Card("Classified projects", "{:,}".format(total)),
+             Card("Categories", "{:,}".format(len(by_cat))),
+             Card("Groups", "{:,}".format(len(gtotals))),
+             Card("Largest group", f"{biggest[0]} ({biggest[1]})")]
+    note = ("Project count and share by type, grouped into Category Groups. The classification is "
+            "maintained in Sextant (Reporting.tblProjectCategory), seeded from the 2026-09-17 ETO "
+            "Project Types sheet; a project appears here once it has been classified. % of Total = "
+            "projects in the category / all classified projects.")
+    return QueryResult("project_types", "Project Types — summary", cols, rows, cards, note)
+
+
+def _project_types_detail_result(cats, meta):
+    """One row per classified project: Project #, Company, Description, Category, Category Group."""
+    proj = L("project")
+    cols = [
+        QueryColumn("ProjectID", f"{proj} #", "id", "left"),
+        QueryColumn("Company", "Company", "text", "left", wrap=True),
+        QueryColumn("Description", "Description", "text", "left", wrap=True),
+        QueryColumn("Category", "Category", "text", "left"),
+        QueryColumn("Grp", "Category Group", "text", "left"),
+    ]
+    items = []
+    for pid, (cat, grp, gsort) in cats.items():
+        co, desc = meta.get(int(pid), ("", ""))
+        items.append((gsort, grp, cat, int(pid), co or "", desc or ""))
+    items.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+    rows = [{"_kind": "detail", "ProjectID": pid, "Company": co, "Description": desc,
+             "Category": cat, "Grp": grp} for _gs, grp, cat, pid, co, desc in items]
+    rows.append({"_kind": "grand", "Company": f"GRAND TOTAL — {len(items)} project(s)"})
+    cards = [Card("Classified projects", "{:,}".format(len(items))),
+             Card("Categories", "{:,}".format(len({c for _s, _g, c, _p, _co, _d in items}))),
+             Card("Groups", "{:,}".format(len({g for _s, g, _c, _p, _co, _d in items})))]
+    note = ("Every classified project and its type. The classification is maintained in Sextant "
+            "(Reporting.tblProjectCategory), seeded from the 2026-09-17 ETO Project Types sheet; "
+            "projects not yet classified are not listed. Company and Description are live from ETO.")
+    return QueryResult("project_types_detail", "Project Types — projects", cols, rows, cards, note)
+
+
+# Demo classification (a representative slice, so --demo renders both Project Types reports)
+_DEMO_PT = [
+    (111163, "Forging", "Core Press Types", "Meritor Heavy Vehicle Systems LLC", "Two (2) 1100 Ton Forging Presses"),
+    (141615, "Compression Molding (SMC)", "Core Press Types", "Therma Tru Corp", "Two (2) 2,500 Ton SMC Compression Molding"),
+    (141614, "Metalforming", "Core Press Types", "Formet Industries", "Two (2) 250 Ton Hydraulic Metalforming Presses"),
+    (161689, "Hot Stamping / Heated Platen", "Core Press Types", "Vista Outdoor (CCI/Speer)", "One (1) 20,000 kN Hot Stamping Press"),
+    (171731, "Blanking Press", "Core Press Types", "Dana Canada - Chatham", "One (1) 200 MTon Blanking Press"),
+    (181784, "Extrusion", "Core Press Types", "Mueller Impacts Company Inc", "1500 Ton Extrusion Press"),
+    (161674, "Mechanical Retrofits", "Retrofit / Upgrades", "Molded Fiber Glass de Mexico", "One (1) 2,340 Ton Hoesch Retrofit"),
+    (171740, "Press Lines / Cells", "Systems", "Dana Canada - Chatham", "Press Line Controls & Integration"),
+    (171738, "Material Handling", "Subsystems", "Dana Canada - Chatham", "Die Change Train & Single Unit Press #6"),
+    (161672, "Warranty Work", "Aftermarket", "Pliteq Inc", "Warranty Repair Work on the Mandrel Feed & Assembly"),
+]
+
+
+def _demo_project_categories():
+    return {pid: (cat, grp, _pt_group_sort(grp)) for pid, cat, grp, _co, _d in _DEMO_PT}
+
+
+_DEMO_PT_META = {pid: (co, desc) for pid, _cat, _grp, co, desc in _DEMO_PT}
+
+
 # ---- Inventory — Item Location (on-hand by item & location, project-scoped) ----
 def _item_location_rows(df):
     """Grouped rows (project → stocked line) with a per-project count band. No numeric
@@ -4348,6 +4506,14 @@ class DemoQueryService(QueryService):
             df = pd.DataFrame(recs, columns=cols)
             blocks.append((pid, f"Demo Job {pid}", 10, df, None))
         return _bom_readiness_result(blocks)
+
+    def _q_project_types(self, project_ids, **kw):
+        return _project_types_summary_result(_demo_project_categories())
+
+    def _q_project_types_detail(self, project_ids, **kw):
+        cats = _demo_project_categories()
+        meta = {pid: _DEMO_PT_META.get(pid, ("", "")) for pid in cats}
+        return _project_types_detail_result(cats, meta)
 
     def _q_data_completeness(self, project_ids, **kw):
         import pandas as pd
