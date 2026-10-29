@@ -186,9 +186,8 @@ def main():
     podates = po_order_dates(pids)
     relby = released_by(pids)
     omni = omnibus_rows(lto, items, etospec.COLS_EXC, podates, relby)
-    omni_cols = [("Stage", "Stage", "text", "left"), ("OrderDate", "Order Date", "date", "left")] + \
-        [(k, l, t, a) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)] + \
-        [("ReleasedBy", "Released by", "text", "left"), ("RelCount", "# Releases", "int", "right")]
+    omni_cols = [("Stage", "Stage", "text", "left")] + \
+        [(k, l, t, a) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
     det = lambda res: sum(1 for x in res.rows if x.get("_kind") == "detail")
     counts = {s: sum(1 for x in omni if x["Stage"] == s) for s in STAGES}
     overdue = sum(1 for x in omni if str(x.get("Status") or "").startswith("Overdue"))
