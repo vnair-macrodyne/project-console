@@ -91,7 +91,7 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
-_QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "spec_budget", "data_completeness", "crosswalk",
+_QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "hours_summary", "spec_budget", "data_completeness", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum", "lab_util",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "released_toorder", "bom_readiness", "project_types", "project_types_detail", "item_location", "inventory_value",
@@ -139,6 +139,11 @@ def catalogue():
         {"id": "budget_actual", "menu": "Dashboards", "label": "Budget vs Actual",
          "desc": f"{labour}-hours and {material.lower()}-$ budget, actual, variance and "
                  f"consumed % per {proj.lower()}.",
+         "needs_projects": True},
+        {"id": "hours_summary", "menu": "Dashboards", "label": f"{labour} Hours",
+         "desc": f"Budgeted vs actual {labour.lower()} hours per {proj.lower()} — one row each, "
+                 f"with hours remaining to budget (budget − actual) and % consumed, plus a "
+                 f"portfolio total. Hours only (no material $).",
          "needs_projects": True},
         {"id": "spec_budget", "menu": "Dashboards", "label": f"Machine {disc} Budget",
          "desc": f"Machine × {disc.lower()} labour budget vs actual, in hours, from ETO "
@@ -791,6 +796,18 @@ class LiveQueryService(QueryService):
         fin = self._financials(project_ids)
         rows = [_budget_actual_row(pid, fin[pid]) for pid in sorted(fin)]
         return _budget_actual_result(rows)
+
+    def _q_hours_summary(self, project_ids, **kw):
+        fin = self._financials(project_ids)
+        names, pids = {}, list(fin)
+        if pids:
+            try:
+                df = self._df(f"SELECT ProjectID, DisplayName FROM tblProjects WHERE ProjectID IN ({_ids_sql(pids)})")
+                names = {int(r["ProjectID"]): (r["DisplayName"] or "") for _, r in df.iterrows()}
+            except Exception:
+                names = {}
+        rows = [_hours_summary_row(pid, fin[pid], names.get(pid, "")) for pid in sorted(fin)]
+        return _hours_summary_result(rows)
 
     def _q_spec_budget(self, project_ids, **kw):
         """Machine × discipline labour budget vs actual, in HOURS, sourced live from ETO:
@@ -1871,6 +1888,47 @@ def _budget_actual_result(rows):
             f"{material.lower()} as Resource Consumption (purchased + inventory + payables, ties "
             f"to ETO's material report). Budgets are the PM plan; variance = budget − actual.")
     return QueryResult("budget_actual", "Budget vs Actual", cols, rows, cards, note)
+
+
+def _hours_summary_row(pid, f, name):
+    lb, la = f.labour_budget_hours, f.labour_actual_hours
+    return {
+        "ProjectID": pid, "JobName": name or "",
+        "BudgetHours": (round(lb, 2) if lb is not None else None),
+        "ActualHours": (round(la, 2) if la is not None else None),
+        "RemainingHours": (round(lb - (la or 0), 2) if lb is not None else None),
+        "ConsumedPct": f.labour_consumed_pct,
+    }
+
+
+def _hours_summary_result(rows):
+    proj, labour = L("project"), L("labour")
+    cols = [
+        QueryColumn("ProjectID", f"{proj} #", "id", "left"),
+        QueryColumn("JobName", proj, "text", "left", wrap=True),
+        QueryColumn("BudgetHours", f"{labour} Budget (hrs)", "hours", "right"),
+        QueryColumn("ActualHours", f"{labour} Actual (hrs)", "hours", "right", calc=True),
+        QueryColumn("RemainingHours", "Remaining (hrs)", "hours", "right"),
+        QueryColumn("ConsumedPct", "% Consumed", "pct", "right"),
+    ]
+    det = list(rows)
+    tb = sum((r["BudgetHours"] or 0) for r in det)
+    ta = sum((r["ActualHours"] or 0) for r in det)
+    grand = {"_kind": "grand", "JobName": f"GRAND TOTAL — {len(det)} {proj.lower()}(s)",
+             "BudgetHours": (round(tb, 2) or None), "ActualHours": (round(ta, 2) or None),
+             "RemainingHours": (round(tb - ta, 2) if tb else None),
+             "ConsumedPct": (round(ta / tb, 4) if tb else None)}
+    cards = [Card(L("projects"), str(len(det))),
+             Card(f"{labour} Budget (hrs)", ("{:,.0f}".format(tb) if tb else "—")),
+             Card(f"{labour} Actual (hrs)", ("{:,.0f}".format(ta) if ta else "—")),
+             Card("% Consumed", ("{:.0f}%".format(100 * ta / tb) if tb else "—"),
+                  _pct_tone(ta / tb if tb else None))]
+    note = (f"Budgeted vs actual {labour.lower()} hours per {proj.lower()} — one row each, with hours "
+            f"remaining to budget (budget − actual; negative = over budget) and % consumed. Actual "
+            f"hours are live from ETO timecards (italic); budget is the ETO estimate. Grand total is "
+            f"across the current {proj.lower()} selection.")
+    return QueryResult("hours_summary", f"{labour} Hours — Budget vs Actual", cols,
+                       det + [grand], cards, note)
 
 
 def _crosswalk_result(rows):
@@ -4455,6 +4513,12 @@ class DemoQueryService(QueryService):
     def _q_budget_actual(self, project_ids, **kw):
         rows = [_budget_actual_row(pid, _DemoFin(_DEMO[pid])) for pid in self._sel(project_ids)]
         return _budget_actual_result(rows)
+
+    def _q_hours_summary(self, project_ids, **kw):
+        rows = [_hours_summary_row(pid, _DemoFin(_DEMO[pid]),
+                                   _DEMO_EXEC.get(pid, {}).get("name", str(pid)))
+                for pid in self._sel(project_ids)]
+        return _hours_summary_result(rows)
 
     def _q_spec_budget(self, project_ids, **kw):
         import pandas as pd
