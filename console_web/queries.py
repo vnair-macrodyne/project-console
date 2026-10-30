@@ -145,7 +145,7 @@ def catalogue():
                  f"with hours remaining to budget (budget − actual) and % consumed, plus a "
                  f"portfolio total. Hours only (no material $).",
          "needs_projects": True},
-        {"id": "hours_by_discipline", "menu": "Dashboards", "label": "Hours by Discipline",
+        {"id": "hours_by_discipline", "menu": "Project Management", "label": "Hours by Discipline",
          "desc": f"Budget vs actual {labour.lower()} hours per {proj.lower()}, split by discipline "
                  f"(Mfg, ME, HE, EE, PM) with a project total — the classified-projects set.",
          "needs_projects": False},
