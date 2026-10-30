@@ -1,0 +1,43 @@
+flowchart TB
+    classDef store fill:#e8f0fe,stroke:#2E75B6,color:#11315c;
+    classDef eto fill:#f3f3f3,stroke:#9aa0a6,color:#333;
+    classDef vis fill:#d8f5dd,stroke:#1e8e3e,color:#0b5a26;
+    classDef hid fill:#fde7e9,stroke:#b3261e,color:#7a1419;
+    classDef act fill:#fff4ce,stroke:#8a5a00,color:#5a3b00;
+
+    subgraph ETO["ETO — read-only (vendor)"]
+      P["tblProjects + tblSpecHours<br/>every project &amp; its budgeted hours"]:::eto
+    end
+
+    subgraph STORE["Reporting store — the only place Sextant writes"]
+      B[("tblProjectBudget (versioned)<br/>= banked budget<br/>→ vw_Console_BudgetCurrent")]:::store
+      X[("tblConsoleProjectExclusion<br/>= offboarded / hidden")]:::store
+      A[("tblActiveProject<br/>= open-projects list<br/>(from Exec Dashboard worksheet)")]:::act
+    end
+
+    %% ---------- ONBOARD ----------
+    ON["ONBOARD<br/>PM: pick project → 'Add to Console'<br/>(api/pm/add → add_project)"]
+    ON --> ON1["1 clear any exclusion row<br/>DELETE from tblConsoleProjectExclusion"]
+    ON --> ON2["2 bank the ETO budget as the current version<br/>INSERT tblProjectBudget (skipped if already banked)"]
+    ON1 --> X
+    ON2 --> B
+    ON2 -. needs an ETO budget, else<br/>'no ETO budget to bring in' .-> P
+
+    %% ---------- OFFBOARD ----------
+    OFF["OFFBOARD<br/>PM: pick project → 'Remove from Console'<br/>(api/pm/remove → remove_project)"]
+    OFF --> OFF1["add an exclusion row (idempotent)<br/>INSERT tblConsoleProjectExclusion<br/>budget &amp; plan/progress are KEPT"]
+    OFF1 --> X
+
+    %% ---------- VISIBILITY ----------
+    SEL{"In the project selector &amp; dashboards?"}
+    B --> SEL
+    X --> SEL
+    SEL -->|"banked AND NOT excluded"| VIS["VISIBLE (on the console)"]:::vis
+    SEL -->|"excluded, or never banked"| HID["hidden (re-addable anytime)"]:::hid
+
+    %% ---------- ACTIVE LIST (separate axis) ----------
+    A --> PER["Purchasing Exception Report<br/>scoped to the active list ONLY<br/>(not the selector)"]:::act
+
+    %% ---------- TOGGLE NOTE ----------
+    VIS -. "Remove from Console" .-> HID
+    HID -. "Add to Console" .-> VIS
