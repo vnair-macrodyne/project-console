@@ -585,9 +585,10 @@ class LiveQueryService(QueryService):
                     "ORDER BY ProjectID")
         excl = self._excluded_ids()
         ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
-        active = self._active_ids()          # the open-projects list IS the console's project list
-        if active:                           # seeded -> console-wide shows ONLY active (open) projects
-            ids = [p for p in ids if p in active]
+        # The selector is the CONSOLE set: every banked (vw_Console_BudgetCurrent), non-excluded
+        # project -- so a project a PM adds to the console always appears here. The active-projects
+        # list (tblActiveProject) scopes only the reports that ask for it (e.g. the Purchasing
+        # Exception Report, _q_po_listing), NOT this universal selector. (2026-10-30, per Vijay.)
         ov = self._overlay_map()
         out = []
         for pid in ids:
