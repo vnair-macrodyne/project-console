@@ -91,7 +91,7 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
-_QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "hours_summary", "spec_budget", "data_completeness", "crosswalk",
+_QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "hours_summary", "hours_by_discipline", "spec_budget", "data_completeness", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum", "lab_util",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
               "po_delivered", "po_buyer", "released_toorder", "bom_readiness", "project_types", "project_types_detail", "item_location", "inventory_value",
@@ -145,6 +145,10 @@ def catalogue():
                  f"with hours remaining to budget (budget − actual) and % consumed, plus a "
                  f"portfolio total. Hours only (no material $).",
          "needs_projects": True},
+        {"id": "hours_by_discipline", "menu": "Dashboards", "label": "Hours by Discipline",
+         "desc": f"Budget vs actual {labour.lower()} hours per {proj.lower()}, split by discipline "
+                 f"(Mfg, ME, HE, EE, PM) with a project total — the classified-projects set.",
+         "needs_projects": False},
         {"id": "spec_budget", "menu": "Dashboards", "label": f"Machine {disc} Budget",
          "desc": f"Machine × {disc.lower()} labour budget vs actual, in hours, from ETO "
                  f"(tblSpecHours / vwTimecards) — {proj.lower()} → machine → {disc.lower()}. "
@@ -808,6 +812,34 @@ class LiveQueryService(QueryService):
                 names = {}
         rows = [_hours_summary_row(pid, fin[pid], names.get(pid, "")) for pid in sorted(fin)]
         return _hours_summary_result(rows)
+
+    def _q_hours_by_discipline(self, project_ids, **kw):
+        cats = self._project_categories()          # the classified-projects set (Project Types)
+        pids = sorted(cats)
+        fin = self._financials(pids) if pids else {}
+        hdr = {}
+        if pids:
+            try:
+                df = self._df("SELECT p.ProjectID AS ProjectID, c.CName AS Company, "
+                              "p.PDescription AS Descr, p.DisplayName AS DisplayName, p.PFirst AS PDate "
+                              "FROM dbo.tblProjects p LEFT JOIN dbo.tblCompany c ON c.CompanyID = p.CompanyID "
+                              f"WHERE p.ProjectID IN ({_ids_sql(pids)})")
+                for _i, r in df.iterrows():
+                    desc = r.get("Descr") or r.get("DisplayName") or ""
+                    dt = r.get("PDate")
+                    hdr[int(r["ProjectID"])] = (r.get("Company") or "", str(desc).strip(),
+                                                _iso(dt) if dt is not None else None)
+            except Exception:
+                hdr = {}
+        rows = []
+        for pid in pids:
+            f = fin.get(pid)
+            dmap = {d.discipline: (d.budget_hours, d.actual_hours) for d in f.disciplines} if f else {}
+            tb = f.labour_budget_hours if f else None
+            ta = f.labour_actual_hours if f else None
+            co, desc, pdate = hdr.get(pid, ("", "", None))
+            rows.append(_hours_disc_row(pid, dmap, tb, ta, co, desc, pdate))
+        return _hours_disc_result(rows)
 
     def _q_spec_budget(self, project_ids, **kw):
         """Machine × discipline labour budget vs actual, in HOURS, sourced live from ETO:
@@ -1929,6 +1961,58 @@ def _hours_summary_result(rows):
             f"across the current {proj.lower()} selection.")
     return QueryResult("hours_summary", f"{labour} Hours — Budget vs Actual", cols,
                        det + [grand], cards, note)
+
+
+_HD_DISC = [("Mfg", "Manufacturing"), ("ME", "Mechanical Engineering"),
+            ("HE", "Hydraulic Engineering"), ("EE", "Electrical Engineering"),
+            ("PM", "Project Management")]
+
+
+def _hours_disc_row(pid, disc_map, tbud, tact, company, desc, pdate):
+    row = {"ProjectID": pid, "Company": company or "", "Description": desc or "", "PDate": pdate}
+    for abbr, name in _HD_DISC:
+        b, a = disc_map.get(name, (None, None))
+        row[abbr + "Bud"] = (round(b, 2) if b is not None else None)
+        row[abbr + "Act"] = (round(a, 2) if a is not None else None)
+    row["TotBud"] = (round(tbud, 2) if tbud is not None else None)
+    row["TotAct"] = (round(tact, 2) if tact is not None else None)
+    return row
+
+
+def _hours_disc_result(rows):
+    proj = L("project")
+    cols = [QueryColumn("ProjectID", f"{proj} #", "id", "left"),
+            QueryColumn("Company", "Company", "text", "left", wrap=True),
+            QueryColumn("Description", "Description", "text", "left", wrap=True),
+            QueryColumn("PDate", "Date", "date", "left")]
+    for abbr, _name in _HD_DISC:
+        cols.append(QueryColumn(abbr + "Bud", f"{abbr} Budget (hrs)", "hours", "right"))
+        cols.append(QueryColumn(abbr + "Act", f"{abbr} Actual (hrs)", "hours", "right", calc=True))
+    cols.append(QueryColumn("TotBud", "Total Budget (hrs)", "hours", "right"))
+    cols.append(QueryColumn("TotAct", "Total Actual (hrs)", "hours", "right", calc=True))
+    det = list(rows)
+
+    def s(k):
+        return round(sum((r.get(k) or 0) for r in det), 2)
+    grand = {"_kind": "grand", "Company": f"GRAND TOTAL — {len(det)} {proj.lower()}(s)"}
+    for abbr, _n in _HD_DISC:
+        grand[abbr + "Bud"] = s(abbr + "Bud") or None
+        grand[abbr + "Act"] = s(abbr + "Act") or None
+    grand["TotBud"] = s("TotBud") or None
+    grand["TotAct"] = s("TotAct") or None
+    tb, ta = s("TotBud"), s("TotAct")
+    cards = [Card(L("projects"), str(len(det))),
+             Card("Total Budget (hrs)", ("{:,.0f}".format(tb) if tb else "—")),
+             Card("Total Actual (hrs)", ("{:,.0f}".format(ta) if ta else "—")),
+             Card("% Consumed", ("{:.0f}%".format(100 * ta / tb) if tb else "—"),
+                  _pct_tone(ta / tb if tb else None))]
+    note = ("Budget vs actual LABOUR HOURS per project, split by discipline (Mfg, ME, HE, EE, PM) "
+            "with a project total. Budget is the ETO estimate (tblSpecHours by HourType→discipline); "
+            "actual is live from timecards (italic). Total is the project's full labour and may exceed "
+            "the five shown disciplines when a project carries hours in an unmapped type. Scope: the "
+            "classified projects (Project Types). Date = the project order/award date (tblProjects.PFirst).")
+    return QueryResult("hours_by_discipline", "Hours by Discipline — Budget vs Actual",
+                       cols, det + [grand], cards, note)
 
 
 def _crosswalk_result(rows):
@@ -4519,6 +4603,15 @@ class DemoQueryService(QueryService):
                                    _DEMO_EXEC.get(pid, {}).get("name", str(pid)))
                 for pid in self._sel(project_ids)]
         return _hours_summary_result(rows)
+
+    def _q_hours_by_discipline(self, project_ids, **kw):
+        rows = []
+        for pid in self._sel(project_ids):
+            d = _DEMO[pid]
+            rows.append(_hours_disc_row(pid, dict(d.get("disc", {})), d.get("lb"), d.get("la"),
+                                        _DEMO_EXEC.get(pid, {}).get("client", ""),
+                                        _DEMO_EXEC.get(pid, {}).get("name", ""), None))
+        return _hours_disc_result(rows)
 
     def _q_spec_budget(self, project_ids, **kw):
         import pandas as pd
