@@ -378,12 +378,13 @@ class LivePlanService(PlanService):
                 for it in sorted(by_spec[spec][disc], key=lambda x: (x["wi"] or "").lower()):
                     b, a = round(it["bud"], 2), round(it["act"], 2)
                     r = rem.get((spec, it["ht"]))
-                    pct, earned, cpi = _wi_metrics(b, a, r)
+                    pct, earned, cpi, implied = _wi_metrics(b, a, r)
                     items_out.append({
                         "hourtype": it["ht"], "work_item": it["wi"],
                         "budget_hours": b, "actual_hours": a, "remaining": r,
                         "pct": _pct_out(pct) if pct is not None else None,
-                        "earned_hours": earned, "cpi": cpi, "unbudgeted": not (b > 0)})
+                        "earned_hours": earned, "cpi": cpi, "implied": implied,
+                        "unbudgeted": not (b > 0)})
                     d_bud += b; d_act += a
                     d_pairs.append((pct, b if b > 0 else a))
                 d_pct = _budget_weighted(d_pairs)
@@ -815,12 +816,21 @@ def _pct_from_remaining(actual, remaining):
 
 
 def _wi_metrics(bud, act, remaining):
-    """(pct, earned_hrs, cpi) for one work item. pct = actual/(actual+remaining); earned = pct×budget;
-    CPI = earned÷actual. pct is None until the PM declares a remaining; earned/CPI need a budget/actual."""
-    pct = _pct_from_remaining(act, remaining)
+    """(pct, earned_hrs, cpi, implied) for one work item. pct = actual/(actual+remaining);
+    earned = pct×budget; CPI = earned÷actual = budget÷EAC. When the PM has NOT entered a remaining
+    but the cell is budgeted and at/under budget, fall back to the budget-IMPLIED remaining
+    (budget − actual) so the cell reads an on-plan baseline (EAC = budget, CPI = 1.0) instead of
+    blank; `implied` flags that case. A PM-entered remaining always wins; over-budget with no entry
+    stays blank (can't infer a remaining); an unbudgeted cell earns nothing."""
+    implied = False
+    r = remaining
+    if r is None and bud and bud > 0 and (act or 0.0) <= bud:
+        r = bud - (act or 0.0)
+        implied = True
+    pct = _pct_from_remaining(act, r)
     earned = round(pct * bud, 2) if (pct is not None and bud) else None
     cpi = round(earned / act, 3) if (earned is not None and act) else None
-    return pct, earned, cpi
+    return pct, earned, cpi, implied
 
 
 def _budget_weighted(pairs):

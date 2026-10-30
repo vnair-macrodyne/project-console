@@ -56,6 +56,7 @@
   table.mdt td{padding:6px 10px;border-bottom:1px solid var(--line)}
   table.mdt input{width:80px;text-align:right;border:1px solid var(--line);border-radius:6px;padding:5px 7px;background:var(--entry)}
   td.cpi.bad{color:#b3261e;font-weight:700}td.cpi.warn{color:#8a5a00;font-weight:600}
+  .mdt td.implied{color:#9aa0a6;font-style:italic}
   table.mdt tr.unb td{background:#fffaf0}
   .utag{display:inline-block;margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.03em;
         background:#fff3d6;color:#8a5a00;border:1px solid #e7c766;border-radius:20px;padding:1px 8px}
@@ -202,17 +203,25 @@ function recalc(iid){
   let rem=inp.value!==''?parseFloat(inp.value):null;
   const pCell=el(iid+'_p'), eCell=el(iid+'_e'), cCell=el(iid+'_c');
   cCell.className='num cpi';
-  if(rem==null||isNaN(rem)){ pCell.textContent='—'; eCell.textContent='—'; cCell.textContent='—'; return; }
+  // Budget-implied baseline: with no PM entry, a budgeted cell at/under budget defaults to
+  // remaining = budget − actual (EAC = budget, CPI = 1.0) so it reads on-plan, not blank.
+  let implied=false;
+  if(rem==null||isNaN(rem)){
+    if(b>0 && a<=b){ rem=b-a; implied=true; }
+    else { pCell.textContent='—'; eCell.textContent='—'; cCell.textContent='—'; return; }
+  }
   if(rem<0) rem=0;
   const eac=a+rem;
   const pct = eac>0 ? a/eac : 1;                 // 0 remaining & 0 actual → complete
   pCell.textContent=Math.round(pct*100)+'%';
+  pCell.classList.toggle('implied', implied);
   // No budget → nothing to earn against; earned/CPI are N/A (the cell is flagged unbudgeted).
   if(!b){ eCell.textContent='—'; cCell.textContent='—'; return; }
   const earned=pct*b;
   eCell.textContent=earned.toLocaleString(undefined,{maximumFractionDigits:0});
+  eCell.classList.toggle('implied', implied);
   if(a>0){ const cpi=earned/a; cCell.textContent=cpi.toFixed(2);
-    cCell.className='num cpi '+(cpi<0.9?'bad':(cpi<1.0?'warn':'')); }
+    cCell.className='num cpi '+(implied?'implied ':'')+(cpi<0.9?'bad':(cpi<1.0?'warn':'')); }
   else { cCell.textContent='—'; }
 }
 
