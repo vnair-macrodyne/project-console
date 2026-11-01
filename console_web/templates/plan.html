@@ -213,22 +213,26 @@ function recalc(iid){
   const b=parseFloat(inp.dataset.b||'0'), a=parseFloat(inp.dataset.a||'0');
   let rem=inp.value!==''?parseFloat(inp.value):null;
   const pCell=el(iid+'_p'), eCell=el(iid+'_e'), cCell=el(iid+'_c');
-  cCell.className='num cpi';
-  // Budget-implied baseline: with no PM entry, a budgeted cell at/under budget defaults to
-  // remaining = budget − actual (EAC = budget, CPI = 1.0) so it reads on-plan, not blank.
-  let implied=false, overrun=false;
-  if(rem==null||isNaN(rem)){
-    if(b>0){ rem=Math.max(b-a,0); implied=true; }   // on-plan if under budget; overrun (0 remaining) if over
-    else { pCell.textContent='—'; eCell.textContent='—'; cCell.textContent='—'; return; }
+  cCell.className='num cpi'; cCell.title='';
+  // Unbudgeted: hours charged with NO budget earn nothing -> flag CPI -1.00 (red) + 0 earned. The
+  // hours still count as actual with zero earned value, so they drag the Project CPI roll-up.
+  if(!b){
+    if(a>0){
+      pCell.textContent=(rem!=null&&!isNaN(rem))?Math.round(a/(a+Math.max(rem,0))*100)+'%':'—';
+      eCell.textContent='0';
+      cCell.textContent='-1.00'; cCell.className='num cpi bad';
+      cCell.title='Unbudgeted — hours charged with no budget; no earned value (drags Project CPI).';
+    } else { pCell.textContent='—'; eCell.textContent='—'; cCell.textContent='—'; }
+    return;
   }
+  let implied=false, overrun=false;
+  if(rem==null||isNaN(rem)){ rem=Math.max(b-a,0); implied=true; }   // budget-implied baseline (b>0 here)
   if(rem<0) rem=0;
-  overrun = b>0 && a>b;                             // actuals exceed budget
+  overrun = a>b;                                   // actuals exceed budget
   const eac=a+rem;
   const pct = eac>0 ? a/eac : 1;                 // 0 remaining & 0 actual → complete
   pCell.textContent=Math.round(pct*100)+'%';
   pCell.classList.toggle('implied', implied && !overrun);
-  // No budget → nothing to earn against; earned/CPI are N/A (the cell is flagged unbudgeted).
-  if(!b){ eCell.textContent='—'; cCell.textContent='—'; return; }
   const earned=pct*b;
   eCell.textContent=earned.toLocaleString(undefined,{maximumFractionDigits:0});
   eCell.classList.toggle('implied', implied && !overrun);
@@ -322,11 +326,14 @@ function renderBudget(d){
   const has = discs.length || d.material_total!=null || d.labour_hours!=null;
   el('budgetEmpty').style.display = has ? 'none' : 'block';
   el('budgetSrc').textContent = (has && d.source) ? ('— '+d.source+(d.read_only?' (read-only)':'')) : '';
-  // project rollup: CPI = Σearned ÷ Σactual; % = completeness-weighted (weight = budget, else actual)
-  let earned=0, actual=0, pctw=0, w=0;
-  discs.forEach(x=>{ const b=x.hours||0, a=x.actual_hours||0;
-    earned+=(x.earned_hours||0); actual+=a;
-    if(x.pct_done!=null){ pctw+=x.pct_done*(b||a); w+=(b||a); } });
+  // project rollup over ALL cells, incl. UNBUDGETED work (real spend that earns nothing, so it
+  // drags CPI): CPI = Σearned ÷ Σactual; % = completeness-weighted (weight = budget, else actual).
+  let earned=0, actual=0, pctw=0, w=0, unbHrs=0;
+  const _cells=[];
+  (d.machines||[]).forEach(m=>(m.disciplines||[]).forEach(x=>_cells.push({b:x.budget_hours||0,a:x.actual_hours||0,e:x.earned_hours||0,p:x.pct_done})));
+  if(!_cells.length) discs.forEach(x=>_cells.push({b:x.hours||0,a:x.actual_hours||0,e:x.earned_hours||0,p:x.pct_done}));
+  _cells.forEach(c=>{ actual+=c.a; earned+=c.e; if(c.b===0 && c.a>0) unbHrs+=c.a;
+    if(c.p!=null){ pctw+=c.p*(c.b||c.a); w+=(c.b||c.a); } });
   const cpi = (actual>0 && earned>0) ? earned/actual : null;
   const pct = w>0 ? pctw/w : null;
   const cpiCls = cpi==null?'':(cpi<0.9?'bad':(cpi<1.0?'warn':'good'));
@@ -334,7 +341,8 @@ function renderBudget(d){
     kpi('Material $', money(d.material_total)) +
     kpi('Labour (hrs)', d.labour_hours!=null?fmtN(d.labour_hours):'—') +
     kpi('% Complete', pct!=null?Math.round(pct*100)+'%':'—') +
-    kpi('Project CPI', cpi!=null?cpi.toFixed(2):'—', cpiCls);
+    kpi('Project CPI', cpi!=null?cpi.toFixed(2):'—', cpiCls) +
+    kpi('Unbudgeted (hrs)', unbHrs?fmtN(unbHrs):'0', unbHrs?'bad':'');
   if(!discs.length){ el('budgetDisc').innerHTML=''; return; }
   let h='<table class="mdt"><tr><th>Discipline</th><th class="num">Budget (hrs)</th>'+
     '<th class="num">Actual (hrs)</th><th class="num">% Done</th><th class="num">Earned (hrs)</th><th class="num">CPI</th></tr>';
