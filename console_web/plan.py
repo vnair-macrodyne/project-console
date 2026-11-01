@@ -820,12 +820,14 @@ def _wi_metrics(bud, act, remaining):
     earned = pct×budget; CPI = earned÷actual = budget÷EAC. When the PM has NOT entered a remaining
     but the cell is budgeted and at/under budget, fall back to the budget-IMPLIED remaining
     (budget − actual) so the cell reads an on-plan baseline (EAC = budget, CPI = 1.0) instead of
-    blank; `implied` flags that case. A PM-entered remaining always wins; over-budget with no entry
-    stays blank (can't infer a remaining); an unbudgeted cell earns nothing."""
+    blank; `implied` flags that case. A PM-entered remaining always wins; already-over-budget with no entry reads as an
+    overrun (remaining 0 -> CPI = budget/actual < 1), warning the PM; an unbudgeted cell earns nothing."""
     implied = False
     r = remaining
-    if r is None and bud and bud > 0 and (act or 0.0) <= bud:
-        r = bud - (act or 0.0)
+    if r is None and bud and bud > 0:
+        # budget-implied remaining: on-plan (budget - actual) at/under budget; 0 when ALREADY over
+        # budget, so an unplanned overrun reads CPI = budget/actual (< 1) to warn the PM, not blank.
+        r = max(bud - (act or 0.0), 0.0)
         implied = True
     pct = _pct_from_remaining(act, r)
     earned = round(pct * bud, 2) if (pct is not None and bud) else None

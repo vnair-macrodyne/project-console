@@ -216,23 +216,26 @@ function recalc(iid){
   cCell.className='num cpi';
   // Budget-implied baseline: with no PM entry, a budgeted cell at/under budget defaults to
   // remaining = budget − actual (EAC = budget, CPI = 1.0) so it reads on-plan, not blank.
-  let implied=false;
+  let implied=false, overrun=false;
   if(rem==null||isNaN(rem)){
-    if(b>0 && a<=b){ rem=b-a; implied=true; }
+    if(b>0){ rem=Math.max(b-a,0); implied=true; }   // on-plan if under budget; overrun (0 remaining) if over
     else { pCell.textContent='—'; eCell.textContent='—'; cCell.textContent='—'; return; }
   }
   if(rem<0) rem=0;
+  overrun = b>0 && a>b;                             // actuals exceed budget
   const eac=a+rem;
   const pct = eac>0 ? a/eac : 1;                 // 0 remaining & 0 actual → complete
   pCell.textContent=Math.round(pct*100)+'%';
-  pCell.classList.toggle('implied', implied);
+  pCell.classList.toggle('implied', implied && !overrun);
   // No budget → nothing to earn against; earned/CPI are N/A (the cell is flagged unbudgeted).
   if(!b){ eCell.textContent='—'; cCell.textContent='—'; return; }
   const earned=pct*b;
   eCell.textContent=earned.toLocaleString(undefined,{maximumFractionDigits:0});
-  eCell.classList.toggle('implied', implied);
+  eCell.classList.toggle('implied', implied && !overrun);
   if(a>0){ const cpi=earned/a; cCell.textContent=cpi.toFixed(2);
-    cCell.className='num cpi '+(implied?'implied ':'')+(cpi<0.9?'bad':(cpi<1.0?'warn':'')); }
+    const tone=(cpi<0.9?'bad':(cpi<1.0?'warn':''));
+    cCell.className='num cpi '+((implied && !tone)?'implied ':'')+tone;
+    cCell.title=(implied && overrun) ? 'Over budget with no remaining planned — shown as an overrun (CPI = budget/actual).' : ''; }
   else { cCell.textContent='—'; }
 }
 
