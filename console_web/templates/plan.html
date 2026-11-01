@@ -62,6 +62,17 @@
         background:#fff3d6;color:#8a5a00;border:1px solid #e7c766;border-radius:20px;padding:1px 8px}
   .mdbanner{background:#fff8e6;border:1px solid #e7c766;color:#8a5a00;border-radius:9px;
             padding:9px 12px;font-size:12.5px;margin:0 0 10px}
+  .nav{background:#fff;border-bottom:1px solid var(--line);padding:0 16px;display:flex;gap:2px;position:sticky;top:0;z-index:20;box-shadow:0 1px 3px rgba(20,30,60,.05)}
+  .nav .navgrp{position:relative}
+  .nav .navtop{background:none;border:0;padding:12px 15px;font-size:14px;font-weight:600;color:var(--ink);cursor:pointer;border-bottom:3px solid transparent}
+  .nav .navtop:hover{color:var(--brand-2)}
+  .nav a.pmlink{margin-left:auto;text-decoration:none;color:var(--brand-2);border:1px solid var(--line);border-radius:8px;padding:7px 13px;font-size:13px;font-weight:600;align-self:center}
+  .nav a.pmlink:hover{background:#f2f6ff;border-color:var(--brand-2)}
+  .nav .navmenu{position:absolute;top:100%;left:0;background:#fff;border:1px solid var(--line);border-radius:0 0 10px 10px;box-shadow:0 10px 26px rgba(20,30,60,.16);min-width:250px;padding:6px;display:none;z-index:30}
+  .nav .navgrp.open .navmenu{display:block}
+  .nav .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:9px 11px;border-radius:7px;cursor:pointer;font-size:13.5px;color:var(--ink);text-decoration:none}
+  .nav .mi:hover{background:#f2f6ff;color:var(--brand-2)}
+  .nav .mi .mid{font-size:11.5px;color:var(--muted);margin-top:1px;font-weight:400}
 </style>
 </head>
 <body>
@@ -72,8 +83,8 @@
   <span id="tagline" style="opacity:.65;font-size:12px;font-style:italic;margin-left:-8px">The Data Console</span>
   <span class="co" id="company"></span>
   <span class="demo" id="demoBadge" style="display:none">DEMO DATA</span>
-  <a class="back" href="/">← Dashboard</a>
 </header>
+<nav class="nav" id="nav"></nav>
 
 <div class="wrap">
   <div class="card">
@@ -384,6 +395,39 @@ el('saveBtn').onclick=async()=>{
 
 function showMsg(cls,txt){ const m=el('msg'); m.className='msg '+(cls||''); m.textContent=txt; m.style.display='block'; }
 function hideMsg(){ const m=el('msg'); m.style.display='none'; }
+function navCloseMenus(){ document.querySelectorAll('#nav .navgrp.open').forEach(g=>g.classList.remove('open')); }
+document.addEventListener('click', navCloseMenus);
+async function buildNav(){
+  const nav=el('nav'); if(!nav) return;
+  let qs=[], me={};
+  try{ me=await (await fetch('/api/me'+location.search)).json(); }catch(e){ me={}; }
+  try{ qs=await (await fetch('/api/queries')).json(); }catch(e){ qs=[]; }
+  const order=[], byMenu={};
+  qs.forEach(q=>{ if(!byMenu[q.menu]){ byMenu[q.menu]=[]; order.push(q.menu); } byMenu[q.menu].push(q); });
+  const role=(me&&me.role)||'viewer', rank={viewer:1,pm:2,admin:3};
+  order.forEach(m=>{
+    const g=document.createElement('div'); g.className='navgrp';
+    const btn=document.createElement('button'); btn.className='navtop'; btn.textContent=m+' \u25be';
+    btn.onclick=(e)=>{ e.stopPropagation(); const open=g.classList.contains('open'); navCloseMenus(); if(!open) g.classList.add('open'); };
+    g.appendChild(btn);
+    const menu=document.createElement('div'); menu.className='navmenu';
+    byMenu[m].forEach(q=>{
+      const a=document.createElement('a'); a.className='mi'; a.href='/#report='+q.id;
+      a.innerHTML=`<div>${q.label}</div><div class="mid">${q.desc||''}</div>`;
+      menu.appendChild(a);
+    });
+    if(m==='Project Management' && (rank[role]||1)>=2){
+      const pl=document.createElement('a'); pl.className='mi'; pl.href='/plan';
+      pl.innerHTML='<div>Project Plan</div><div class="mid">You are here \u2014 manage a project on the console.</div>';
+      menu.insertBefore(pl, menu.firstChild);
+    }
+    g.appendChild(menu); nav.appendChild(g);
+  });
+  if((rank[role]||1)>=3){
+    const ad=document.createElement('a'); ad.className='navtop pmlink'; ad.href='/admin'; ad.style.marginLeft='8px'; ad.textContent='Users'; nav.appendChild(ad);
+  }
+}
+buildNav();
 boot();
 </script>
 </body>

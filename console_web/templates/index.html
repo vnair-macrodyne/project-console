@@ -278,6 +278,9 @@ async function boot(){
   if(state.lexicon.projects) el('projLabel').textContent = state.lexicon.projects;
 
   state.queries = await (await fetch('/api/queries')).json();
+  // honour a #report=<id> deep-link (e.g. from the Project Plan page menu), else the first report
+  const _want = (location.hash.match(/report=([a-z0-9_]+)/) || [])[1];
+  state.selQuery = (_want && state.queries.some(q => q.id === _want)) ? _want : state.queries[0].id;
   renderNav();
   renderChips();
   // Custom range: re-run when either date is picked (debounced). A missing bound is
@@ -291,7 +294,6 @@ async function boot(){
   state.selProjects = new Set((_act.length?_act:state.projects).map(p=>p.id));  // default: active projects (all, if none flagged)
   renderProjects();
 
-  state.selQuery = state.queries[0].id;                        // default: Executive
   runQuery();
 }
 
