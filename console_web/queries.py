@@ -621,9 +621,10 @@ class LiveQueryService(QueryService):
             rec.update(tw.get(pid, {}))            # calculated 2-week labour hrs / material $
             # % Done is the CALCULATED roll-up of per-discipline declared %C; material run-out is
             # computed from committed POs (both Carpedia-aligned). Manual entries are only overrides.
-            rollup = _rollup_pct_complete(f.disciplines if f else [], prog.get(pid, {}))
+            rollup, inferred = _rollup_pct_complete(f.disciplines if f else [], prog.get(pid, {}))
             if rollup is not None:
                 rec["PctDone"] = rollup
+                rec["_PctInferred"] = inferred
             rec["MaterialCommittedFull"] = committed.get(pid)
             name, client = meta.get(pid, (None, None))
             # per-discipline % is PLANNED (excludes rework 999), consistent with the scorecard and
@@ -760,9 +761,10 @@ class LiveQueryService(QueryService):
             rec["ReworkThreshold"] = thr.get(pid)     # per-project; _scorecard_row defaults to 1%
             # % complete is now the CALCULATED roll-up of per-discipline declared %C; the overlay's
             # RunoutLabour/RunoutMaterial become optional overrides. (Manual RunoutLabour → % override.)
-            rollup = _rollup_pct_complete(f.disciplines, prog.get(pid, {}))
+            rollup, inferred = _rollup_pct_complete(f.disciplines, prog.get(pid, {}))
             if rollup is not None:
                 rec["PctDone"] = rollup
+                rec["_PctInferred"] = inferred
             rec["MaterialCommittedFull"] = committed.get(pid)
             rec["RunoutLabourPct"] = rec.pop("RunoutLabour", None)   # treat old manual as % override
             rows.append(_scorecard_row(pid, f, rec))
@@ -1712,6 +1714,9 @@ def _scorecard_result(rows):
             f"the {proj.lower()}'s rework threshold (default 1%, set per {proj.lower()} in the "
             f"Plan entry). Run-out, CPI and earning stay on TOTAL labour (rework is still real "
             f"spend).")
+    if any(r.get("_inf") for r in rows):
+        note += (" † = inferred from budget vs actual (no PM % complete entered yet): run-out, "
+                 "CPI and earning on those rows are the Plan baseline, not a PM assessment.")
     return QueryResult("scorecard", f"{proj} {L('scorecard')}", cols, rows, cards, note)
 
 
@@ -2038,18 +2043,36 @@ def _crosswalk_result(rows):
 # Both are CALCULATED. The PM's typed run-out is only an optional OVERRIDE (flagged).
 
 def _rollup_pct_complete(disciplines, prog):
-    """Project %C = Σ(%C_disc × budget_hrs_disc) ÷ Σ budget_hrs_disc (hours-weighted EV÷BAC).
-    prog = {discipline: 0–1 fraction}. A discipline with no declared % contributes 0 progress
-    (it's budgeted work not yet started). Returns None when there are no budget hours at all."""
+    """Project %C = Σ(earned_disc) ÷ Σ budget_hrs_disc (hours-weighted EV÷BAC).
+
+    earned_disc = declared %C × budget when a PM has entered a % for that discipline; otherwise
+    the IMPLIED baseline min(actual, budget) — the same baseline the Plan grid shows (on-plan at/
+    under budget; capped at budget = an overrun when already over). This lets the executive
+    scorecard/board carry a live run-out from budget-vs-actual instead of a blank until a PM types
+    progress. Unbudgeted disciplines (no budget) earn nothing here, but their actual hours still
+    sit in labour_actual_hours, so they drag the project CPI downstream (EV ÷ actual).
+
+    prog = {discipline: 0–1 fraction}. Returns (pct, inferred): inferred is True when the position
+    is derived purely from budget-vs-actual (NO PM %C declared for any budgeted discipline) yet
+    there are actuals to infer from — the board flags those cells. Returns (None, False) when there
+    are no budget hours at all."""
     num = den = 0.0
+    declared_any = False
     for d in (disciplines or []):
         bh = float(getattr(d, "budget_hours", 0) or 0)
         if bh <= 0:
             continue
-        p = prog.get(getattr(d, "discipline", None)) if prog else None
-        num += bh * (float(p) if p is not None else 0.0)
         den += bh
-    return round(num / den, 4) if den else None
+        p = prog.get(getattr(d, "discipline", None)) if prog else None
+        if p is not None:
+            declared_any = True
+            num += bh * float(p)
+        else:
+            ah = float(getattr(d, "actual_hours", 0) or 0)
+            num += min(ah, bh)            # implied earned: on-plan, capped at budget (= overrun)
+    if not den:
+        return None, False
+    return round(num / den, 4), ((not declared_any) and num > 0)
 
 
 def _material_runout(committed, budget, actual=None):
@@ -2136,6 +2159,8 @@ def _scorecard_row(pid, f, rec):
         "RunoutPct": runout_lab_pct,
         "RunoutMaterialPct": runout_mat_pct,
         "_tone": {"RunoutMaterialPct": _mat_runout_tone(runout_mat_pct, f.material_consumed_pct)},
+        "_inf": (["PctDone", "RunoutLabour", "RunoutPct", "CPI", "EarningEAC", "MarginEAC"]
+                 if rec.get("_PctInferred") else None),
         "MaterialEAC": _mr["eac"],
         "MaterialUnordered": _mr["unordered"],
         "RunoutOverride": ("manual" if overridden else None),
@@ -2247,6 +2272,9 @@ def _exec_result(rows):
             f"Completion = actual ÷ % complete). Schedule, % Done (incl. its 2-week delta), "
             f"{L('material').lower()} run-out and the remaining procurement counts are PM entries. "
             f"Ranked by {L('labour').lower()} % of budget (hours).")
+    if any(r.get("_inf") for r in rows):
+        note += (" † = inferred from budget vs actual (no PM % complete entered yet): % Done and "
+                 "Run-out on those rows are the Plan baseline, not a PM assessment.")
     return QueryResult("exec", "Executive Dashboard", cols, rows, cards, note)
 
 
@@ -2289,6 +2317,8 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
     }
     row["_tone"] = {"RunoutMaterial": _mat_runout_tone(row["RunoutMaterial"],
                                                         f.material_consumed_pct if f else None)}
+    if rec.get("_PctInferred"):
+        row["_inf"] = ["PctDone", "RunoutLabour"]
     for d in _EXEC_DISC_ORDER:
         row[f"disc::{d}"] = disc_pct.get(d)
     return row
@@ -4457,16 +4487,24 @@ _DEMO_COMMITTED = {230219: 2700000.0, 230312: 1600000.0, 240087: 500000.0}
 
 
 def _demo_rollup_pct(pid):
-    """Demo project %C = hours-weighted roll-up of _DEMO_PROGRESS over the discipline budgets."""
+    """Demo project %C — mirrors _rollup_pct_complete: declared %C × budget where a PM has entered
+    a %, else the implied baseline min(actual, budget). Returns (pct, inferred)."""
     prog = _DEMO_PROGRESS.get(pid, {})
     num = den = 0.0
-    for disc, (b, _a) in _DEMO[pid]["disc"].items():
+    declared_any = False
+    for disc, (b, a) in _DEMO[pid]["disc"].items():
         if not b or b <= 0:
             continue
-        p = prog.get(disc)
-        num += b * (float(p) if p is not None else 0.0)
         den += b
-    return round(num / den, 4) if den else None
+        p = prog.get(disc)
+        if p is not None:
+            declared_any = True
+            num += b * float(p)
+        else:
+            num += min(float(a or 0.0), b)
+    if not den:
+        return None, False
+    return round(num / den, 4), ((not declared_any) and num > 0)
 
 
 # Executive-board extras for the demo (schedule/2-wk/procurement — the manual overlay)
@@ -4499,9 +4537,10 @@ class DemoQueryService(QueryService):
             prw = _DEMO_REWORK.get(pid, {})
             disc_pct = {disc: (round((a - prw.get(disc, (0.0, 0.0))[0]) / b, 4) if b else None)
                         for disc, (b, a) in d["disc"].items()}
+            _dpct, _dinf = _demo_rollup_pct(pid)
             rec = {"Rank": d["rank"], "POShipDate": e["po"], "CustAgreedDate": d["ship"],
                    "PlannedShipDate": e["planned"],
-                   "PctDone": _demo_rollup_pct(pid),          # calculated roll-up (was d["done"])
+                   "PctDone": _dpct, "_PctInferred": _dinf,   # calculated roll-up (was d["done"])
                    "MaterialCommittedFull": _DEMO_COMMITTED.get(pid),  # material run-out basis
                    "PctDoneDelta": e["done_delta"], "LabHrs2wk": e["lab2wk"],
                    "MatSpend2wk": e["mat2wk"]}
@@ -4537,7 +4576,9 @@ class DemoQueryService(QueryService):
             f = _DemoFin(d)
             # % Done is now the calculated roll-up of per-discipline %C; material run-out is
             # computed from committed POs. No manual overrides in the demo (all Carpedia-computed).
-            rec = {"PctDone": _demo_rollup_pct(pid), "Rank": d["rank"], "CustAgreedDate": d["ship"],
+            _dpct, _dinf = _demo_rollup_pct(pid)
+            rec = {"PctDone": _dpct, "_PctInferred": _dinf, "Rank": d["rank"],
+                   "CustAgreedDate": d["ship"],
                    "MaterialCommittedFull": _DEMO_COMMITTED.get(pid)}
             g = _demo_nc_by_project().get(pid, {})
             rec["NCOpen"], rec["NCCost"] = g.get("open"), g.get("cost")
