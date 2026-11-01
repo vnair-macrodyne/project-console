@@ -38,7 +38,7 @@
     border-radius:0 0 10px 10px;box-shadow:0 10px 26px rgba(20,30,60,.16);min-width:250px;padding:6px;
     display:none;z-index:30}
   .navgrp.open .navmenu{display:block}
-  .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:9px 11px;border-radius:7px;
+  .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:9px 11px;border-radius:7px;text-decoration:none;
     cursor:pointer;font-size:13.5px;color:var(--ink)}
   .mi:hover{background:#f2f6ff;color:var(--brand-2)}
   .mi.sel{background:#eef3ff;color:var(--brand);font-weight:600}
@@ -303,6 +303,9 @@ function menus(){
 }
 function renderNav(){
   const nav=el('nav'); nav.innerHTML='';
+  // RBAC rank: Project Plan is pm+, Users/Admin is admin. (2026-11-01: Project Plan moved from a
+  // top-right link INTO the Project Management menu -- same pm+ gate.)
+  const role=(state.me&&state.me.role)||'viewer', rank={viewer:1,pm:2,admin:3};
   menus().forEach(([m,items])=>{
     const g=document.createElement('div'); g.className='navgrp';
     const active = items.some(q=>q.id===state.selQuery);
@@ -317,16 +320,14 @@ function renderNav(){
       mi.onclick=()=>{ closeMenus(); selectReport(q.id); };
       menu.appendChild(mi);
     });
+    // Project Plan sits at the top of the Project Management menu (pm+ only -- same RBAC as the old link).
+    if(m==='Project Management' && (rank[role]||1)>=2){
+      const pl=document.createElement('a'); pl.className='mi planlink'; pl.href='/plan';
+      pl.innerHTML='<div>Project Plan</div><div class="mid">Manage a project on the console — add/remove, budget &amp; efficacy, schedule &amp; progress.</div>';
+      menu.insertBefore(pl, menu.firstChild);
+    }
     g.appendChild(menu); nav.appendChild(g);
   });
-  // role-gated links (right side): Project Plan (pm+ — now also owns budget/efficacy + add/remove),
-  // Admin (admin). PM Budgets folded into Project Plan (2026-09-12).
-  const role=(state.me&&state.me.role)||'viewer', rank={viewer:1,pm:2,admin:3};
-  if((rank[role]||1)>=2){
-    const pl=document.createElement('a'); pl.className='navtop pmlink'; pl.href='/plan';
-    pl.textContent='Project Plan';
-    pl.title='Add/remove projects, budget & efficacy, schedule & progress'; nav.appendChild(pl);
-  }
   if((rank[role]||1)>=3){
     const ad=document.createElement('a'); ad.className='navtop pmlink'; ad.href='/admin';
     ad.style.marginLeft='8px'; ad.textContent='Users'; ad.title='Manage users & roles'; nav.appendChild(ad);
