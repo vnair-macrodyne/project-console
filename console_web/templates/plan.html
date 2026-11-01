@@ -326,21 +326,26 @@ function renderBudget(d){
   const has = discs.length || d.material_total!=null || d.labour_hours!=null;
   el('budgetEmpty').style.display = has ? 'none' : 'block';
   el('budgetSrc').textContent = (has && d.source) ? ('— '+d.source+(d.read_only?' (read-only)':'')) : '';
-  // project rollup over ALL cells, incl. UNBUDGETED work (real spend that earns nothing, so it
-  // drags CPI): CPI = Σearned ÷ Σactual; % = completeness-weighted (weight = budget, else actual).
+  // project rollup over ALL cells, using the SAME implied baseline the grid uses, so earnings/CPI
+  // are always computed (never blank): a budgeted cell earns saved-% × budget, else the on-plan/
+  // overrun baseline min(actual, budget); UNBUDGETED work earns 0 but its hours still count as
+  // actual, so it drags CPI. CPI = Σearned ÷ Σactual; % = budget-weighted over budgeted cells.
   let earned=0, actual=0, pctw=0, w=0, unbHrs=0;
   const _cells=[];
-  (d.machines||[]).forEach(m=>(m.disciplines||[]).forEach(x=>_cells.push({b:x.budget_hours||0,a:x.actual_hours||0,e:x.earned_hours||0,p:x.pct_done})));
-  if(!_cells.length) discs.forEach(x=>_cells.push({b:x.hours||0,a:x.actual_hours||0,e:x.earned_hours||0,p:x.pct_done}));
-  _cells.forEach(c=>{ actual+=c.a; earned+=c.e; if(c.b===0 && c.a>0) unbHrs+=c.a;
-    if(c.p!=null){ pctw+=c.p*(c.b||c.a); w+=(c.b||c.a); } });
-  const cpi = (actual>0 && earned>0) ? earned/actual : null;
+  (d.machines||[]).forEach(m=>(m.disciplines||[]).forEach(x=>_cells.push({b:x.budget_hours||0,a:x.actual_hours||0,p:x.pct_done})));
+  if(!_cells.length) discs.forEach(x=>_cells.push({b:x.hours||0,a:x.actual_hours||0,p:x.pct_done}));
+  _cells.forEach(c=>{ const b=c.b||0, a=c.a||0; actual+=a;
+    if(b<=0){ if(a>0) unbHrs+=a; return; }                 // unbudgeted: 0 earned, counted in actual
+    const pdone=(c.p!=null)?c.p:Math.min(a,b)/b;           // saved %, else on-plan/overrun baseline
+    earned+=pdone*b; pctw+=pdone*b; w+=b; });
+  const cpi = actual>0 ? earned/actual : null;
   const pct = w>0 ? pctw/w : null;
   const cpiCls = cpi==null?'':(cpi<0.9?'bad':(cpi<1.0?'warn':'good'));
   el('budgetKpis').innerHTML =
     kpi('Material $', money(d.material_total)) +
     kpi('Labour (hrs)', d.labour_hours!=null?fmtN(d.labour_hours):'—') +
     kpi('% Complete', pct!=null?Math.round(pct*100)+'%':'—') +
+    kpi('Earned (hrs)', earned?fmtN(earned):'—') +
     kpi('Project CPI', cpi!=null?cpi.toFixed(2):'—', cpiCls) +
     kpi('Unbudgeted (hrs)', unbHrs?fmtN(unbHrs):'0', unbHrs?'bad':'');
   if(!discs.length){ el('budgetDisc').innerHTML=''; return; }
