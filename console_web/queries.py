@@ -1161,7 +1161,9 @@ class LiveQueryService(QueryService):
         raw = self._readiness_df("SET NOCOUNT ON; EXEC dbo.uspPurchasingItemsToPurchase")
         if raw is None or raw.empty:
             return None
-        raw = raw[raw["ProjectID"].isin(pids) & (raw["Action"].astype(str).str.strip() == "Procure")].copy()
+        # Procure lines, plus Return lines (procured beyond need: Still to Order is negative) — Vijay, 2026-11-04
+        raw = raw[raw["ProjectID"].isin(pids)
+                  & raw["Action"].astype(str).str.strip().isin(["Procure", "Return"])].copy()
         if raw.empty:
             return None
         ids = _ids_sql(pids)
@@ -1322,11 +1324,13 @@ class LiveQueryService(QueryService):
         raw["HistLeadN"] = [hn.get(int(i)) if pd.notna(i) else None for i in raw["ItemID"]]
 
     def _attach_line_releases(self, raw, pids):
-        """Match each PO line to the release behind it (etospec.match_line_releases)."""
+        """Credit each PO line to the release behind it, oldest PO first, and flag quantity no release
+        covers as a potential over order (etospec.allocate_line_releases)."""
         if raw is None or raw.empty or not pids:
             return raw
-        return etospec.match_line_releases(raw, self._df(etospec.query_release_events(pids)),
-                                           ref_col="Ordered", spec_col="Code")
+        ev = self._df(etospec.query_release_events(pids))
+        alloc = etospec.allocate_line_releases(ev, self._df(etospec.query_po_line_keys(pids)))
+        return etospec.apply_line_releases(raw, alloc, ev)
 
     def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
         import datetime as _dt
@@ -2869,15 +2873,17 @@ def _spec_po_exc_result(items, label, enriched=True, enrich_err=None):
 def _spec_po_listing_result(items, label):
     """items = po_listing_detail output — one row per PO line, ALL statuses (active POs only).
     Same 19-column exception layout; the Excel export reuses the exceptions workbook writer."""
+    import pandas as pd
     grouped = etospec.po_listing_build_rows(items)
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(etospec.COLS_EXC)]
     rows = etospec.web_rows(etospec.COLS_EXC, grouped)
     if items is None or items.empty:
-        n = draft = overdue = received = open_lines = to_proc = 0
+        n = draft = overdue = received = open_lines = to_proc = over_n = 0
         val = 0.0
     else:
         st = items["Status"].astype(str)
         to_proc = int((st == "To procure").sum())
+        over_n = int(pd.to_numeric(items.get("OverOrder"), errors="coerce").notna().sum()) if "OverOrder" in items.columns else 0
         n = len(items) - to_proc
         draft = int((st == "Draft").sum())
         overdue = int(st.str.startswith("Overdue").sum())
@@ -2890,14 +2896,18 @@ def _spec_po_listing_result(items, label):
              Card("Open", "{:,}".format(open_lines)),
              Card("Overdue", "{:,}".format(overdue), "bad" if overdue else "good"),
              Card("Received", "{:,}".format(received)),
+             Card("Potential over order", "{:,}".format(over_n), "warn" if over_n else "good"),
              Card("Committed value", _fmt_money2(val))]
     note = ("ETO's Items to Procure (lines purchasing still has to order: no buyer, requisition or PO "
             "yet), then every purchase-order line across all statuses — Draft (raised but not yet issued: not "
             "printed AND not emailed), Open (before need-by), Overdue, partial, and Received — on "
             "active (not cancelled) POs, one row per line. Release Date / Released by / Quantity Change "
-            "= the release-log entry behind the line: for a PO line, the latest release of that part on "
-            "the same machine made on or before the PO date (the earliest one if the PO came first); for "
-            "a To-procure line, the latest release on the machine. On To-procure lines, Still to Order = "
+            "= the release-log entry behind the line. For PO lines, each machine's released quantity is "
+            "shared out to its PO lines oldest PO first, and a line is credited to the release supplying "
+            "most of it; quantity no release covers shows as Potential Over Order (release fields blank "
+            "when none of the line is covered). Parts never released on the project (Non-BOM requests) "
+            "carry no release and no flag. For a To-procure line, the latest release on the machine; "
+            "a negative Still to Order is ETO's Return (procured beyond need). On To-procure lines, Still to Order = "
             "ETO's Required quantity (still to be procured) and Planned Receipt = ETO's Required Date where "
             "entered. # Releases = all release-log entries "
             "for the part on the project. Code = machine/spec; Category = item category; "

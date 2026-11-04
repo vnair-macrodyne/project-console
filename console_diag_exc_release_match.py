@@ -1,7 +1,8 @@
 """
 console_diag_exc_release_match.py — live check of the two fixes for Peter's 3 Nov 2026 email.  READ-ONLY.
 
-Problem 1: a part released more than once showed the same Release Date and the latest releaser on every PO
+Problem 1 (rule revised 2026-11-04: releases shared out to PO lines oldest PO first; uncovered qty = Potential Over Order; Returns included with negative Still to Order).
+Problem 1 was: a part released more than once showed the same Release Date and the latest releaser on every PO
 line (240148 / E00067: four lines, all 2026-07-20, all "Ariza, Juan"). Fix: each line is matched to ONE
 release-log entry — same project + part, same machine where it has one, the latest release on or before
 the PO date (earliest if the PO came first); To-procure lines take the latest release. Quantity Change =
@@ -86,12 +87,17 @@ def main():
     print(f"   To-procure lines: {len(tp)}")
     for x in tp[:15]:
         print(f"     {x.get('ProjectID')} m{x.get('Code')} {x.get('Item')} | rel {x.get('EngRelease')} by {x.get('ReleasedBy')} "
-              f"qty {x.get('QtyChange')} | # rel {x.get('RelCount')}")
+              f"qty {x.get('QtyChange')} | still to order {x.get('ToOrder')} | planned {x.get('PlannedReceipt')}")
     print("   E00067 lines:")
     for x in det:
         if x.get("Item") == "E00067":
             print(f"     m{x.get('Code')} PO {x.get('ReqNo')} ordered {x.get('PODate')} | rel {x.get('EngRelease')} "
-                  f"by {x.get('ReleasedBy')} qty {x.get('QtyChange')} | # rel {x.get('RelCount')}")
+                  f"by {x.get('ReleasedBy')} qty {x.get('QtyChange')} | # rel {x.get('RelCount')} | over order {x.get('OverOrder')}")
+    ov = [x for x in det if x.get("OverOrder")]
+    print(f"   Potential over-order lines: {len(ov)} (first 15)")
+    for x in ov[:15]:
+        print(f"     {x.get('ProjectID')} m{x.get('Code')} {x.get('Item')} PO {x.get('ReqNo')} ordered {x.get('PODate')} | "
+              f"over {x.get('OverOrder')} | credited rel {x.get('EngRelease')} qty {x.get('QtyChange')}")
 
     print("\n== D. All active projects")
     act = sorted(s._active_ids() or [])
@@ -99,7 +105,11 @@ def main():
         t0 = time.perf_counter()
         raw = s._df(etospec.query_po_exceptions(False, act, None, None, all_statuses=True))
         ev = s._df(etospec.query_release_events(act))
-        m = etospec.match_line_releases(raw, ev, ref_col="Ordered", spec_col="Code")
+        alloc = etospec.allocate_line_releases(ev, s._df(etospec.query_po_line_keys(act)))
+        m = etospec.apply_line_releases(raw, alloc, ev)
+        print(f"   potential over order: {int(m['OverOrder'].notna().sum()):,} lines, "
+              f"{m['OverOrder'].fillna(0).sum():,.0f} units; no release covers any of it: "
+              f"{int((m['OverOrder'].notna() & m['QtyChange'].isna()).sum()):,} lines")
         pos = ev[(ev["QtyChange"] > 0) & ev["RelType"].astype(str).isin(["Prerelease", "Release"])]
         npos = pos.groupby(["ProjectID", "ItemID"]).size()
         onmach = set(zip(pos["ProjectID"], pos["ItemID"], pos["SpecKey"]))

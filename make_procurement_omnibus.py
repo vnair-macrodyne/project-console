@@ -120,7 +120,7 @@ def omnibus_rows(lto, items, cols_exc, podates, relby):
             if st == "To procure":      # the exception report now carries ETO's Items to Procure too;
                 continue                # they come from Lines to Order above, so skip them here
             stage = "Requisition (draft PO)" if st == "Draft" else ("Received" if st == "Received" else "On order")
-            row = {"Stage": stage}
+            row = {"Stage": stage, "Status": st}   # Status left Peter's layout (29 Oct) but the overdue count needs it
             for k, *_ in cols_exc:
                 v = r.get(k)
                 row[k] = None if (isinstance(v, float) and pd.isna(v)) else v

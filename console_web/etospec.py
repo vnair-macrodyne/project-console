@@ -767,7 +767,8 @@ COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, ro
     ("ReleasedBy",     "Released by",              18, "L", False),   # who made the release matched to this line (match_line_releases)
     ("RelCount",       "# Releases",                9, "R", True),    # times the part was released on the project
     ("QtyChange",      "Quantity Change",           9, "R", True),    # quantity of the release this line is matched to (Peter, 2026-11-03)
-    ("ToOrder",        "Still to Order",            9, "R", True),    # To-procure lines only: ETO's Required (ToPurchase) (Vijay, 2026-11-04)
+    ("ToOrder",        "Still to Order",            9, "R", True),    # To-procure lines only: ETO's Required (ToPurchase); -ve = return (Vijay, 2026-11-04)
+    ("OverOrder",      "Potential Over Order",     10, "R", True),    # PO qty not covered by a release on the machine (Vijay, 2026-11-04)
 ]
 
 # column index of "Item" (the grand-total "N line(s)" sits here) — computed so it survives reorders
@@ -923,6 +924,7 @@ def exc_detail(df, today=None):
             "RelCount": (int(r.get("RelCount")) if _num_or_none(r.get("RelCount")) is not None else None),
             "QtyChange": _num_or_none(r.get("QtyChange")),
             "ToOrder": None,                              # PO lines: nothing left to order on this line
+            "OverOrder": _num_or_none(r.get("OverOrder")),   # qty beyond what was released (allocate_line_releases)
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
@@ -999,6 +1001,116 @@ def query_release_events(project_ids):
     LEFT JOIN dbo.tblEmployee e ON e.EmployeeID = h.ReleasedByEmployeeID
     WHERE h.ProjectID IN ({ids})
     """
+
+
+def query_po_line_keys(project_ids):
+    """Every line on active POs for the projects (all statuses), with what release allocation needs."""
+    ids = ",".join(str(int(p)) for p in project_ids)
+    return f"""
+    SELECT pod.PurchaseDetailID AS DetailID, pod.ProjectID, CAST(pod.SpecID AS float) AS SpecKey,
+           pod.ItemID, CAST(pod.PurchaseQty AS float) AS Qty, poh.PurchaseDate, poh.PurchaseOrderID
+    FROM dbo.vwPurchaseOrderDetails pod
+    JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
+    WHERE poh.PurchaseActive = 1 AND pod.ItemID IS NOT NULL AND pod.ProjectID IN ({ids})
+    """
+
+
+def allocate_line_releases(events, lines):
+    """Share each machine's released quantity out to its PO lines, oldest PO first (Vijay, 2026-11-04).
+
+    Per project + part: positive Prerelease / Release entries are the supply, reduced by any negative
+    or Unrelease entries (taken off the latest release on the same machine). PO lines on active POs
+    (all statuses) draw on releases of their own machine in PO-date order; lines on a machine with no
+    release then draw on whatever is left on the project. A line is credited to the release that
+    supplies most of its quantity. Quantity no release covers = Potential Over Order. Parts with no
+    release at all on the project (Non-BOM requests) get no release and no flag.
+    Returns {DetailID: (ReleasedDateTime, RelBy, QtyChange, OverOrder)}."""
+    import pandas as pd
+    out = {}
+    if events is None or events.empty or lines is None or lines.empty:
+        return out
+    ev = events.copy()
+    ev["ReleasedDateTime"] = pd.to_datetime(ev["ReleasedDateTime"], errors="coerce")
+    ev = ev.sort_values(["ReleasedDateTime", "HistID"])
+    ln = lines.copy()
+    ln["PurchaseDate"] = pd.to_datetime(ln["PurchaseDate"], errors="coerce")
+    ln = ln.sort_values(["PurchaseDate", "PurchaseOrderID", "DetailID"])
+    lgroups = {k: g for k, g in ln.groupby(["ProjectID", "ItemID"])}
+    for key, g in ev.groupby(["ProjectID", "ItemID"]):
+        rels = []
+        for _, e in g.iterrows():
+            q = float(e["QtyChange"] or 0)
+            typ = str(e["RelType"])
+            if typ in ("Prerelease", "Release") and q > 0:
+                rels.append({"dt": e["ReleasedDateTime"], "by": e["RelBy"], "q": q, "rem": q, "spec": e["SpecKey"]})
+            elif q < 0 or typ == "Unrelease":
+                cut = abs(q)
+                for r in sorted(rels, key=lambda r: r["dt"], reverse=True):
+                    if cut <= 0:
+                        break
+                    if r["spec"] == e["SpecKey"] and r["rem"] > 0:
+                        t = min(r["rem"], cut); r["rem"] -= t; cut -= t
+        if not rels:
+            continue
+        pl = lgroups.get(key)
+        if pl is None:
+            continue
+        specs = {r["spec"] for r in rels}
+        alloc = {}
+        for pass_own in (True, False):
+            for _, l in pl.iterrows():
+                own = l["SpecKey"] in specs
+                if own != pass_own:
+                    continue
+                need = float(l["Qty"] or 0)
+                got = []
+                for r in rels:
+                    if need <= 1e-9:
+                        break
+                    if (pass_own and r["spec"] != l["SpecKey"]) or r["rem"] <= 1e-9:
+                        continue
+                    t = min(r["rem"], need); r["rem"] -= t; need -= t; got.append((r, t))
+                alloc[l["DetailID"]] = (got, max(need, 0.0))
+        for did, (got, over) in alloc.items():
+            over = round(over, 4) if over > 1e-9 else None
+            if got:
+                best = max(got, key=lambda x: x[1])[0]          # first wins a tie (oldest release)
+                out[did] = (best["dt"], best["by"], best["q"], over)
+            else:
+                out[did] = (None, None, None, over)
+    return out
+
+
+def apply_line_releases(raw, alloc, events):
+    """Write the allocation onto PO rows (by DetailID): EngReleaseDate / ReleasedBy / QtyChange of the
+    credited release (blank when no release covers any of the line), OverOrder, and RelCount = all
+    release-log entries for the project + part. Rows without a DetailID are left as they were."""
+    import pandas as pd
+    if raw is None or raw.empty or "DetailID" not in raw.columns:
+        return raw
+    out = raw.copy()
+    cnt = events.groupby(["ProjectID", "ItemID"]).size().to_dict() if events is not None and not events.empty else {}
+    for c in ("EngReleaseDate", "ReleasedBy"):
+        if c not in out.columns:
+            out[c] = None
+        out[c] = out[c].astype("object")
+    q, ov, n = [], [], []
+    for idx, r in out.iterrows():
+        a = alloc.get(r.get("DetailID"))
+        try:
+            n.append(cnt.get((int(r.get("ProjectID")), int(r.get("ItemID")))))
+        except (TypeError, ValueError):
+            n.append(None)
+        if a is None:
+            q.append(None); ov.append(None); continue
+        dt_, by, qty, over = a
+        out.at[idx, "EngReleaseDate"] = (pd.Timestamp(dt_).date() if dt_ is not None and pd.notna(dt_) else None)
+        out.at[idx, "ReleasedBy"] = by
+        q.append(qty); ov.append(over)
+    out["QtyChange"] = q
+    out["OverOrder"] = ov
+    out["RelCount"] = n
+    return out
 
 
 def match_line_releases(raw, events, ref_col=None, spec_col="Code"):
@@ -1098,7 +1210,7 @@ def to_procure_detail(df, today=None):
             "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),
             "DrawingNo": _drawing_file(r.get("DrawingRaw")),
             "ExtValue": 0.0, "DaysLate": 10 ** 6,
-            "ToOrder": _num_or_none(r.get("ToOrder")),
+            "ToOrder": _num_or_none(r.get("ToOrder")), "OverOrder": None,
         })
     return pd.DataFrame(out)
 
@@ -1302,6 +1414,7 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         pod.SpecID                      AS Code,
         ISNULL(pod.ItemCompanyID, CAST(pod.ItemID AS nvarchar(30)))                      AS Item,
         pod.ItemID                      AS ItemID,
+        pod.PurchaseDetailID            AS DetailID,      -- PO line key (release allocation)
         pod.ItemDescription             AS Description,
         pdd.ItemMasterCategoryDescription AS Category,
         poh.PurchaseOrderID             AS PO,
@@ -1427,6 +1540,7 @@ def po_listing_detail(df, today=None):
             "RelCount": (int(r.get("RelCount")) if _num_or_none(r.get("RelCount")) is not None else None),
             "QtyChange": _num_or_none(r.get("QtyChange")),
             "ToOrder": None,                              # PO lines: nothing left to order on this line
+            "OverOrder": _num_or_none(r.get("OverOrder")),   # qty beyond what was released (allocate_line_releases)
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
