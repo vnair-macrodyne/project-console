@@ -105,7 +105,8 @@ def main():
         t0 = time.perf_counter()
         raw = s._df(etospec.query_po_exceptions(False, act, None, None, all_statuses=True))
         ev = s._df(etospec.query_release_events(act))
-        alloc = etospec.allocate_line_releases(ev, s._df(etospec.query_po_line_keys(act)))
+        alloc = etospec.allocate_line_releases(ev, s._df(etospec.query_po_line_keys(act)),
+                                               s._df(etospec.query_nonbom_events(act)))
         m = etospec.apply_line_releases(raw, alloc, ev)
         print(f"   potential over order: {int(m['OverOrder'].notna().sum()):,} lines, "
               f"{m['OverOrder'].fillna(0).sum():,.0f} units; no release covers any of it: "

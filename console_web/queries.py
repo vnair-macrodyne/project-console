@@ -1329,7 +1329,11 @@ class LiveQueryService(QueryService):
         if raw is None or raw.empty or not pids:
             return raw
         ev = self._df(etospec.query_release_events(pids))
-        alloc = etospec.allocate_line_releases(ev, self._df(etospec.query_po_line_keys(pids)))
+        try:
+            req = self._df(etospec.query_nonbom_events(pids))
+        except Exception:
+            req = None                      # cover from releases only if the request view is unreadable
+        alloc = etospec.allocate_line_releases(ev, self._df(etospec.query_po_line_keys(pids)), req)
         return etospec.apply_line_releases(raw, alloc, ev)
 
     def _q_po_listing(self, project_ids, date_from=None, date_to=None, **kw):
@@ -2903,8 +2907,10 @@ def _spec_po_listing_result(items, label):
             "printed AND not emailed), Open (before need-by), Overdue, partial, and Received — on "
             "active (not cancelled) POs, one row per line. Release Date / Released by / Quantity Change "
             "= the release-log entry behind the line. For PO lines, each machine's released quantity is "
-            "shared out to its PO lines oldest PO first, and a line is credited to the release supplying "
-            "most of it; quantity no release covers shows as Potential Over Order (release fields blank "
+            "shared out, with its Non-BOM requests, to its PO lines oldest PO first (own machine first, then "
+            "what is left on the project's other machines); a line is credited to the release or request "
+            "supplying most of it (a request shows as '<name> (Non-BOM request)'); quantity nothing "
+            "covers shows as Potential Over Order (release fields blank "
             "when none of the line is covered). Parts never released on the project (Non-BOM requests) "
             "carry no release and no flag. For a To-procure line, the latest release on the machine; "
             "a negative Still to Order is ETO's Return (procured beyond need). On To-procure lines, Still to Order = "

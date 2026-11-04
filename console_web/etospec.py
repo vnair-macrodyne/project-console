@@ -1015,69 +1015,87 @@ def query_po_line_keys(project_ids):
     """
 
 
-def allocate_line_releases(events, lines):
-    """Share each machine's released quantity out to its PO lines, oldest PO first (Vijay, 2026-11-04).
+def query_nonbom_events(project_ids):
+    """ETO Non-BOM purchase requests for the projects, shaped like release events (RelType 'NonBOM'),
+    so they count as cover for PO lines in allocate_line_releases (Vijay, 2026-11-04)."""
+    ids = ",".join(str(int(p)) for p in project_ids)
+    return f"""
+    SELECT ProjectID, CAST(SpecID AS float) AS SpecKey, ItemID, DateCreated AS ReleasedDateTime,
+           CAST(PurchaseQty AS float) AS QtyChange, 'NonBOM' AS RelType, NonBOMID AS HistID,
+           AddedByEmployee AS RelBy
+    FROM dbo.vwPurchasingNonBOM
+    WHERE ProjectID IN ({ids}) AND ItemID IS NOT NULL
+    """
 
-    Per project + part: positive Prerelease / Release entries are the supply, reduced by any negative
-    or Unrelease entries (taken off the latest release on the same machine). PO lines on active POs
-    (all statuses) draw on releases of their own machine in PO-date order; lines on a machine with no
-    release then draw on whatever is left on the project. A line is credited to the release that
-    supplies most of its quantity. Quantity no release covers = Potential Over Order. Parts with no
-    release at all on the project (Non-BOM requests) get no release and no flag.
-    Returns {DetailID: (ReleasedDateTime, RelBy, QtyChange, OverOrder)}."""
+
+def allocate_line_releases(events, lines, requests=None):
+    """Share each part's cover out to its PO lines, oldest PO first (Vijay, 2026-11-04).
+
+    Cover = positive Prerelease / Release entries plus Non-BOM requests (positive PurchaseQty), each
+    reduced by negative / Unrelease entries (or negative requests) on the same machine, latest first.
+    Only parts with at least one release on the project are allocated; parts bought purely through
+    Non-BOM requests get no release and no flag (unchanged).
+    Pass 1: each PO line (PO-date order) draws on cover for its OWN machine.
+    Pass 2: whatever is still uncovered (lines on unreleased machines, and remainders) draws on cover
+            left on the project's other machines, again oldest PO first.
+    A line is credited to the cover entry supplying most of it; quantity still uncovered = Potential
+    Over Order. Returns {DetailID: (date, by, QtyChange, OverOrder, kind)} — kind 'Release' / 'NonBOM'."""
     import pandas as pd
     out = {}
     if events is None or events.empty or lines is None or lines.empty:
         return out
     ev = events.copy()
+    if requests is not None and not requests.empty:
+        ev = pd.concat([ev, requests[ev.columns.intersection(requests.columns)]], ignore_index=True)
     ev["ReleasedDateTime"] = pd.to_datetime(ev["ReleasedDateTime"], errors="coerce")
     ev = ev.sort_values(["ReleasedDateTime", "HistID"])
+    released = set(zip(events.loc[(events["QtyChange"] > 0) & events["RelType"].astype(str).isin(["Prerelease", "Release"]), "ProjectID"],
+                       events.loc[(events["QtyChange"] > 0) & events["RelType"].astype(str).isin(["Prerelease", "Release"]), "ItemID"]))
     ln = lines.copy()
     ln["PurchaseDate"] = pd.to_datetime(ln["PurchaseDate"], errors="coerce")
     ln = ln.sort_values(["PurchaseDate", "PurchaseOrderID", "DetailID"])
     lgroups = {k: g for k, g in ln.groupby(["ProjectID", "ItemID"])}
     for key, g in ev.groupby(["ProjectID", "ItemID"]):
-        rels = []
-        for _, e in g.iterrows():
-            q = float(e["QtyChange"] or 0)
-            typ = str(e["RelType"])
-            if typ in ("Prerelease", "Release") and q > 0:
-                rels.append({"dt": e["ReleasedDateTime"], "by": e["RelBy"], "q": q, "rem": q, "spec": e["SpecKey"]})
-            elif q < 0 or typ == "Unrelease":
-                cut = abs(q)
-                for r in sorted(rels, key=lambda r: r["dt"], reverse=True):
-                    if cut <= 0:
-                        break
-                    if r["spec"] == e["SpecKey"] and r["rem"] > 0:
-                        t = min(r["rem"], cut); r["rem"] -= t; cut -= t
-        if not rels:
+        if key not in released:
             continue
         pl = lgroups.get(key)
         if pl is None:
             continue
-        specs = {r["spec"] for r in rels}
-        alloc = {}
-        for pass_own in (True, False):
-            for _, l in pl.iterrows():
-                own = l["SpecKey"] in specs
-                if own != pass_own:
-                    continue
-                need = float(l["Qty"] or 0)
-                got = []
-                for r in rels:
-                    if need <= 1e-9:
+        sup = []
+        for _, e in g.iterrows():
+            q = float(e["QtyChange"] or 0)
+            typ = str(e["RelType"])
+            kind = "NonBOM" if typ == "NonBOM" else "Release"
+            if q > 0 and typ in ("Prerelease", "Release", "NonBOM"):
+                sup.append({"dt": e["ReleasedDateTime"], "by": e["RelBy"], "q": q, "rem": q,
+                            "spec": e["SpecKey"], "kind": kind})
+            elif q < 0 or typ == "Unrelease":
+                cut = abs(q)
+                for r in sorted(sup, key=lambda r: r["dt"], reverse=True):
+                    if cut <= 0:
                         break
-                    if (pass_own and r["spec"] != l["SpecKey"]) or r["rem"] <= 1e-9:
+                    if r["kind"] == kind and r["spec"] == e["SpecKey"] and r["rem"] > 0:
+                        t = min(r["rem"], cut); r["rem"] -= t; cut -= t
+        got, need = {}, {}
+        for _, l in pl.iterrows():
+            got[l["DetailID"]] = []
+            need[l["DetailID"]] = float(l["Qty"] or 0)
+        for own_pass in (True, False):
+            for _, l in pl.iterrows():
+                d = l["DetailID"]
+                for r in sup:
+                    if need[d] <= 1e-9:
+                        break
+                    if r["rem"] <= 1e-9 or (own_pass and r["spec"] != l["SpecKey"]):
                         continue
-                    t = min(r["rem"], need); r["rem"] -= t; need -= t; got.append((r, t))
-                alloc[l["DetailID"]] = (got, max(need, 0.0))
-        for did, (got, over) in alloc.items():
-            over = round(over, 4) if over > 1e-9 else None
-            if got:
-                best = max(got, key=lambda x: x[1])[0]          # first wins a tie (oldest release)
-                out[did] = (best["dt"], best["by"], best["q"], over)
+                    t = min(r["rem"], need[d]); r["rem"] -= t; need[d] -= t; got[d].append((r, t))
+        for d in got:
+            over = round(need[d], 4) if need[d] > 1e-9 else None
+            if got[d]:
+                best = max(got[d], key=lambda x: x[1])[0]          # first wins a tie (oldest)
+                out[d] = (best["dt"], best["by"], best["q"], over, best["kind"])
             else:
-                out[did] = (None, None, None, over)
+                out[d] = (None, None, None, over, None)
     return out
 
 
@@ -1103,9 +1121,9 @@ def apply_line_releases(raw, alloc, events):
             n.append(None)
         if a is None:
             q.append(None); ov.append(None); continue
-        dt_, by, qty, over = a
+        dt_, by, qty, over, kind = a
         out.at[idx, "EngReleaseDate"] = (pd.Timestamp(dt_).date() if dt_ is not None and pd.notna(dt_) else None)
-        out.at[idx, "ReleasedBy"] = by
+        out.at[idx, "ReleasedBy"] = (f"{by} (Non-BOM request)" if kind == "NonBOM" and by else by)
         q.append(qty); ov.append(over)
     out["QtyChange"] = q
     out["OverOrder"] = ov
