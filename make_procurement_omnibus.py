@@ -109,20 +109,23 @@ def omnibus_rows(lto, items, cols_exc, podates, relby):
             "LastUpdated": "", "MfgBegin": r.get("MfgBegin") or "", "PermitDates": "",
             "LeadTime": num(r.get("LeadTime")), "Oversized": r.get("Oversized") or "",
             "Inspected": r.get("Inspected") or "", "Critical": r.get("Critical") or "", "LLT": r.get("LLT") or "",
-            "ReleasedBy": relby.get((str(r.get("ProjectID")), r.get("ItemNo")), ("", None))[0],
-            "RelCount": relby.get((str(r.get("ProjectID")), r.get("ItemNo")), ("", None))[1],
+            # the release behind the line (Lines to Order now carries it per machine — 2026-11-04)
+            "ReleasedBy": r.get("ReleasedBy") or "", "RelCount": r.get("RelCount"),
+            "QtyChange": r.get("QtyChange"),
+            "ToOrder": q, "PlannedReceipt": r.get("RequiredDate") or "",   # ETO's Required qty / Required Date
         })
     if items is not None and not items.empty:
         for _, r in items.iterrows():
             st = str(r.get("Status") or "")
+            if st == "To procure":      # the exception report now carries ETO's Items to Procure too;
+                continue                # they come from Lines to Order above, so skip them here
             stage = "Requisition (draft PO)" if st == "Draft" else ("Received" if st == "Received" else "On order")
             row = {"Stage": stage}
             for k, *_ in cols_exc:
                 v = r.get(k)
                 row[k] = None if (isinstance(v, float) and pd.isna(v)) else v
             row["OrderDate"] = podates.get(str(r.get("PO")), "")   # PO header PurchaseDate, by PO number
-            rb = relby.get((str(row.get("ProjectID")), row.get("Item")), ("", None))
-            row["ReleasedBy"] = rb[0]; row["RelCount"] = rb[1]
+            # Released by / # Releases / Quantity Change come per line from the report (2026-11-04)
             if stage == "Requisition (draft PO)":
                 row["PO"] = ""          # a draft is a requisition: its number shows under Purchasing Requisition #
             out.append(row)
@@ -197,7 +200,8 @@ def main():
         print(f"   {s:24} {counts[s]:>7,}")
     print(f"   overdue (on order)       {overdue:>7,}")
     print(f"   check: To procure {counts['To procure']:,} = Lines to Order {det(lto):,}; "
-          f"PO stages {sum(counts[s] for s in STAGES[1:]):,} = All Purchase Orders {det(lst):,}")
+          f"PO stages {sum(counts[s] for s in STAGES[1:]):,} = Exception Report PO lines "
+          f"{0 if items is None else int((items['Status'].astype(str) != 'To procure').sum()):,}")
     today = _dt.date.today()
     info = [("Procurement Omnibus", None),
             ("Generated", time.strftime("%Y-%m-%d %H:%M")),

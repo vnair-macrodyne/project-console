@@ -764,8 +764,10 @@ COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, ro
     ("Inspected",      "Inspected",                 8, "C", False),   # greyed by Peter: rule to come
     ("Critical",       "Critical",                  8, "C", False),
     ("LLT",            "LLT",                       9, "C", False),   # PartCustom7 'Long Lead Item'
-    ("ReleasedBy",     "Released by",              18, "L", False),   # latest releaser (tblBOMReleaseHistory -> tblEmployee)
+    ("ReleasedBy",     "Released by",              18, "L", False),   # who made the release matched to this line (match_line_releases)
     ("RelCount",       "# Releases",                9, "R", True),    # times the part was released on the project
+    ("QtyChange",      "Quantity Change",           9, "R", True),    # quantity of the release this line is matched to (Peter, 2026-11-03)
+    ("ToOrder",        "Still to Order",            9, "R", True),    # To-procure lines only: ETO's Required (ToPurchase) (Vijay, 2026-11-04)
 ]
 
 # column index of "Item" (the grand-total "N line(s)" sits here) — computed so it survives reorders
@@ -919,6 +921,8 @@ def exc_detail(df, today=None):
             "MfgPartNo": ("" if _blank(r.get("MfgPartNo")) else str(r.get("MfgPartNo")).strip()),
             "ReleasedBy": ("" if _blank(r.get("ReleasedBy")) else str(r.get("ReleasedBy")).strip()),
             "RelCount": (int(r.get("RelCount")) if _num_or_none(r.get("RelCount")) is not None else None),
+            "QtyChange": _num_or_none(r.get("QtyChange")),
+            "ToOrder": None,                              # PO lines: nothing left to order on this line
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
@@ -980,6 +984,123 @@ def _bom_release_join(project_ids, pod_alias="pod", alias="bomrel"):
             f"MAX(CASE WHEN [Type] = 'Release' THEN 1 ELSE 0 END) AS HasRel "
             f"FROM dbo.tblBOMReleaseHistory{scope} GROUP BY ProjectID, ItemID) {alias} "
             f"ON {alias}.ProjectID = {pod_alias}.ProjectID AND {alias}.ItemID = {pod_alias}.ItemID")
+
+
+def query_release_events(project_ids):
+    """Every release-log entry for the given projects, with who made it — the raw material for
+    matching each purchasing line to the release behind it (match_line_releases)."""
+    ids = ",".join(str(int(p)) for p in project_ids)
+    return f"""
+    SELECT h.ProjectID, CAST(h.SpecID AS float) AS SpecKey, h.ItemID, h.ReleasedDateTime,
+           CAST(h.QuantityChange AS float) AS QtyChange, h.[Type] AS RelType,
+           h.BOMReleaseHistoryID AS HistID,
+           e.EmpLastName + ', ' + e.EmpFirstName AS RelBy
+    FROM dbo.tblBOMReleaseHistory h
+    LEFT JOIN dbo.tblEmployee e ON e.EmployeeID = h.ReleasedByEmployeeID
+    WHERE h.ProjectID IN ({ids})
+    """
+
+
+def match_line_releases(raw, events, ref_col=None, spec_col="Code"):
+    """Attach to each purchasing line the ONE release-log entry behind it (Peter, 2026-11-03: a part
+    released more than once showed the same Release Date and the latest releaser on every line).
+
+    Candidates = Prerelease / Release entries with a positive quantity for the same project + part,
+    narrowed to the line's machine (SpecID) when that machine has any. Of those:
+      * PO line (ref_col = order date): the latest release made on or before the order date; if the
+        PO pre-dates every release, the earliest release.
+      * Items to Procure line (ref_col None): the latest release (the one creating today's demand).
+    Sets EngReleaseDate, ReleasedBy and QtyChange from that entry, and RelCount = all release-log
+    entries for the project + part (unchanged definition). Lines with no candidate keep their values
+    (EngReleaseDate then falls back to the item master's eng-release date, as before)."""
+    import pandas as pd
+    if raw is None or raw.empty or events is None or events.empty or "ItemID" not in raw.columns:
+        return raw
+    ev = events.copy()
+    ev["ReleasedDateTime"] = pd.to_datetime(ev["ReleasedDateTime"], errors="coerce")
+    cnt = ev.groupby(["ProjectID", "ItemID"]).size().to_dict()
+    pos = ev[(ev["QtyChange"] > 0) & ev["RelType"].astype(str).isin(["Prerelease", "Release"])]
+    pos = pos.sort_values(["ReleasedDateTime", "HistID"])
+    groups = {k: g for k, g in pos.groupby(["ProjectID", "ItemID"])}
+    rel_dt, rel_by, rel_q, rel_n = [], [], [], []
+    for _, r in raw.iterrows():
+        try:
+            key = (int(r.get("ProjectID")), int(r.get("ItemID")))
+        except (TypeError, ValueError):
+            rel_dt.append(None); rel_by.append(None); rel_q.append(None); rel_n.append(None); continue
+        rel_n.append(cnt.get(key))
+        g = groups.get(key)
+        if g is None or g.empty:
+            rel_dt.append(None); rel_by.append(None); rel_q.append(None); continue
+        spec = pd.to_numeric(r.get(spec_col), errors="coerce")
+        if pd.notna(spec):
+            gm = g[g["SpecKey"] == float(spec)]
+            if not gm.empty:
+                g = gm
+        pick = None
+        if ref_col:
+            ref = pd.to_datetime(r.get(ref_col), errors="coerce")
+            if pd.notna(ref):
+                before = g[g["ReleasedDateTime"] < ref.normalize() + pd.Timedelta(days=1)]
+                pick = before.iloc[-1] if not before.empty else g.iloc[0]
+        if pick is None:
+            pick = g.iloc[-1]
+        rel_dt.append(pick["ReleasedDateTime"]); rel_by.append(pick["RelBy"]); rel_q.append(pick["QtyChange"])
+    out = raw.copy()
+    m_dt = pd.Series(rel_dt, index=out.index, dtype="object")
+    has = m_dt.notna()
+    if "EngReleaseDate" not in out.columns:
+        out["EngReleaseDate"] = None
+    out["EngReleaseDate"] = out["EngReleaseDate"].astype("object")
+    out.loc[has, "EngReleaseDate"] = [pd.Timestamp(x).date() for x in m_dt[has]]
+    if "ReleasedBy" not in out.columns:
+        out["ReleasedBy"] = None
+    out["ReleasedBy"] = out["ReleasedBy"].astype("object")
+    out.loc[has, "ReleasedBy"] = pd.Series(rel_by, index=out.index)[has]
+    out["QtyChange"] = rel_q
+    out["RelCount"] = rel_n
+    return out
+
+
+def to_procure_detail(df, today=None):
+    """ETO's Items to Procure lines (no PO yet) in the per-line exception layout (COLS_EXC), so the
+    Purchasing Exception Report carries them beside the PO lines (Peter, 2026-11-03). No buyer, PO,
+    cost or vendor exists yet; Status = 'To procure'."""
+    import pandas as pd
+    out = []
+    if df is None or df.empty:
+        return pd.DataFrame(out)
+    for _, r in df.iterrows():
+        eng = pd.to_datetime(r.get("EngReleaseDate", r.get("ReleaseDate")), errors="coerce")
+        pid = r.get("ProjectID")
+        out.append({
+            "Buyer": "", "ProjectID": ("" if _blank(pid) else str(int(pid))),
+            "JobName": ("" if _blank(r.get("JobName")) else str(r.get("JobName"))),
+            "Code": _spec_code(r.get("MachineCode")),
+            "Item": ("" if _blank(r.get("ItemNo")) else str(r.get("ItemNo"))),
+            "Description": ("" if _blank(r.get("Description")) else str(r.get("Description"))),
+            "Manufacturer": "", "MfgPartNo": "",
+            "ReleasedBy": ("" if _blank(r.get("ReleasedBy")) else str(r.get("ReleasedBy")).strip()),
+            "RelCount": (int(r.get("RelCount")) if _num_or_none(r.get("RelCount")) is not None else None),
+            "QtyChange": _num_or_none(r.get("QtyChange")),
+            "Vendor": "", "ReqNo": "", "Cost": None, "MfgBegin": _iso(r.get("MfgBegin")),
+            "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
+            "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
+            "PO": "", "PODate": "", "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),
+            "PlannedShip": "", "PlannedReceipt": _iso(r.get("RequiredDate")),   # ETO's Required Date, where entered
+            "RevisedReceipt": "", "ReceiptDate": "",
+            "Status": "To procure", "LastUpdated": "", "DaysToAssembly": None,
+            "RFQDate": _iso(r.get("RFQDate")), "PermitDates": "",
+            "LeadTime": _num_or_none(r.get("EstLead")), "LeadHist": False,
+            "LLT": ("yes" if _flag(r.get("LLTFlag")) else ""),
+            "Oversized": ("yes" if _flag(r.get("OverFlag")) else ""),
+            "Inspected": ("yes" if _flag(r.get("InspFlag")) else ""),
+            "Critical": ("yes" if _flag(r.get("CritFlag")) else ""),
+            "DrawingNo": _drawing_file(r.get("DrawingRaw")),
+            "ExtValue": 0.0, "DaysLate": 10 ** 6,
+            "ToOrder": _num_or_none(r.get("ToOrder")),
+        })
+    return pd.DataFrame(out)
 
 
 def release_stage(has_pre, has_rel):
@@ -1304,6 +1425,8 @@ def po_listing_detail(df, today=None):
             "MfgPartNo": ("" if _blank(r.get("MfgPartNo")) else str(r.get("MfgPartNo")).strip()),
             "ReleasedBy": ("" if _blank(r.get("ReleasedBy")) else str(r.get("ReleasedBy")).strip()),
             "RelCount": (int(r.get("RelCount")) if _num_or_none(r.get("RelCount")) is not None else None),
+            "QtyChange": _num_or_none(r.get("QtyChange")),
+            "ToOrder": None,                              # PO lines: nothing left to order on this line
             "Vendor": ("" if _blank(r.get("Vendor")) else str(r.get("Vendor"))),
             "ReqNo": ("" if _blank(r.get("PO")) else str(r.get("PO"))),   # draft PO = the requisition (Vijay, 2026-10-12): same ETO number before and after issue
             "Cost": (round(_num_or_none(r.get("ExtValueCAD")), 2) if _num_or_none(r.get("ExtValueCAD")) is not None else None),
