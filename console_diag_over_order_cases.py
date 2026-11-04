@@ -42,9 +42,6 @@ def main():
                    CAST(pod.PurchaseQty AS float) AS Qty, CAST(pod.Received AS float) AS Received
             FROM dbo.vwPurchaseOrderDetails pod JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
             WHERE poh.PurchaseActive = 1 AND pod.ProjectID = {pid} AND pod.ItemID IN {it} ORDER BY poh.PurchaseDate""")
-        show(cur, "BOM quantity by machine", f"""
-            SELECT CAST(SpecID AS float) AS Machine, SUM(CAST(TotalQuantity AS float)) AS BOMQty
-            FROM dbo.vwEngBOM WHERE ProjectID = {pid} AND ItemID IN {it} GROUP BY CAST(SpecID AS float)""")
     print("\nDONE — paste everything above.")
 
 

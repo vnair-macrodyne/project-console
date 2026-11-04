@@ -741,7 +741,8 @@ COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, ro
     ("JobName",        "Project",                  20, "L", False),
     ("Item",           "Item",                     11, "L", False),
     ("Description",    "Description",              28, "L", False),
-    ("EngRelease",     "Release Date",             11, "C", False),
+    ("EngRelease",     "First Release Date",       11, "C", False),   # earliest release / request behind the line
+    ("LatestRelease",  "Latest Release Date",      11, "C", False),   # latest release / request behind the line (Vijay, 2026-11-04)
     ("ReqNo",          "Purchasing Requisition #", 14, "L", False),   # the draft PO number (ETO keeps one number from draft to issued PO)
     ("RFQDate",        "RFQ Date",                 11, "C", False),
     ("PO",             "PO #",                     10, "L", False),
@@ -766,7 +767,8 @@ COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, ro
     ("LLT",            "LLT",                       9, "C", False),   # PartCustom7 'Long Lead Item'
     ("ReleasedBy",     "Released by",              18, "L", False),   # who made the release matched to this line (match_line_releases)
     ("RelCount",       "# Releases",                9, "R", True),    # times the part was released on the project
-    ("QtyChange",      "Quantity Change",           9, "R", True),    # quantity of the release this line is matched to (Peter, 2026-11-03)
+    ("QtyChange",      "Quantity Change",           9, "R", True),    # quantity of the LATEST release behind the line (Peter, 2026-11-03)
+    ("TotalReleased",  "Total Released",            9, "R", True),    # all release / request quantity covering the line (Vijay, 2026-11-04)
     ("ToOrder",        "Still to Order",            9, "R", True),    # To-procure lines only: ETO's Required (ToPurchase); -ve = return (Vijay, 2026-11-04)
     ("OverOrder",      "Potential Over Order",     10, "R", True),    # PO qty not covered by a release on the machine (Vijay, 2026-11-04)
 ]
@@ -931,6 +933,8 @@ def exc_detail(df, today=None):
             "MfgBegin": _iso(r.get("MfgBegin")),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
+            "LatestRelease": (_iso(r.get("LatestReleaseDate")) or (eng.date().isoformat() if pd.notna(eng) else "")),
+            "TotalReleased": _num_or_none(r.get("TotalReleased")),
             "PO": ("" if _blank(r.get("PO")) or (not _flag(r.get("PurchasePrinted")) and not _flag(r.get("PurchaseEmailed")))
                    else str(r.get("PO"))),                # PO # only once issued (printed or emailed); a draft is a requisition
             "PODate": _iso(r.get("Ordered")),             # PO header date (entered date; ETO keeps no issue date)
@@ -1038,8 +1042,9 @@ def allocate_line_releases(events, lines, requests=None):
     Pass 1: each PO line (PO-date order) draws on cover for its OWN machine.
     Pass 2: whatever is still uncovered (lines on unreleased machines, and remainders) draws on cover
             left on the project's other machines, again oldest PO first.
-    A line is credited to the cover entry supplying most of it; quantity still uncovered = Potential
-    Over Order. Returns {DetailID: (date, by, QtyChange, OverOrder, kind)} — kind 'Release' / 'NonBOM'."""
+    A line is credited to the LATEST cover entry that went into it; quantity still uncovered = Potential
+    Over Order. Returns {DetailID: (first date, latest date, latest by, latest QtyChange, total covered,
+    OverOrder, kind)} — kind 'Release' / 'NonBOM' of the latest entry."""
     import pandas as pd
     out = {}
     if events is None or events.empty or lines is None or lines.empty:
@@ -1092,10 +1097,14 @@ def allocate_line_releases(events, lines, requests=None):
         for d in got:
             over = round(need[d], 4) if need[d] > 1e-9 else None
             if got[d]:
-                best = max(got[d], key=lambda x: x[1])[0]          # first wins a tie (oldest)
-                out[d] = (best["dt"], best["by"], best["q"], over, best["kind"])
+                # Released by / Quantity Change = the LATEST release / request that went into the line
+                # (Vijay, 2026-11-04); First / Latest Release Date both shown; Total = all cover used.
+                best = max(got[d], key=lambda x: (x[0]["dt"], x[1]))[0]
+                first = min(x[0]["dt"] for x in got[d])
+                total = round(sum(x[1] for x in got[d]), 4)
+                out[d] = (first, best["dt"], best["by"], best["q"], total, over, best["kind"])
             else:
-                out[d] = (None, None, None, over, None)
+                out[d] = (None, None, None, None, None, over, None)
     return out
 
 
@@ -1112,7 +1121,7 @@ def apply_line_releases(raw, alloc, events):
         if c not in out.columns:
             out[c] = None
         out[c] = out[c].astype("object")
-    q, ov, n = [], [], []
+    q, ov, n, tot, lat = [], [], [], [], []
     for idx, r in out.iterrows():
         a = alloc.get(r.get("DetailID"))
         try:
@@ -1120,12 +1129,16 @@ def apply_line_releases(raw, alloc, events):
         except (TypeError, ValueError):
             n.append(None)
         if a is None:
-            q.append(None); ov.append(None); continue
-        dt_, by, qty, over, kind = a
-        out.at[idx, "EngReleaseDate"] = (pd.Timestamp(dt_).date() if dt_ is not None and pd.notna(dt_) else None)
+            q.append(None); ov.append(None); tot.append(None); lat.append(None); continue
+        first, dt_, by, qty, total, over, kind = a
+        out.at[idx, "EngReleaseDate"] = (pd.Timestamp(first).date() if first is not None and pd.notna(first) else None)
+        lat.append(pd.Timestamp(dt_).date() if dt_ is not None and pd.notna(dt_) else None)
+        tot.append(total)
         out.at[idx, "ReleasedBy"] = (f"{by} (Non-BOM request)" if kind == "NonBOM" and by else by)
         q.append(qty); ov.append(over)
     out["QtyChange"] = q
+    out["TotalReleased"] = tot
+    out["LatestReleaseDate"] = lat
     out["OverOrder"] = ov
     out["RelCount"] = n
     return out
@@ -1152,16 +1165,19 @@ def match_line_releases(raw, events, ref_col=None, spec_col="Code"):
     pos = ev[(ev["QtyChange"] > 0) & ev["RelType"].astype(str).isin(["Prerelease", "Release"])]
     pos = pos.sort_values(["ReleasedDateTime", "HistID"])
     groups = {k: g for k, g in pos.groupby(["ProjectID", "ItemID"])}
-    rel_dt, rel_by, rel_q, rel_n = [], [], [], []
+    rel_dt, rel_by, rel_q, rel_n, rel_first, rel_tot = [], [], [], [], [], []
+    net = ev.groupby(["ProjectID", "ItemID", "SpecKey"])["QtyChange"].sum().to_dict()
     for _, r in raw.iterrows():
         try:
             key = (int(r.get("ProjectID")), int(r.get("ItemID")))
         except (TypeError, ValueError):
-            rel_dt.append(None); rel_by.append(None); rel_q.append(None); rel_n.append(None); continue
+            rel_dt.append(None); rel_by.append(None); rel_q.append(None); rel_n.append(None)
+            rel_first.append(None); rel_tot.append(None); continue
         rel_n.append(cnt.get(key))
         g = groups.get(key)
         if g is None or g.empty:
-            rel_dt.append(None); rel_by.append(None); rel_q.append(None); continue
+            rel_dt.append(None); rel_by.append(None); rel_q.append(None)
+            rel_first.append(None); rel_tot.append(None); continue
         spec = pd.to_numeric(r.get(spec_col), errors="coerce")
         if pd.notna(spec):
             gm = g[g["SpecKey"] == float(spec)]
@@ -1176,13 +1192,18 @@ def match_line_releases(raw, events, ref_col=None, spec_col="Code"):
         if pick is None:
             pick = g.iloc[-1]
         rel_dt.append(pick["ReleasedDateTime"]); rel_by.append(pick["RelBy"]); rel_q.append(pick["QtyChange"])
+        rel_first.append(g["ReleasedDateTime"].iloc[0])
+        specs = sorted(set(g["SpecKey"]))           # net released (incl. reversals) on the machine(s) used
+        rel_tot.append(round(sum(net.get((key[0], key[1], sp), 0.0) for sp in specs), 4))
     out = raw.copy()
     m_dt = pd.Series(rel_dt, index=out.index, dtype="object")
     has = m_dt.notna()
     if "EngReleaseDate" not in out.columns:
         out["EngReleaseDate"] = None
     out["EngReleaseDate"] = out["EngReleaseDate"].astype("object")
-    out.loc[has, "EngReleaseDate"] = [pd.Timestamp(x).date() for x in m_dt[has]]
+    out.loc[has, "EngReleaseDate"] = [pd.Timestamp(x).date() for x in pd.Series(rel_first, index=out.index)[has]]
+    out["LatestReleaseDate"] = [pd.Timestamp(x).date() if x is not None and pd.notna(x) else None for x in rel_dt]
+    out["TotalReleased"] = rel_tot
     if "ReleasedBy" not in out.columns:
         out["ReleasedBy"] = None
     out["ReleasedBy"] = out["ReleasedBy"].astype("object")
@@ -1216,6 +1237,8 @@ def to_procure_detail(df, today=None):
             "Vendor": "", "ReqNo": "", "Cost": None, "MfgBegin": _iso(r.get("MfgBegin")),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
+            "LatestRelease": (_iso(r.get("LatestReleaseDate")) or (eng.date().isoformat() if pd.notna(eng) else "")),
+            "TotalReleased": _num_or_none(r.get("TotalReleased")),
             "PO": "", "PODate": "", "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),
             "PlannedShip": "", "PlannedReceipt": _iso(r.get("RequiredDate")),   # ETO's Required Date, where entered
             "RevisedReceipt": "", "ReceiptDate": "",
@@ -1565,6 +1588,8 @@ def po_listing_detail(df, today=None):
             "MfgBegin": _iso(r.get("MfgBegin")),
             "Category": ("" if _blank(r.get("Category")) else str(r.get("Category"))),
             "EngRelease": (eng.date().isoformat() if pd.notna(eng) else ""),
+            "LatestRelease": (_iso(r.get("LatestReleaseDate")) or (eng.date().isoformat() if pd.notna(eng) else "")),
+            "TotalReleased": _num_or_none(r.get("TotalReleased")),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
             "PODate": _iso(r.get("Ordered")),             # PO header date (entered date; ETO keeps no issue date)
             "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),

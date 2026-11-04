@@ -1213,7 +1213,8 @@ class LiveQueryService(QueryService):
         df["EngReleaseDate"] = df["ReleaseDate"]
         df = etospec.match_line_releases(df, self._df(etospec.query_release_events(pids)),
                                          ref_col=None, spec_col="MachineCode")
-        df["ReleaseDate"] = df["EngReleaseDate"]
+        df["FirstReleaseDate"] = df["EngReleaseDate"]
+        df["ReleaseDate"] = df["LatestReleaseDate"].where(df["LatestReleaseDate"].notna(), df["EngReleaseDate"])
         return df
 
     def _q_released_toorder(self, project_ids, date_from=None, date_to=None, **kw):
@@ -2908,10 +2909,12 @@ def _spec_po_listing_result(items, label):
             "yet), then every purchase-order line across all statuses — Draft (raised but not yet issued: not "
             "printed AND not emailed), Open (before need-by), Overdue, partial, and Received — on "
             "active (not cancelled) POs, one row per line. Release Date / Released by / Quantity Change "
-            "= the release-log entry behind the line. For PO lines, each machine's released quantity is "
+            "First / Latest Release Date = the earliest and latest release (or Non-BOM request) behind "
+            "the line; Released by and Quantity Change = the latest one; Total Released = all release / "
+            "request quantity covering the line (on To-procure lines, net released on the machine). For PO lines, each machine's released quantity is "
             "shared out, with its Non-BOM requests, to its PO lines oldest PO first (own machine first, then "
-            "what is left on the project's other machines); a line is credited to the release or request "
-            "supplying most of it (a request shows as '<name> (Non-BOM request)'); quantity nothing "
+            "what is left on the project's other machines); a line is credited to the latest release or "
+            "request that went into it (a request shows as '<name> (Non-BOM request)'); quantity nothing "
             "covers shows as Potential Over Order (release fields blank "
             "when none of the line is covered). Parts never released on the project (Non-BOM requests) "
             "carry no release and no flag. For a To-procure line, the latest release on the machine; "
@@ -2979,6 +2982,9 @@ def _released_toorder_rows(df, as_of):
             "ReleasedBy": (r.get("ReleasedBy") if isinstance(r.get("ReleasedBy"), str) else ""),
             "RelCount": (int(r.get("RelCount")) if _num(r.get("RelCount")) is not None else None),
             "QtyChange": _num(r.get("QtyChange")),
+            # hidden on Lines to Order; used by make_procurement_omnibus.py
+            "FirstReleaseDate": _d(r.get("FirstReleaseDate")) if "FirstReleaseDate" in r else "",
+            "TotalReleased": _num(r.get("TotalReleased")),
             "AgeDays": age, "UnitCost": unit, "ExtValue": ext,
             # hidden on Lines to Order; used by make_procurement_omnibus.py
             "DrawingNo": etospec._drawing_file(r.get("DrawingRaw")) if "DrawingRaw" in r else "",
