@@ -93,7 +93,7 @@ def main():
         if x.get("Item") == "E00067":
             print(f"     m{x.get('Code')} PO {x.get('ReqNo')} ordered {x.get('PODate')} | rel {x.get('EngRelease')} "
                   f"by {x.get('ReleasedBy')} qty {x.get('QtyChange')} | # rel {x.get('RelCount')} | over order {x.get('OverOrder')}")
-    ov = [x for x in det if x.get("OverOrder")]
+    ov = [x for x in det if x.get("OverOrder") is not None and x.get("OverOrder") == x.get("OverOrder")]   # skip NaN
     print(f"   Potential over-order lines: {len(ov)} (first 15)")
     for x in ov[:15]:
         print(f"     {x.get('ProjectID')} m{x.get('Code')} {x.get('Item')} PO {x.get('ReqNo')} ordered {x.get('PODate')} | "
@@ -120,6 +120,24 @@ def main():
         print(f"   {len(act)} active project(s), {n:,} PO lines, {time.perf_counter() - t0:.1f}s")
         print(f"   matched to a release {matched:,} · on the line's own machine {own:,} · "
               f"part released more than once on the project {multi:,}")
+        print("\n== E. What sits behind the potential over orders (all active projects)")
+        import pandas as pd
+        o = m[m["OverOrder"].notna()].copy()
+        nb = s._df(f"SELECT DISTINCT ProjectID, ItemID FROM dbo.vwPurchasingNonBOM WHERE ProjectID IN ({','.join(map(str, act))})")
+        nbset = set(zip(nb["ProjectID"], nb["ItemID"])) if nb is not None and not nb.empty else set()
+        o["HasNonBOM"] = [(p, i) in nbset for p, i in zip(o["ProjectID"], o["ItemID"])]
+        o["OwnMachine"] = [(p, i, float(c)) in onmach for p, i, c in zip(o["ProjectID"], o["ItemID"], o["Code"])]
+        relq = pos.groupby(["ProjectID", "ItemID"])["QtyChange"].sum().to_dict()
+        poq = m.groupby(["ProjectID", "ItemID"])["Qty"].sum().to_dict()
+        for lab, mask in (("part also has a Non-BOM request on the project", o["HasNonBOM"]),
+                          ("no Non-BOM request, line on a machine with no release", ~o["HasNonBOM"] & ~o["OwnMachine"]),
+                          ("no Non-BOM request, on a released machine", ~o["HasNonBOM"] & o["OwnMachine"])):
+            print(f"   {lab}: {int(mask.sum()):,} lines, {o.loc[mask, 'OverOrder'].sum():,.0f} units")
+        print("   largest 15 by units:")
+        for _, x in o.sort_values("OverOrder", ascending=False).head(15).iterrows():
+            k = (x["ProjectID"], x["ItemID"])
+            print(f"     {x['ProjectID']} m{x['Code']} {x['Item']} PO {x['PO']} ordered {x['Ordered']} qty {x['Qty']} | over {x['OverOrder']:g} | "
+                  f"project released {relq.get(k, 0):g} vs ordered {poq.get(k, 0):g} | NonBOM {x['HasNonBOM']} | {str(x['Category'])[:18]}")
     print("\nDONE — paste everything above.")
 
 
