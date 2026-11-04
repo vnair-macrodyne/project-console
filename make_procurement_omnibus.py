@@ -184,7 +184,7 @@ def main():
     lto = svc.run("released_toorder", pids)
     req = svc.run("po_to_order", pids)
     exc = svc.run("po_exceptions", pids)
-    lst = svc.run("po_listing", pids)
+    lst = svc.run("po_listing", pids, active_only=False)   # same project set as the To procure lines
     items = (lst.export or {}).get("items")
     podates = po_order_dates(pids)
     relby = released_by(pids)

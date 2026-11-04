@@ -1340,7 +1340,9 @@ class LiveQueryService(QueryService):
         import datetime as _dt
         dfrom, dto = _as_date(date_from), _as_date(date_to)
         pids = [int(p) for p in project_ids] if project_ids else None
-        active = self._active_ids()          # Purchasing Exception Report = ACTIVE projects only
+        # Purchasing Exception Report = ACTIVE projects only; make_procurement_omnibus.py passes
+        # active_only=False to cover all its projects (the 31 tracked in Sextant — Vijay, 2026-11-04)
+        active = self._active_ids() if kw.get("active_only", True) else None
         if active:
             pids = [p for p in pids if p in active] if pids else sorted(active)
             if not pids:                     # selection has no active projects -> nothing to show
