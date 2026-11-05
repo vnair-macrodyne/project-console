@@ -20,8 +20,8 @@ import datetime as _dt
 
 # Canonical Macrodyne grouping (from the Budgets sheet). Used verbatim by the demo and as the
 # ordering/fallback for the live crosswalk-driven scaffold so the form matches the workbook.
-DISCIPLINE_ORDER = ["Project Management", "Mechanical Engineering", "Electrical Engineering",
-                    "Hydraulic Engineering", "Manufacturing", "Other"]
+DISCIPLINE_ORDER = ["Project Management", "Mechanical Engineering", "Hydraulic Engineering",
+                    "Electrical Engineering", "Manufacturing", "Other"]
 
 # Machine × discipline breakdown (same rule as the Machine Asset Re-Code report):
 # SpecID >= this is overhead/contingency (899 "Management Contingency", 999 rework), not a machine.

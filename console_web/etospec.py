@@ -372,8 +372,8 @@ COLS_DISC = [
 ]
 
 # canonical discipline order for the by-discipline report (matches the dashboard crosswalk)
-_DISC_ORDER = ["Project Management", "Mechanical Engineering", "Electrical Engineering",
-               "Hydraulic Engineering", "Manufacturing", "Other", "Re-work"]
+_DISC_ORDER = ["Project Management", "Mechanical Engineering", "Hydraulic Engineering",
+               "Electrical Engineering", "Manufacturing", "Other", "Re-work"]
 
 
 def _disc_sort_key(d):

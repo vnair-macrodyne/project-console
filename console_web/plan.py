@@ -20,8 +20,8 @@ import datetime as _dt
 
 # The six disciplines the plan captures % complete against (order = the form's order).
 # Matches the dashboard crosswalk / earned-value roll-up.
-DISCIPLINES = ["Project Management", "Mechanical Engineering", "Electrical Engineering",
-               "Hydraulic Engineering", "Manufacturing", "Other"]
+DISCIPLINES = ["Project Management", "Mechanical Engineering", "Hydraulic Engineering",
+               "Electrical Engineering", "Manufacturing", "Other"]
 
 # SpecID >= this is overhead/contingency (not a real machine) — same rule as pm.py / the
 # Machine Asset Re-Code report. Machines below it get a per-machine % complete input.
