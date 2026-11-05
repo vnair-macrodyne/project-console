@@ -17,7 +17,7 @@ Workbook tabs
   Info                   — run time, projects, stage counts, column notes
 
 Run from the repo root where ETO and the Reporting DB are reachable:
-    python make_procurement_omnibus.py                      # all projects active on Sextant (budget-current, minus Remove-from-Console)
+    python make_procurement_omnibus.py                      # the uploaded active-projects list, minus Remove-from-Console
     python make_procurement_omnibus.py 250005 260178        # or name projects
 Writes Procurement_Omnibus_<YYYYMMDD>.xlsx here and prints a summary.
 """
@@ -27,19 +27,12 @@ STAGES = ["To procure", "Requisition (draft PO)", "On order", "Received"]
 
 
 def tracked_projects():
-    """Projects ACTIVE on Sextant = budget-current MINUS Remove-from-Console exclusions — the exact
-    set the console's project selector shows (queries.py LiveQueryService.list_projects)."""
-    from console.infra.connections import console_connection
-    c = console_connection(); cur = c.cursor()
-    cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent ORDER BY ProjectID")
-    ids = [int(r[0]) for r in cur.fetchall()]
-    try:
-        cur.execute("SELECT ProjectID FROM Reporting.tblConsoleProjectExclusion")
-        excl = {int(r[0]) for r in cur.fetchall()}
-    except Exception:
-        excl = set()
-    c.close()
-    return [p for p in ids if p not in excl]
+    """The projects the console selector shows = the uploaded active-projects list
+    (Reporting.tblActiveProject) minus Remove-from-Console exclusions — the same set as
+    queries.py LiveQueryService.list_projects (Vijay, 2026-11-04). Falls back to the banked console
+    set only if the active list is empty."""
+    from console_web.queries import LiveQueryService
+    return [p["id"] for p in LiveQueryService().list_projects()]
 
 
 def po_order_dates(pids):
@@ -208,7 +201,7 @@ def main():
     info = [("Procurement Omnibus", None),
             ("Generated", time.strftime("%Y-%m-%d %H:%M")),
             ("Source", "ETO production database (read-only), through the Sextant purchasing reports"),
-            ("Scope", "Projects active on Sextant at run time: budgeted in the console and not Removed-from-Console "
+            ("Scope", "The uploaded active-projects list at run time, minus projects Removed-from-Console "
                       "(the same set the project selector shows). Override by naming project numbers on the command line."),
             ("Projects", ", ".join(str(p) for p in pids)),
             ("", None)] + [(f"{s} (lines)", f"{counts[s]:,}") for s in STAGES] + [

@@ -581,14 +581,19 @@ class LiveQueryService(QueryService):
     def list_projects(self):
         conn = self._console_conn()
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent "
-                    "ORDER BY ProjectID")
+        # The selector is the UPLOADED ACTIVE-PROJECTS LIST (Reporting.tblActiveProject, loaded by
+        # console_seed_active_project.py) minus Remove-from-Console exclusions (Vijay, 2026-11-04 —
+        # reverses 2026-10-30: a project banked via 'Add to Console' but not on the uploaded list no
+        # longer appears until the list is re-uploaded with it). Falls back to the banked console set
+        # (vw_Console_BudgetCurrent) only if the active list is empty / not seeded.
         excl = self._excluded_ids()
-        ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
-        # The selector is the CONSOLE set: every banked (vw_Console_BudgetCurrent), non-excluded
-        # project -- so a project a PM adds to the console always appears here. The active-projects
-        # list (tblActiveProject) scopes only the reports that ask for it (e.g. the Purchasing
-        # Exception Report, _q_po_listing), NOT this universal selector. (2026-10-30, per Vijay.)
+        active = self._active_ids()
+        if active:
+            ids = sorted(p for p in active if p not in excl)
+        else:
+            cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent "
+                        "ORDER BY ProjectID")
+            ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
         ov = self._overlay_map()
         out = []
         for pid in ids:
