@@ -50,6 +50,34 @@ def main():
     for r in rows:
         print("   ", tuple(r))
 
+    print("\n=== 5) which tables/views expose PurchaseOrderDetailCustom2 / Custom6 (+ data types) ===")
+    _, rows = run(cur, """
+        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE COLUMN_NAME IN ('PurchaseOrderDetailCustom2','PurchaseOrderDetailCustom6')
+        ORDER BY TABLE_NAME, COLUMN_NAME""")
+    for r in rows:
+        print("   ", tuple(r))
+
+    print("\n=== 6) sample live values from vwPurchaseOrderDetails (the exception report's pod source) ===")
+    try:
+        _, rows = run(cur, """
+            SELECT TOP 8 PurchaseOrderID, PurchaseDetailID,
+                CAST(PurchaseOrderDetailCustom6 AS varchar(40)) AS CargoReady,
+                CAST(PurchaseOrderDetailCustom2 AS varchar(80)) AS BOLTracking
+            FROM dbo.vwPurchaseOrderDetails
+            WHERE (PurchaseOrderDetailCustom6 IS NOT NULL
+                   AND LTRIM(RTRIM(CAST(PurchaseOrderDetailCustom6 AS varchar(40)))) <> '')
+               OR (PurchaseOrderDetailCustom2 IS NOT NULL
+                   AND LTRIM(RTRIM(PurchaseOrderDetailCustom2)) <> '')
+            ORDER BY PurchaseOrderID DESC""")
+        if not rows:
+            print("   (view exposes the columns but no PO line has a value yet)")
+        for r in rows:
+            print("   sample:", tuple(r))
+    except Exception as e:
+        print("   NOT ON vwPurchaseOrderDetails ->", type(e).__name__, str(e)[:140])
+
     conn.close()
     print("\n[done] read-only - no writes.")
 
