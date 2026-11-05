@@ -78,6 +78,35 @@ def _run_from_payload(payload):
             close()
 
 
+# ── Heavy on-demand reports: TTL dataset cache ────────────────────────────
+# The Purchasing Exception Report recomputes a multi-minute dataset per open, and the Excel
+# export used to re-run it (timing out). The export button only enables AFTER a render, so the
+# dataset is already computed — cache it (TTL) so export + repeat opens reuse it. (Vijay, 2026-11-05)
+CACHED_REPORTS = {"po_listing"}
+
+
+def _report_cache_key(payload):
+    return cache_mod.report_cache.key(
+        payload.get("query_id"), payload.get("project_ids") or [],
+        payload.get("date_from") or None, payload.get("date_to") or None)
+
+
+def _cached_report(payload, refresh=False):
+    """(obj, result_dict, as_of, cached) via the TTL report cache. obj = QueryResult (for the
+    xlsx/pdf export); result_dict = its serialized form (for /api/query). `refresh` forces a
+    recompute and repopulates the cache."""
+    key = _report_cache_key(payload)
+    if not refresh:
+        e = cache_mod.report_cache.get(key)
+        if e:
+            r = e["result"]
+            return r["obj"], r["dict"], e["as_of"], True
+    obj = _run_from_payload(payload)
+    d = obj.to_dict()
+    as_of = cache_mod.report_cache.put(key, {"obj": obj, "dict": d})
+    return obj, d, as_of, False
+
+
 # ── Dashboard warm cache ──────────────────────────────────────────────────────
 # The Executive board / scorecard re-ran the heavy live ETO aggregations on every
 # open. cache_mod keeps their computed payloads warm in memory and refreshes them
@@ -550,6 +579,10 @@ def api_query():
         # else runs live per request as before.
         if (not app.config["DEMO"]) and payload.get("query_id") in cache_mod.HOT_QUERIES:
             return _serve_dashboard(payload)
+        if (not app.config["DEMO"]) and payload.get("query_id") in CACHED_REPORTS and payload.get("project_ids"):
+            _obj, _d, _as_of, _cached = _cached_report(payload, refresh=bool(payload.get("refresh")))
+            out = dict(_d); out["as_of"] = _as_of; out["cached"] = _cached
+            return jsonify(out)
         result = _run_from_payload(payload)
         return jsonify(result.to_dict())
     except ValueError as e:
@@ -566,7 +599,12 @@ def api_export(fmt):
         return jsonify({"error": "format must be xlsx or pdf"}), 400
     payload = request.get_json(silent=True) or {}
     try:
-        result = _run_from_payload(payload)
+        # Reuse the dataset the render already cached (the export button only enables after a
+        # render) so heavy reports don't recompute and time out on export.
+        if (not app.config["DEMO"]) and payload.get("query_id") in CACHED_REPORTS and payload.get("project_ids"):
+            result, _d, _a, _c = _cached_report(payload, refresh=False)
+        else:
+            result = _run_from_payload(payload)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:

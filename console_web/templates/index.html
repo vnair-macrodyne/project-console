@@ -221,6 +221,10 @@
       <h2 id="rtitle">Sextant</h2>
       <span id="asof" style="display:none;margin-left:10px;font-size:12px;color:#6b7280;font-weight:500;white-space:nowrap"></span>
       <div class="sp"></div>
+      <button class="exp" id="btnrefresh" style="display:none" title="Recompute now (bypass the 15-min cache)">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Refresh
+      </button>
       <button class="exp" id="expx" disabled>
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13l3 3m0-3l-3 3" stroke-linecap="round"/></svg>
         Excel
@@ -423,11 +427,17 @@ function dateLabel(){
   return (d.from||'…')+'  →  '+(d.to||'today');
 }
 
+let _forceRefresh=false;
+const CACHED_REPORTS=new Set(['po_listing']);
+function isCachedReport(){ return CACHED_REPORTS.has(state.selQuery); }
 function payload(){
   const d=resolveDates();
-  return { query_id: state.selQuery, project_ids: Array.from(state.selProjects),
-           date_from: d.from, date_to: d.to };
+  const p={ query_id: state.selQuery, project_ids: Array.from(state.selProjects),
+            date_from: d.from, date_to: d.to };
+  if(_forceRefresh){ p.refresh=true; _forceRefresh=false; }
+  return p;
 }
+function doRefresh(){ _forceRefresh=true; runQuery(); }
 function scheduleRefresh(){ clearTimeout(refreshTimer); refreshTimer=setTimeout(()=>{ if(state.selQuery) runQuery(); }, 450); }
 
 async function runQuery(silent){
@@ -479,7 +489,7 @@ function agoLabel(s){
 }
 function updateAsOf(){
   const a=el('asof'); if(!a) return;
-  if(isDashboard() && state.result && state.result.as_of){
+  if((isDashboard()||isCachedReport()) && state.result && state.result.as_of){
     const draw=()=>{ a.style.display=''; a.textContent='Updated '+agoLabel(state.result.as_of); };
     draw(); clearInterval(asofTick); asofTick=setInterval(draw,15000);
   } else {
@@ -520,6 +530,8 @@ function renderResult(){
   const r=state.result;
   el('rtitle').textContent=r.title; el('rnote').textContent=r.note||'';
   el('expx').disabled=false; el('expp').disabled=false;
+  { const rb=el('btnrefresh'); if(rb) rb.style.display = isCachedReport() ? '' : 'none'; }
+  updateAsOf();
   const cw=el('cards'); cw.innerHTML='';
   (r.cards||[]).forEach(c=>{ const d=document.createElement('div'); d.className='stat '+(c.tone||'neutral');
     d.innerHTML=`<div class="v">${c.value}</div><div class="l">${c.label}</div>`; cw.appendChild(d); });
@@ -781,6 +793,7 @@ async function doExport(fmt){
 }
 el('expx').onclick=()=>doExport('xlsx');
 el('expp').onclick=()=>doExport('pdf');
+el('btnrefresh').onclick=doRefresh;
 
 function showErr(m){ const e=el('err'); e.textContent=m; e.style.display='block'; }
 function hideErr(){ el('err').style.display='none'; }

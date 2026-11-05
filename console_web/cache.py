@@ -153,3 +153,49 @@ class DashboardCache:
 
 # Module-level singleton (one per process).
 cache = DashboardCache()
+
+
+# ── On-demand TTL cache for heavy parameterized reports ───────────────────────────
+REPORT_TTL = 900     # 15 min — a rendered dataset serves repeat opens + the Excel export
+REPORT_MAX = 16      # cap on distinct cached report scopes (TTL + LRU eviction)
+
+
+class ReportCache:
+    """TTL cache for heavy on-demand reports (e.g. the Purchasing Exception Report). Keyed by
+    (query_id, project ids, date window). A render populates it; the Excel export and repeat
+    opens read it within the TTL; a 'refresh' forces a recompute. Shared across users (the
+    data is not user-specific). In-process (one copy per worker — fine for a read cache)."""
+
+    def __init__(self, ttl=REPORT_TTL, maxn=REPORT_MAX):
+        self.ttl = ttl
+        self.maxn = maxn
+        self._lock = threading.Lock()
+        self._entries = {}          # key -> {"result", "as_of", "ts"}
+
+    @staticmethod
+    def key(query_id, project_ids, date_from, date_to):
+        return (query_id, tuple(sorted(int(p) for p in (project_ids or []))),
+                date_from or "", date_to or "")
+
+    def get(self, key):
+        """Entry dict if present and within TTL, else None (evicting a stale one)."""
+        with self._lock:
+            e = self._entries.get(key)
+            if not e:
+                return None
+            if (_now() - e["ts"]).total_seconds() > self.ttl:
+                self._entries.pop(key, None)
+                return None
+            return dict(e)
+
+    def put(self, key, result):
+        as_of = _now_iso()
+        with self._lock:
+            self._entries[key] = {"result": result, "as_of": as_of, "ts": _now()}
+            while len(self._entries) > self.maxn:
+                oldest = min(self._entries.items(), key=lambda kv: kv[1]["ts"])[0]
+                self._entries.pop(oldest, None)
+        return as_of
+
+
+report_cache = ReportCache()

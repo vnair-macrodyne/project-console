@@ -1303,7 +1303,15 @@ class LiveQueryService(QueryService):
         today = pd.Timestamp(_dt.date.today())
         need = pd.to_datetime(raw["DateRevised"], errors="coerce").fillna(
             pd.to_datetime(raw["DateRequired"], errors="coerce"))
-        sel = raw["ItemID"] if not overdue_only else raw.loc[need < today, "ItemID"]
+        # historical lead-time is only the FALLBACK shown when EstimatedLeadTime is blank, so only
+        # scan PO history for those items — the big saving at scale (display is unchanged).
+        if "LeadDays" in raw.columns:
+            _lead = pd.to_numeric(raw["LeadDays"], errors="coerce")
+            _blank = _lead.isna() | (_lead <= 0)
+        else:
+            _blank = pd.Series(True, index=raw.index)
+        _mask = _blank if not overdue_only else (_blank & (need < today))
+        sel = raw.loc[_mask, "ItemID"]
         ids = sorted({int(i) for i in sel.dropna().tolist()})
         hl, hn = {}, {}
         for k in range(0, len(ids), 900):
