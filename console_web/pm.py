@@ -23,6 +23,13 @@ import datetime as _dt
 DISCIPLINE_ORDER = ["Project Management", "Mechanical Engineering", "Hydraulic Engineering",
                     "Electrical Engineering", "Manufacturing", "Other"]
 
+
+def _disc_order_key(d):
+    """Canonical discipline sort key: DISCIPLINE_ORDER first, then any extras alphabetically.
+    Keeps every Plan-page section (budget/efficacy summary AND the machine x discipline grid) in
+    the SAME discipline order."""
+    return (DISCIPLINE_ORDER.index(d), "") if d in DISCIPLINE_ORDER else (len(DISCIPLINE_ORDER), d)
+
 # Machine × discipline breakdown (same rule as the Machine Asset Re-Code report):
 # SpecID >= this is overhead/contingency (899 "Management Contingency", 999 rework), not a machine.
 _OVERHEAD_SPEC_MIN = 700
@@ -45,7 +52,7 @@ def _machines_payload(agg, descmap=None):
     for key in sorted(agg, key=_mkey):
         dh = agg[key]
         discs = [{"discipline": d, "budget_hours": round(dh[d][0], 2), "actual_hours": round(dh[d][1], 2)}
-                 for d in sorted(dh)]
+                 for d in sorted(dh, key=_disc_order_key)]
         out.append({
             "machine": (_OVERHEAD_LABEL if key == _OVERHEAD_LABEL else _machine_label(key, descmap.get(int(key)) if str(key).lstrip('-').isdigit() else None)),
             "spec": (0 if key == _OVERHEAD_LABEL else int(key)),   # 0 = overhead group (matches plan store)
