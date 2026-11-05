@@ -753,7 +753,7 @@ COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, ro
     ("ReceiptDate",    "Receipt Date",             11, "C", False),
     ("Cost",           "Cost",                     12, "R", True),    # PO line extended value in CAD (PO currency x PO rate)
     ("Vendor",         "Vendor",                   20, "L", False),
-    ("Code",           "Code",                      7, "C", False),   # machine / spec
+    ("Code",           "Machine",                   7, "C", False),   # machine / spec
     ("Manufacturer",   "Manufacturer",             18, "L", False),   # tblEngItemMaster.Manufacturer
     ("MfgPartNo",      "Mfg Part #",               16, "L", False),   # tblEngItemMaster.ManufacturerPartNumber
     ("Category",       "Category",                 16, "L", False),
@@ -766,7 +766,6 @@ COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, ro
     ("Critical",       "Critical",                  8, "C", False),
     ("LLT",            "LLT",                       9, "C", False),   # PartCustom7 'Long Lead Item'
     ("ReleasedBy",     "Released by",              18, "L", False),   # who made the release matched to this line (match_line_releases)
-    ("RelCount",       "# Releases",                9, "R", True),    # times the part was released on the project
     ("QtyChange",      "Quantity Change",           9, "R", True),    # quantity of the LATEST release behind the line (Peter, 2026-11-03)
     ("TotalReleased",  "Total Released",            9, "R", True),    # all release / request quantity covering the line (Vijay, 2026-11-04)
     ("ToOrder",        "Still to Order",            9, "R", True),    # To-procure lines only: ETO's Required (ToPurchase); -ve = return (Vijay, 2026-11-04)
