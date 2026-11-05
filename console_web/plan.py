@@ -23,6 +23,13 @@ import datetime as _dt
 DISCIPLINES = ["Project Management", "Mechanical Engineering", "Hydraulic Engineering",
                "Electrical Engineering", "Manufacturing", "Other"]
 
+
+def _disc_order_key(d):
+    """Canonical discipline sort key (DISCIPLINES order first, then extras alphabetically) so the
+    Plan grid's machine, Overhead / Contingency and work-item sections share the SAME discipline
+    order as the budget/efficacy summary."""
+    return (DISCIPLINES.index(d), "") if d in DISCIPLINES else (len(DISCIPLINES), d)
+
 # SpecID >= this is overhead/contingency (not a real machine) — same rule as pm.py / the
 # Machine Asset Re-Code report. Machines below it get a per-machine % complete input.
 _OVERHEAD_SPEC_MIN = 700
@@ -343,7 +350,7 @@ class LivePlanService(PlanService):
             discs = [{"discipline": d, "budget_hours": round(dh[d][0], 2),
                       "actual_hours": round(dh[d][1], 2), "pct": prog.get((spec, d)),
                       "remaining": rem.get((spec, d))}
-                     for d in sorted(dh)]
+                     for d in sorted(dh, key=_disc_order_key)]
             out.append({
                 "spec": spec,
                 "machine": ("Overhead / Contingency" if spec == 0 else machine_label(spec, descmap.get(spec))),
@@ -373,7 +380,7 @@ class LivePlanService(PlanService):
         out = []
         for spec in sorted(by_spec, key=_mkey):
             discs_out, m_bud, m_act, m_pairs = [], 0.0, 0.0, []
-            for disc in sorted(by_spec[spec]):
+            for disc in sorted(by_spec[spec], key=_disc_order_key):
                 items_out, d_bud, d_act, d_pairs = [], 0.0, 0.0, []
                 for it in sorted(by_spec[spec][disc], key=lambda x: (x["wi"] or "").lower()):
                     b, a = round(it["bud"], 2), round(it["act"], 2)
