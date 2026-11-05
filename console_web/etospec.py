@@ -747,6 +747,8 @@ COLS_EXC = [   # Peter order (Col_Numbering_Sextant_po_listing_20261028.xlsx, ro
     ("RFQDate",        "RFQ Date",                 11, "C", False),
     ("PO",             "PO #",                     10, "L", False),
     ("PODate",         "Order Date",               11, "C", False),   # PO header PurchaseDate (Peter col 5; added 2026-10-29)
+    ("CargoReady",     "Cargo Ready Date",         12, "C", False),   # PurchaseOrderDetailCustom6 (Peter, 2026-11-05)
+    ("BOLTracking",    "BOL / Tracking",           18, "L", False),   # PurchaseOrderDetailCustom2 (Peter, 2026-11-05)
     ("PlannedReceipt", "Planned Receipt",          12, "C", False),
     ("RevisedReceipt", "Revised Receipt",          12, "C", False),
     ("LastUpdated",    "Last Activity",            11, "C", False),
@@ -937,6 +939,8 @@ def exc_detail(df, today=None):
             "PO": ("" if _blank(r.get("PO")) or (not _flag(r.get("PurchasePrinted")) and not _flag(r.get("PurchaseEmailed")))
                    else str(r.get("PO"))),                # PO # only once issued (printed or emailed); a draft is a requisition
             "PODate": _iso(r.get("Ordered")),             # PO header date (entered date; ETO keeps no issue date)
+            "CargoReady": _iso(r.get("CargoReady")),      # Cargo Ready Date (PurchaseOrderDetailCustom6)
+            "BOLTracking": ("" if _blank(r.get("BOLTracking")) else str(r.get("BOLTracking")).strip()),
             "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),
             "PlannedShip": "",                            # ETO holds no maintained ship date
             "PlannedReceipt": (req.date().isoformat() if pd.notna(req) else ""),
@@ -1251,6 +1255,7 @@ def to_procure_detail(df, today=None):
             "DrawingNo": _drawing_file(r.get("DrawingRaw")),
             "ExtValue": 0.0, "DaysLate": 10 ** 6,
             "ToOrder": _num_or_none(r.get("ToOrder")), "OverOrder": None,
+            "CargoReady": "", "BOLTracking": "",          # no PO line yet -> no cargo-ready / BOL
         })
     return pd.DataFrame(out)
 
@@ -1469,6 +1474,8 @@ def query_po_exceptions(include_leadtime=True, project_ids=None, date_from=None,
         CAST(sp.MfgBegin AS date)       AS MfgBegin,      -- machine's Mfg Begin (tblSpec, composite key)
         CAST(pod.DateRequired AS date)  AS DateRequired,
         CAST(pod.DateRevised  AS date)  AS DateRevised,
+        CAST(pod.PurchaseOrderDetailCustom6 AS date) AS CargoReady,   -- Cargo Ready Date (PO-line custom; Peter, 2026-11-05)
+        pod.PurchaseOrderDetailCustom2               AS BOLTracking,   -- BOL / Tracking (PO-line custom; Peter, 2026-11-05)
         CAST(pdd.LastReceivedDate AS date) AS ReceiptDate,
         CAST(poh.PurchaseDate AS date)  AS Ordered,
         CAST(poh.PurchaseDateRevised AS date) AS HeaderRevised,
@@ -1591,6 +1598,8 @@ def po_listing_detail(df, today=None):
             "TotalReleased": _num_or_none(r.get("TotalReleased")),
             "PO": ("" if _blank(r.get("PO")) else str(r.get("PO"))),
             "PODate": _iso(r.get("Ordered")),             # PO header date (entered date; ETO keeps no issue date)
+            "CargoReady": _iso(r.get("CargoReady")),      # Cargo Ready Date (PurchaseOrderDetailCustom6)
+            "BOLTracking": ("" if _blank(r.get("BOLTracking")) else str(r.get("BOLTracking")).strip()),
             "Stage": release_stage(r.get("HasPre"), r.get("HasRel")),
             "PlannedShip": "",                            # ETO holds no maintained ship date
             "PlannedReceipt": (req.date().isoformat() if pd.notna(req) else ""),
