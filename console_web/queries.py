@@ -91,10 +91,10 @@ class QueryResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Query catalogue (drives the UI dropdown)
 # ─────────────────────────────────────────────────────────────────────────────
-_QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "hours_summary", "hours_by_discipline", "spec_budget", "data_completeness", "crosswalk",
+_QUERY_IDS = {"exec", "exec_charts", "scorecard", "discipline", "budget_actual", "hours_summary", "spec_budget", "data_completeness", "crosswalk",
               "lab_a", "lab_b", "lab_c", "lab_d", "lab_e", "lab_disc", "lab_dsum", "lab_util",
               "po_all", "po_status", "po_to_order", "po_exceptions", "po_listing", "po_late",
-              "po_delivered", "po_buyer", "released_toorder", "bom_readiness", "project_types", "project_types_detail", "item_location", "inventory_value",
+              "po_delivered", "po_buyer", "released_toorder", "bom_readiness", "item_location", "inventory_value",
               "inventory_by_site", "inventory_alloc", "inventory_contention", "inventory_returns",
               "packing_slip",
               "nc_summary", "nc_costs", "nc_impact", "nc_cause", "nc_discipline",
@@ -145,10 +145,6 @@ def catalogue():
                  f"with hours remaining to budget (budget − actual) and % consumed, plus a "
                  f"portfolio total. Hours only (no material $).",
          "needs_projects": True},
-        {"id": "hours_by_discipline", "menu": "Project Management", "label": "Hours by Discipline",
-         "desc": f"Budget vs actual {labour.lower()} hours per {proj.lower()}, split by discipline "
-                 f"(Mfg, ME, HE, EE, PM) with a project total — the classified-projects set.",
-         "needs_projects": False},
         {"id": "spec_budget", "menu": "Dashboards", "label": f"Machine {disc} Budget",
          "desc": f"Machine × {disc.lower()} labour budget vs actual, in hours, from ETO "
                  f"(tblSpecHours / vwTimecards) — {proj.lower()} → machine → {disc.lower()}. "
@@ -213,16 +209,6 @@ def catalogue():
                  "exactly. Assembly/Total/Available/On-order quantities, still-to-procure, % "
                  "available (Absolute method), exploded through the full assembly tree.",
          "needs_projects": True},
-        {"id": "project_types", "menu": "Project Management", "label": "Project Types",
-         "desc": "Project count and share by type (Forging, SMC, Metalforming, Mechanical "
-                 "Retrofits, ...), grouped into Category Groups. The classification is maintained "
-                 "in Sextant, seeded from the ETO Project Types sheet; a project appears once it "
-                 "has been classified.",
-         "needs_projects": False},
-        {"id": "project_types_detail", "menu": "Project Management", "label": "Project Types — Projects",
-         "desc": "Every classified project and its type — Project #, Company, Description, "
-                 "Category and Category Group. The per-project companion to Project Types.",
-         "needs_projects": False},
         # ── Inventory ─────────────────────────────────────────────────────
         {"id": "item_location", "menu": "Inventory", "label": "Item Location",
          "desc": f"Current on-hand inventory for the items purchased on the selected "
