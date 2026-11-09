@@ -121,7 +121,10 @@ class LivePlanService(PlanService):
         cur = self._cc().cursor()
         cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent")
         excl = self._excluded_ids()
-        return [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
+        ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
+        from console.domain.tracked import TrackedProjectDAO
+        active = TrackedProjectDAO(self._cc()).active_ids()   # one switch (2026-11-09)
+        return [p for p in ids if p in active] if active else ids
 
     def list_projects(self):
         # projects with a budget are the ones a plan is meaningful for; others can be brought in

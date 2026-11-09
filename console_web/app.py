@@ -31,6 +31,7 @@ from console_web.queries import make_service, catalogue, branding, data_watermar
 from console_web import exporters, auth, cache as cache_mod
 from console_web.pm import make_pm_service
 from console_web.plan import make_plan_service
+from console_web.tracked import make_tracked_service
 
 app = Flask(__name__)
 app.config["DEMO"] = False
@@ -440,6 +441,76 @@ def api_pm_remove():
     except Exception as e:
         app.logger.exception("pm remove_project failed")
         return jsonify({"error": str(e)}), 500
+
+
+# ── Tracked Projects: Sextant's own list of the projects it follows (2026-11-09) ──
+# Replaces the Worksheet tab of the PMs' Executive Dashboard workbook. Read: any signed-in user.
+# Write (add / remove / reorder): pm+. Add/remove go through the PM service so adding also brings
+# in the ETO budget; one switch drives the selector, dashboards, displays and the PO exception report.
+def _tracked_call(fn):
+    svc = make_tracked_service(demo=app.config["DEMO"])
+    try:
+        return fn(svc)
+    finally:
+        close = getattr(svc, "close", None)
+        if close:
+            close()
+
+
+def _tracked_write(fn):
+    from console.domain.tracked import TrackedSchemaMissing
+    denied = auth.gate("pm")
+    if denied:
+        return denied
+    try:
+        out = fn()
+        cache_mod.cache.mark_dirty()          # tracked set changed -> refresh the dashboards
+        return jsonify(out)
+    except TrackedSchemaMissing as e:
+        return jsonify({"error": str(e)}), 409
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("tracked-projects write failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/projects")
+def tracked_page():
+    return render_template("projects.html")
+
+
+@app.route("/api/tracked")
+def api_tracked():
+    try:
+        return jsonify(_tracked_call(lambda s: s.list()))
+    except Exception as e:
+        app.logger.exception("tracked list failed")
+        return jsonify({"error": str(e)}), 500
+
+
+def _pid_from_body():
+    b = request.get_json(silent=True) or {}
+    try:
+        return int(str(b.get("project_id", "")).replace(",", "").strip())
+    except ValueError:
+        raise ValueError("project_id must be a project number")
+
+
+@app.route("/api/tracked/add", methods=["POST"])
+def api_tracked_add():
+    return _tracked_write(lambda: _pm_call(lambda s: s.add_project(_pid_from_body(), g.get("user"))))
+
+
+@app.route("/api/tracked/remove", methods=["POST"])
+def api_tracked_remove():
+    return _tracked_write(lambda: _pm_call(lambda s: s.remove_project(_pid_from_body(), g.get("user"))))
+
+
+@app.route("/api/tracked/order", methods=["POST"])
+def api_tracked_order():
+    order = (request.get_json(silent=True) or {}).get("order") or []
+    return _tracked_write(lambda: _tracked_call(lambda s: s.reorder(order, g.get("user"))))
 
 
 # ── PM controls: author/edit a project's plan (schedule & progress) ───────────

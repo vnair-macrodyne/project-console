@@ -437,6 +437,12 @@ async function buildNav(){
       pl.innerHTML='<div>Project Plan</div><div class="mid">You are here \u2014 manage a project on the console.</div>';
       menu.insertBefore(pl, menu.firstChild);
     }
+    // Tracked Projects (2026-11-09): every role sees it; only pm+ can change the list.
+    if(m==='Project Management'){
+      const tp=document.createElement('a'); tp.className='mi'; tp.href='/projects';
+      tp.innerHTML='<div>Tracked Projects</div><div class="mid">The projects Sextant follows — add, remove, set priority.</div>';
+      menu.insertBefore(tp, menu.children[(rank[role]||1)>=2?1:0]||null);
+    }
     g.appendChild(menu); nav.appendChild(g);
   });
   if((rank[role]||1)>=3){

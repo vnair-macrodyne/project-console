@@ -554,13 +554,12 @@ class LiveQueryService(QueryService):
             return set()
 
     def _active_ids(self):
-        """Active / open projects (Reporting.tblActiveProject, sql/020) — the open-projects list from
-        the Exec Dashboard, refreshed by console_seed_active_project.py. Guarded: an empty set if the
-        table/migration isn't present, so the console behaves as before until it's seeded."""
+        """Tracked projects — Sextant's own list (Reporting.tblActiveProject.IsActive = 1, kept on the
+        Tracked Projects page; sql/020 + 022, console/domain/tracked.py). Guarded: an empty set if the
+        table isn't present, so the console falls back to the banked set as before."""
         try:
-            cur = self._console_conn().cursor()
-            cur.execute("SELECT ProjectID FROM Reporting.tblActiveProject")
-            return {int(r[0]) for r in cur.fetchall()}
+            from console.domain.tracked import TrackedProjectDAO
+            return TrackedProjectDAO(self._console_conn()).active_ids()
         except Exception:
             return set()
 

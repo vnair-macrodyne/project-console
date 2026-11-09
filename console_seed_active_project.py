@@ -1,5 +1,17 @@
 """
-console_seed_active_project.py — refresh Reporting.tblActiveProject from the Exec Dashboard sheet.
+console_seed_active_project.py — ONE-TIME load of Sextant's tracked-project list from the PMs' sheet.
+
+As of 2026-11-09 Sextant keeps the tracked / active project list itself (Tracked Projects page,
+console/domain/tracked.py, sql/022). This script is the migration: it makes the tracked list exactly
+the workbook's Sequence list (in that priority order), logging each change as 'seed-add' /
+'seed-remove'. Unlisted projects are removed (kept, reversible). After this, PMs maintain the list
+in Sextant and the workbook's Worksheet tab is retired. (Before sql/022 is applied it falls back to
+the old DELETE + reinsert.)
+
+Also accepts --ids FILE: a single column of project numbers in priority order (header optional),
+e.g. seeds/active_projects_2026-11-09.txt, for when the workbook isn't to hand.
+
+--- original notes ---
 
 The ACTIVE / open project list is maintained by Helen Young and Mike Plata on the "Worksheet" tab of
 "Macrodyne - Executive Dashboard.xlsx". This stages that list into the Console store so Sextant can
@@ -141,14 +153,27 @@ def main():
     ap = argparse.ArgumentParser(description="Refresh Reporting.tblActiveProject from the Exec Dashboard sheet.")
     ap.add_argument("--xlsx", default="Macrodyne - Executive Dashboard.xlsx",
                     help="Path to the Executive Dashboard workbook (has the 'Worksheet' tab).")
+    ap.add_argument("--ids", help="Instead of the workbook: a file with one column of project numbers, "
+                                  "in priority order (header optional).")
+    ap.add_argument("--user", default="seed: Exec Dashboard Worksheet",
+                    help="Recorded as ChangedBy in the change history.")
     ap.add_argument("--dry-run", action="store_true", help="Parse + show; no DB writes")
     args = ap.parse_args()
 
-    if not os.path.exists(args.xlsx):
-        raise SystemExit(f"Workbook not found: {args.xlsx!r}  (pass --xlsx <path>)")
-
-    seq, table = parse_sheet(args.xlsx)
-    recs = build_active(seq, table)
+    if args.ids:
+        if not os.path.exists(args.ids):
+            raise SystemExit(f"File not found: {args.ids!r}")
+        ids = []
+        for line in open(args.ids, encoding="utf-8-sig"):
+            tok = line.split(",")[0].strip().replace('"', "")
+            if tok.isdigit():
+                ids.append(int(tok))
+        recs = [(pid, None, i) for i, pid in enumerate(dict.fromkeys(ids), 1)]
+    else:
+        if not os.path.exists(args.xlsx):
+            raise SystemExit(f"Workbook not found: {args.xlsx!r}  (pass --xlsx <path> or --ids <file>)")
+        seq, table = parse_sheet(args.xlsx)
+        recs = build_active(seq, table)
     print(f"active projects: {len(recs)}")
     for pid, cust, prio in recs:
         print(f"   {pid}  {('P'+str(prio)) if prio else '  ':>4}  {cust or ''}")
@@ -159,8 +184,15 @@ def main():
 
     store = _store()
     try:
-        n = refresh(store, recs)
-        print(f"\nReporting.tblActiveProject refreshed: {n} rows.")
+        from console.domain.tracked import TrackedProjectDAO
+        dao = TrackedProjectDAO(store)
+        if dao.has_switch():
+            r = dao.replace_all([pid for pid, _c, _p in recs], user=args.user, source="seed")
+            print(f"\nTracked list set: {len(r['tracked'])} projects  |  added {r['added']}  |  "
+                  f"removed {r['removed']}  |  kept {len(r['kept'])}")
+        else:
+            n = refresh(store, recs)
+            print(f"\nReporting.tblActiveProject refreshed (pre-sql/022 mode): {n} rows.")
     finally:
         try:
             store.close()

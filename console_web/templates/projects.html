@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sextant — Tracked Projects</title>
+<style>
+  :root{--brand:#1F3864;--brand-2:#2f4f8f;--ink:#1a1f2b;--muted:#6b7280;--line:#e3e7ee;
+        --panel:#f7f9fc;--entry:#FFF7DB;--good:#137333;--good-bg:#e6f4ea;--bad:#b3261e;--bad-bg:#fce8e6;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:#eef1f6}
+  header{background:var(--brand);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:14px}
+  header .logo{width:34px;height:34px;border-radius:8px;background:#33518c;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  header .logoimg{height:40px;width:auto;border-radius:6px;display:block}
+  header h1{font-size:16px;margin:0;font-weight:700}
+  header .co{color:#c7d4ee;font-size:13px}
+  header a.back{margin-left:auto;color:#fff;text-decoration:none;font-size:13px;border:1px solid #4a67a0;padding:6px 12px;border-radius:8px}
+  header a.back:hover{background:#33518c}
+  .wrap{padding:18px 22px;max-width:920px;margin:0 auto}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  .card h2{font-size:14px;margin:0 0 12px;color:var(--brand)}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end}
+  .fld{display:flex;flex-direction:column;gap:4px}
+  .fld label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .fld input,.fld select{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;min-width:150px}
+  .fld input[type=number]{text-align:right}
+  input.entry{background:var(--entry)}
+  .pill{font-size:11px;padding:2px 8px;border-radius:20px;background:#eef3ff;color:var(--brand);font-weight:600}
+  .suffix{display:flex;align-items:center;gap:6px}
+  .suffix .u{font-size:12px;color:var(--muted)}
+  .actions{display:flex;gap:12px;align-items:center;margin-top:6px}
+  button.save{background:var(--brand);color:#fff;border:0;border-radius:9px;padding:11px 20px;font-size:14px;font-weight:600;cursor:pointer}
+  button.save:hover{background:var(--brand-2)}
+  button.save:disabled{opacity:.5;cursor:default}
+  button.ghost{background:#fff;border:1px solid var(--line);border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;color:var(--brand)}
+  button.ghost:hover{background:#f2f6ff}
+  button.ghost.danger{color:var(--bad);border-color:#f0c9c5}
+  button.ghost.danger:hover{background:var(--bad-bg)}
+  button.ghost:disabled{opacity:.5;cursor:default}
+  .kpis{display:flex;flex-wrap:wrap;gap:10px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 14px;min-width:120px}
+  .kpi .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .kpi .v{font-size:18px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+  .kpi .v.bad{color:var(--bad)}.kpi .v.warn{color:#8a5a00}.kpi .v.good{color:var(--good)}
+  .msg{font-size:13px;padding:8px 12px;border-radius:8px;display:none}
+  .msg.ok{background:var(--good-bg);color:var(--good);display:block}
+  .msg.err{background:var(--bad-bg);color:var(--bad);display:block}
+  .hint{font-size:12px;color:var(--muted);margin:2px 0 0}
+  .demo{background:#ffce44;color:#3a2f00;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
+  .note{background:#eef3ff;border:1px solid #d5e0f6;border-radius:9px;padding:10px 12px;font-size:12.5px;color:#33415c;margin-top:8px}
+  .mdmach{margin-bottom:8px}
+  .mdmach .mh{font-weight:700;color:var(--brand);margin:12px 0 4px}
+  table.mdt{width:100%;border-collapse:collapse;font-size:13px}
+  table.mdt th{text-align:left;background:#eef3ff;color:var(--brand);padding:6px 10px;font-weight:600;font-size:12px}
+  table.mdt th.num,table.mdt td.num{text-align:right;font-variant-numeric:tabular-nums}
+  table.mdt td{padding:6px 10px;border-bottom:1px solid var(--line)}
+  table.mdt input{width:80px;text-align:right;border:1px solid var(--line);border-radius:6px;padding:5px 7px;background:var(--entry)}
+  td.cpi.bad{color:#b3261e;font-weight:700}td.cpi.warn{color:#8a5a00;font-weight:600}
+  .mdt td.implied{color:#9aa0a6;font-style:italic}
+  table.mdt tr.unb td{background:#fffaf0}
+  .utag{display:inline-block;margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.03em;
+        background:#fff3d6;color:#8a5a00;border:1px solid #e7c766;border-radius:20px;padding:1px 8px}
+  .mdbanner{background:#fff8e6;border:1px solid #e7c766;color:#8a5a00;border-radius:9px;
+            padding:9px 12px;font-size:12.5px;margin:0 0 10px}
+  .nav{background:#fff;border-bottom:1px solid var(--line);padding:0 16px;display:flex;gap:2px;position:sticky;top:0;z-index:20;box-shadow:0 1px 3px rgba(20,30,60,.05)}
+  .nav .navgrp{position:relative}
+  .nav .navtop{background:none;border:0;padding:12px 15px;font-size:14px;font-weight:600;color:var(--ink);cursor:pointer;border-bottom:3px solid transparent}
+  .nav .navtop:hover{color:var(--brand-2)}
+  .nav a.pmlink{margin-left:auto;text-decoration:none;color:var(--brand-2);border:1px solid var(--line);border-radius:8px;padding:7px 13px;font-size:13px;font-weight:600;align-self:center}
+  .nav a.pmlink:hover{background:#f2f6ff;border-color:var(--brand-2)}
+  .nav .navmenu{position:absolute;top:100%;left:0;background:#fff;border:1px solid var(--line);border-radius:0 0 10px 10px;box-shadow:0 10px 26px rgba(20,30,60,.16);min-width:250px;padding:6px;display:none;z-index:30}
+  .nav .navgrp.open .navmenu{display:block}
+  .nav .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:9px 11px;border-radius:7px;cursor:pointer;font-size:13.5px;color:var(--ink);text-decoration:none}
+  .nav .mi:hover{background:#f2f6ff;color:var(--brand-2)}
+  .nav .mi .mid{font-size:11.5px;color:var(--muted);margin-top:1px;font-weight:400}
+  .wrap{max-width:1100px}
+  table.tp{width:100%;border-collapse:collapse;font-size:13px}
+  table.tp th{text-align:left;background:#eef3ff;color:var(--brand);padding:7px 10px;font-weight:600;font-size:12px;white-space:nowrap}
+  table.tp td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+  table.tp td.num,table.tp th.num{text-align:right;font-variant-numeric:tabular-nums}
+  table.tp td.pid{font-weight:700;color:var(--brand);white-space:nowrap}
+  table.tp td.meta{color:var(--muted);font-size:12px;white-space:nowrap}
+  table.tp tr:hover td{background:#fafcff}
+  .mv{border:1px solid var(--line);background:#fff;border-radius:6px;width:26px;height:24px;cursor:pointer;color:var(--brand);font-size:12px;padding:0}
+  .mv:hover{background:#f2f6ff}.mv:disabled{opacity:.3;cursor:default}
+  .warnpill{font-size:11px;padding:2px 8px;border-radius:20px;background:#fff4e5;color:#8a5a00;font-weight:600}
+  .addrow{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+  .addrow input{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;width:360px}
+  details.hist summary{cursor:pointer;color:var(--brand);font-weight:600;font-size:13px}
+  table.hl{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
+  table.hl td{padding:5px 8px;border-bottom:1px solid var(--line)}
+  .count{color:var(--muted);font-weight:400;font-size:12.5px;margin-left:6px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" id="logo">SX</div>
+  <img class="logoimg" id="logoImg" alt="" style="display:none">
+  <h1 id="product">Sextant</h1>
+  <span id="tagline" style="opacity:.65;font-size:12px;font-style:italic;margin-left:-8px">The Data Console</span>
+  <span class="co" id="company"></span>
+  <span class="demo" id="demoBadge" style="display:none">DEMO DATA</span>
+</header>
+<nav class="nav" id="nav"></nav>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Tracked Projects <span class="count" id="count"></span></h2>
+    <p class="hint" style="margin:0 0 12px">The projects Sextant follows. A tracked project appears in the project list on every
+      report, the dashboards, the display screens and the Purchasing Exception Report. Order sets priority (1 = top).
+      Name and customer come from ETO. Removing a project keeps its budget and plan history — adding it back restores it.</p>
+    <div id="msg" class="msg"></div>
+    <div class="addrow" id="addRow" style="margin:6px 0 14px">
+      <div class="fld"><label for="addInput">Add a project</label>
+        <input id="addInput" list="cands" placeholder="Type a project number or name" autocomplete="off">
+        <datalist id="cands"></datalist></div>
+      <button class="save" id="addBtn" style="padding:9px 16px">Add to tracked list</button>
+    </div>
+    <table class="tp"><thead><tr>
+      <th class="num">Priority</th><th></th><th>Project</th><th>Name</th><th>Customer</th><th>Added</th><th></th>
+    </tr></thead><tbody id="rows"><tr><td colspan="7" class="meta">Loading…</td></tr></tbody></table>
+  </div>
+  <div class="card">
+    <details class="hist"><summary>Change history</summary>
+      <table class="hl"><tbody id="hist"></tbody></table></details>
+  </div>
+</div>
+
+<script>
+const el=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const state={rows:[],cands:[],canEdit:false,busy:false};
+
+function say(t,ok){ const m=el('msg'); m.className='msg '+(ok?'ok':'err'); m.textContent=t; }
+function day(s){ return s?String(s).slice(0,10):''; }
+
+async function post(url,body){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  let d={}; try{ d=await r.json(); }catch(e){}
+  if(!r.ok) throw new Error(d.error||('HTTP '+r.status));
+  return d;
+}
+
+function render(){
+  const tb=el('rows'), n=state.rows.length;
+  el('count').textContent=n+' project'+(n===1?'':'s');
+  if(!n){ tb.innerHTML='<tr><td colspan="7" class="meta">No projects are tracked yet.</td></tr>'; }
+  else tb.innerHTML=state.rows.map((r,i)=>`<tr>
+    <td class="num">${i+1}</td>
+    <td style="white-space:nowrap">${state.canEdit?`<button class="mv" data-up="${i}" ${i===0?'disabled':''} title="Move up">▲</button>
+      <button class="mv" data-dn="${i}" ${i===n-1?'disabled':''} title="Move down">▼</button>`:''}</td>
+    <td class="pid">${r.id}</td>
+    <td>${esc(r.name)}${r.banked?'':' <span class="warnpill" title="No ETO budget has been brought in for this project">no budget</span>'}</td>
+    <td>${esc(r.customer)}</td>
+    <td class="meta">${esc(day(r.added_at))}${r.added_by?' · '+esc(r.added_by):''}</td>
+    <td>${state.canEdit?`<button class="ghost danger" data-rm="${r.id}">Remove</button>`:''}</td></tr>`).join('');
+  el('cands').innerHTML=state.cands.map(c=>`<option value="${c.id}">${esc(c.name)}${c.customer?' — '+esc(c.customer):''}</option>`).join('');
+}
+
+function renderHist(h){
+  el('hist').innerHTML=(h||[]).length?h.map(x=>`<tr><td class="meta">${esc(String(x.at||'').slice(0,16))}</td>
+    <td>${esc(x.by||'')}</td><td><b>${esc(x.action)}</b></td><td>${x.id==null?'':x.id}</td><td class="meta">${esc(x.detail||'')}</td></tr>`).join('')
+    :'<tr><td class="meta">No changes recorded yet.</td></tr>';
+}
+
+async function load(){
+  let d={};
+  try{ const r=await fetch('/api/tracked'); d=await r.json(); if(!r.ok) throw new Error(d.error||r.status); }
+  catch(e){ say('Could not load the tracked list: '+e.message,false); return; }
+  state.rows=d.rows||[]; state.cands=d.candidates||[];
+  state.canEdit=state.roleEdit && d.editable;
+  el('addRow').style.display=state.canEdit?'':'none';
+  if(state.roleEdit && !d.editable) say('The list is read-only until the sql/022 database update is applied.',false);
+  render(); renderHist(d.history);
+}
+
+async function act(fn,okText){
+  if(state.busy) return; state.busy=true;
+  try{ await fn(); say(okText,true); await load(); }
+  catch(e){ say(e.message,false); }
+  finally{ state.busy=false; }
+}
+
+el('rows').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  if(b.dataset.rm){ const pid=Number(b.dataset.rm);
+    if(!confirm('Stop tracking '+pid+'? Its budget and plan history are kept; you can add it back later.')) return;
+    return act(()=>post('/api/tracked/remove',{project_id:pid}), pid+' removed from the tracked list.'); }
+  const i=Number(b.dataset.up!=null?b.dataset.up:b.dataset.dn), j=b.dataset.up!=null?i-1:i+1;
+  const order=state.rows.map(r=>r.id); [order[i],order[j]]=[order[j],order[i]];
+  act(()=>post('/api/tracked/order',{order}), 'Priority updated.');
+});
+
+el('addBtn').onclick=()=>{
+  const v=(el('addInput').value||'').replace(/[^0-9]/g,'');
+  if(!v){ say('Enter a project number.',false); return; }
+  act(async()=>{ const d=await post('/api/tracked/add',{project_id:Number(v)}); el('addInput').value=''; return d; },
+      v+' added to the tracked list (bottom of the order).');
+};
+el('addInput').addEventListener('keydown',e=>{ if(e.key==='Enter') el('addBtn').click(); });
+
+async function boot(){
+  let me={}; try{ me=await (await fetch('/api/me'+location.search)).json(); }catch(e){}
+  const role=(me&&me.role)||'viewer';
+  state.roleEdit=({viewer:1,pm:2,admin:3}[role]||1)>=2;
+  if(me&&me.user) el('company').insertAdjacentHTML('afterend',
+    `<span style="color:#c7d4ee;font-size:13px;margin-left:8px">${esc(me.user)} · ${esc(role)} · <a href="/logout" style="color:#fff;text-decoration:underline">Sign out</a></span>`);
+  try{ const b=await (await fetch('/api/branding')).json();
+    el('product').textContent=b.product||'Sextant'; el('company').textContent=b.company||'';
+    if(el('tagline')) el('tagline').textContent=b.tagline||'';
+    document.title=(b.product||'Sextant')+' — Tracked Projects';
+    if(b.logo){ const im=el('logoImg'); im.onload=()=>{ im.style.display='block'; el('logo').style.display='none'; }; im.src=b.logo; }
+    if(b.demo) el('demoBadge').style.display='inline-block'; }catch(e){}
+  if(!state.roleEdit) el('msg').insertAdjacentHTML('afterend','<p class="hint" style="color:#b3261e">You have view-only access. Ask an admin for PM access to change the list.</p>');
+  await load();
+}
+document.addEventListener('click', navCloseMenus);
+function navCloseMenus(){ document.querySelectorAll('#nav .navgrp.open').forEach(g=>g.classList.remove('open')); }
+document.addEventListener('click', navCloseMenus);
+async function buildNav(){
+  const nav=el('nav'); if(!nav) return;
+  let qs=[], me={};
+  try{ me=await (await fetch('/api/me'+location.search)).json(); }catch(e){ me={}; }
+  try{ qs=await (await fetch('/api/queries')).json(); }catch(e){ qs=[]; }
+  const order=[], byMenu={};
+  qs.forEach(q=>{ if(!byMenu[q.menu]){ byMenu[q.menu]=[]; order.push(q.menu); } byMenu[q.menu].push(q); });
+  const role=(me&&me.role)||'viewer', rank={viewer:1,pm:2,admin:3};
+  order.forEach(m=>{
+    const g=document.createElement('div'); g.className='navgrp';
+    const btn=document.createElement('button'); btn.className='navtop'; btn.textContent=m+' \u25be';
+    btn.onclick=(e)=>{ e.stopPropagation(); const open=g.classList.contains('open'); navCloseMenus(); if(!open) g.classList.add('open'); };
+    g.appendChild(btn);
+    const menu=document.createElement('div'); menu.className='navmenu';
+    byMenu[m].forEach(q=>{
+      const a=document.createElement('a'); a.className='mi'; a.href='/#report='+q.id;
+      a.innerHTML=`<div>${q.label}</div><div class="mid">${q.desc||''}</div>`;
+      menu.appendChild(a);
+    });
+    if(m==='Project Management' && (rank[role]||1)>=2){
+      const pl=document.createElement('a'); pl.className='mi'; pl.href='/plan';
+      pl.innerHTML='<div>Project Plan</div><div class="mid">Manage a project on the console \u2014 budget &amp; efficacy, schedule &amp; progress.</div>';
+      menu.insertBefore(pl, menu.firstChild);
+    }
+    // Tracked Projects (2026-11-09): every role sees it; only pm+ can change the list.
+    if(m==='Project Management'){
+      const tp=document.createElement('a'); tp.className='mi'; tp.href='/projects';
+      tp.innerHTML='<div>Tracked Projects</div><div class="mid">The projects Sextant follows — add, remove, set priority.</div>';
+      menu.insertBefore(tp, menu.children[(rank[role]||1)>=2?1:0]||null);
+    }
+    g.appendChild(menu); nav.appendChild(g);
+  });
+  if((rank[role]||1)>=3){
+    const ad=document.createElement('a'); ad.className='navtop pmlink'; ad.href='/admin'; ad.style.marginLeft='8px'; ad.textContent='Users'; nav.appendChild(ad);
+  }
+}
+buildNav();
+boot();
+</script>
+</body>
+</html>

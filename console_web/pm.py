@@ -256,11 +256,17 @@ class LivePMService(PMService):
         except Exception:
             return set()
 
+    def _tracked(self):
+        from console.domain.tracked import TrackedProjectDAO
+        return TrackedProjectDAO(self._cc())
+
     def _budgeted_ids(self):
         cur = self._cc().cursor()
         cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent")
         excl = self._excluded_ids()
-        return [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
+        ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
+        active = self._tracked().active_ids()          # one switch (2026-11-09): tracked list wins
+        return [p for p in ids if p in active] if active else ids
 
     def list_projects(self):
         budgeted_ids = set(self._budgeted_ids())
@@ -392,10 +398,11 @@ class LivePMService(PMService):
         from console.domain.eto_budget import EtoBudgetDAO
         from console.domain.budget import BudgetDAO
         pid = int(project_id)
-        self._unexclude(pid)                       # un-hide first (covers the re-add case)
+        tracked = self._tracked()
         cur = self._cc().cursor()
         cur.execute("SELECT 1 FROM Reporting.vw_Console_BudgetCurrent WHERE ProjectID = ?", pid)
-        if cur.fetchone():                         # already banked → un-excluding is all it needed
+        if cur.fetchone():                         # already banked → just (re)track it
+            self._track_on(tracked, pid, entered_by)
             return {"ok": True, "project_id": pid, "tracked": True, "version": None,
                     "labour_hours": None, "readded": True}
         b = EtoBudgetDAO(self._ec(), self._hourtype_map()).get_current(pid)
@@ -403,14 +410,27 @@ class LivePMService(PMService):
             raise ValueError(f"Project {pid} has no ETO budget to bring in.")
         vid = BudgetDAO(self._cc()).upsert_version(
             b, effective=_dt.date.today(), source="ETO", created_by=(entered_by or "console"))
+        self._track_on(tracked, pid, entered_by)
         return {"ok": True, "project_id": pid, "tracked": True, "version": int(vid),
                 "labour_hours": b.labour_budget_hours}
+
+    def _track_on(self, tracked, pid, user):
+        """Put the project on the tracked list (sql/022) — or, before that migration, just clear
+        its exclusion as before."""
+        if tracked.has_switch():
+            tracked.activate(pid, user)
+        else:
+            self._unexclude(pid)
 
     def remove_project(self, project_id, entered_by=None):
         """Remove a project from the Console — REVERSIBLE. Adds it to the exclusion list so it drops
         off the dashboards / project lists, but its banked budget and plan/progress rows are kept
         intact; a later 'Add to Console' restores it in full. No ETO or store data is deleted."""
         pid = int(project_id)
+        tracked = self._tracked()
+        if tracked.has_switch():                   # one switch: off the tracked list (+ exclusion)
+            tracked.deactivate(pid, entered_by)
+            return {"ok": True, "project_id": pid, "tracked": False}
         conn = self._cc()
         cur = conn.cursor()
         cur.execute(
@@ -471,6 +491,15 @@ class DemoPMService(PMService):
                            "Electrical Wiring - Machine": 160, "Fabrication/Welding (IW)": 320}},
     }
     _excluded = set()   # 'removed from console' (reversible), shared with DemoPlanService via this set
+    _order = []         # tracked-list priority order (demo Tracked Projects page)
+    _history = []       # demo change log for the Tracked Projects page
+
+    @classmethod
+    def tracked_order(cls):
+        """Demo tracked list: banked minus removed, in priority order (new ones appended)."""
+        live = [p for p in sorted(cls._store) if p not in cls._excluded]
+        cls._order = [p for p in cls._order if p in live] + [p for p in live if p not in cls._order]
+        return list(cls._order)
 
     def scaffold(self):
         return {"disciplines": _scaffold_from_sheet()}
@@ -528,11 +557,15 @@ class DemoPMService(PMService):
             "lines": {"Project Coordination": 200, "Mechanical Engineering": 1200,
                       "Electrical Engineering": 1000, "Hydraulic Engineering": 400,
                       "Mechanical Assembly": 3000}})
+        DemoPMService._history.insert(0, {"id": pid, "action": "add", "detail": None,
+                                          "by": entered_by or "demo", "at": "now"})
         return {"ok": True, "project_id": pid, "tracked": True, "version": 1, "labour_hours": 4800}
 
     def remove_project(self, project_id, entered_by=None):
         pid = int(project_id)
         DemoPMService._excluded.add(pid)                     # reversible: data kept, just hidden
+        DemoPMService._history.insert(0, {"id": pid, "action": "remove", "detail": None,
+                                          "by": entered_by or "demo", "at": "now"})
         return {"ok": True, "project_id": pid, "tracked": False}
 
     def save_budget(self, payload):

@@ -337,6 +337,12 @@ function renderNav(){
       pl.innerHTML='<div>Project Plan</div><div class="mid">Manage a project on the console — add/remove, budget &amp; efficacy, schedule &amp; progress.</div>';
       menu.insertBefore(pl, menu.firstChild);
     }
+    // Tracked Projects (2026-11-09): every role sees it; only pm+ can change the list.
+    if(m==='Project Management'){
+      const tp=document.createElement('a'); tp.className='mi planlink'; tp.href='/projects';
+      tp.innerHTML='<div>Tracked Projects</div><div class="mid">The projects Sextant follows — add, remove, set priority.</div>';
+      menu.insertBefore(tp, menu.children[(rank[role]||1)>=2?1:0]||null);
+    }
     g.appendChild(menu); nav.appendChild(g);
   });
   if((rank[role]||1)>=3){
