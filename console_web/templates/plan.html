@@ -89,19 +89,13 @@
 <div class="wrap">
   <div class="card">
     <h2>Project Plan — Budget, Schedule &amp; Progress</h2>
-    <p class="hint">One place to manage a project on the console: bring it in (or remove it), see its
-      budget &amp; efficacy, and enter this week's schedule &amp; progress. Saving records progress
-      against the current week; the dashboard reads the latest week.</p>
+    <p class="hint">See a tracked project's budget &amp; efficacy and enter this week's schedule &amp;
+      progress. Saving records progress against the current week; the dashboard reads the latest week.
+      To add or remove a project, use <a href="/projects">Tracked Projects</a>.</p>
     <div class="row" style="margin-top:10px">
       <div class="fld"><label>Project</label><select id="proj"></select></div>
       <div class="fld"><label>Entered by</label><input id="by" class="entry" placeholder="Your name / initials"></div>
       <span class="pill" id="status"></span>
-    </div>
-    <div class="actions" id="trackRow" style="display:none;margin-top:12px">
-      <button class="ghost" id="addBtn" style="display:none">+ Add to Console</button>
-      <button class="ghost danger" id="removeBtn" style="display:none">Remove from Console</button>
-      <span class="hint" id="trackHint"></span>
-      <div class="msg" id="trackMsg"></div>
     </div>
   </div>
 
@@ -272,21 +266,17 @@ async function loadProjects(sel){
   const p=await (await fetch('/api/plan/projects')).json();
   const planned=new Set(p.planned||[]);
   const opt=el('proj'); opt.innerHTML='<option value="">— select a project —</option>';
-  const g1=document.createElement('optgroup'); g1.label='Projects';
-  (p.budgeted||[]).forEach(x=>{
+  (p.budgeted||[]).forEach(x=>{          // tracked projects only (Tracked Projects page adds/removes)
     const tag=planned.has(x.id)?'  ✓':'';
-    g1.appendChild(new Option(`${x.id}  ${x.name||''}${tag}`.trim(), x.id));
+    opt.appendChild(new Option(`${x.id}  ${x.name||''}${tag}`.trim(), x.id));
   });
-  const g2=document.createElement('optgroup'); g2.label='Other projects';
-  (p.available||[]).forEach(x=>g2.appendChild(new Option(`${x.id}  ${x.name||''}`.trim(), x.id)));
-  if(g1.children.length) opt.appendChild(g1);
-  if(g2.children.length) opt.appendChild(g2);
+  if(!(p.budgeted||[]).length) opt.options[0].textContent='— no tracked projects: add one on Tracked Projects —';
   if(sel){ opt.value=String(sel); }
 }
 
 el('proj').onchange=async()=>{
-  const pid=el('proj').value; hideMsg(); hideTrackMsg();
-  if(!pid){ el('form').style.display='none'; el('status').textContent=''; el('trackRow').style.display='none'; return; }
+  const pid=el('proj').value; hideMsg();
+  if(!pid){ el('form').style.display='none'; el('status').textContent=''; return; }
   const b=await (await fetch('/api/plan/'+pid)).json();
   el('status').textContent=b.exists?'Updating this week':'New — first entry for this project';
   el('planned_ship').value=b.planned_ship||'';
@@ -304,21 +294,9 @@ function money(n){ return n==null?'—':('$'+Number(n).toLocaleString(undefined,
 function kpi(k,v,cls){ return `<div class="kpi"><div class="k">${k}</div><div class="v ${cls||''}">${v}</div></div>`; }
 
 async function loadBudget(pid){
-  el('trackRow').style.display='flex';
   let d={};
   try{ d=await (await fetch('/api/pm/budget/'+pid)).json(); }catch(e){ d={}; }
-  state.tracked=!!d.tracked;
-  renderTrackControls(d);
   renderBudget(d);
-}
-
-function renderTrackControls(d){
-  const ro=state.readonly, tracked=!!d.tracked;
-  el('addBtn').style.display=(!tracked && !ro)?'inline-block':'none';
-  el('removeBtn').style.display=(tracked && !ro)?'inline-block':'none';
-  el('trackHint').textContent = tracked
-    ? 'On the console — visible on dashboards & reports.'
-    : (ro ? 'Not on the console.' : 'Not on the console — add it to show it on dashboards & reports.');
 }
 
 function renderBudget(d){
@@ -360,38 +338,6 @@ function renderBudget(d){
   h+='</table>';
   el('budgetDisc').innerHTML=h;
 }
-
-el('addBtn').onclick=async()=>{
-  const pid=el('proj').value; if(!pid) return;
-  el('addBtn').disabled=true; showTrackMsg('','Adding…');
-  try{
-    const r=await fetch('/api/pm/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:Number(pid)})});
-    const d=await r.json();
-    if(!r.ok){ showTrackMsg('err', d.error||'Add failed'); }
-    else{
-      const what = d.readded ? `Project ${pid} is back on the console — its budget and saved plan are as you left them.`
-                             : `Project ${pid} added to the console.`;
-      const note = d.budget==='none in ETO yet' ? ' It has no ETO budget yet, so budget figures stay blank until one is entered in ETO.' : '';
-      showTrackMsg('ok', what+note); await loadProjects(pid); await el('proj').onchange(); }
-  }catch(e){ showTrackMsg('err', String(e)); }
-  el('addBtn').disabled=false;
-};
-
-el('removeBtn').onclick=async()=>{
-  const pid=el('proj').value; if(!pid) return;
-  if(!confirm(`Remove project ${pid} from the console?\n\nIt will disappear from the dashboards and reports. Its budget and saved plan/progress are KEPT — you can add it back anytime.`)) return;
-  el('removeBtn').disabled=true; showTrackMsg('','Removing…');
-  try{
-    const r=await fetch('/api/pm/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:Number(pid)})});
-    const d=await r.json();
-    if(!r.ok){ showTrackMsg('err', d.error||'Remove failed'); }
-    else{ showTrackMsg('ok', `Project ${pid} removed from the console (reversible — data kept).`); await loadProjects(pid); await el('proj').onchange(); }
-  }catch(e){ showTrackMsg('err', String(e)); }
-  el('removeBtn').disabled=false;
-};
-
-function showTrackMsg(cls,txt){ const m=el('trackMsg'); m.className='msg '+(cls||''); m.textContent=txt; m.style.display='block'; }
-function hideTrackMsg(){ const m=el('trackMsg'); m.style.display='none'; }
 
 el('saveBtn').onclick=async()=>{
   const pid=el('proj').value; if(!pid) return;

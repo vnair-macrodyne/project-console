@@ -112,8 +112,7 @@
     <div id="msg" class="msg"></div>
     <div class="addrow" id="addRow" style="margin:6px 0 14px">
       <div class="fld"><label for="addInput">Add a project</label>
-        <input id="addInput" list="cands" placeholder="Type a project number or name" autocomplete="off">
-        <datalist id="cands"></datalist></div>
+        <select id="addInput"></select></div>
       <button class="save" id="addBtn" style="padding:9px 16px">Add to tracked list</button>
     </div>
     <table class="tp"><thead><tr>
@@ -154,7 +153,10 @@ function render(){
     <td>${esc(r.customer)}</td>
     <td class="meta">${esc(day(r.added_at))}${r.added_by?' · '+esc(r.added_by):''}</td>
     <td>${state.canEdit?`<button class="ghost danger" data-rm="${r.id}">Remove</button>`:''}</td></tr>`).join('');
-  el('cands').innerHTML=state.cands.map(c=>`<option value="${c.id}">${esc(c.name)}${c.customer?' — '+esc(c.customer):''}</option>`).join('');
+  const sel=el('addInput'), keep=sel.value;
+  sel.innerHTML='<option value="">— select a project —</option>'+
+    state.cands.map(c=>`<option value="${c.id}">${c.id}  ${esc(c.name||'')}</option>`).join('');
+  if(keep && state.cands.some(c=>String(c.id)===keep)) sel.value=keep;
 }
 
 function renderHist(h){
@@ -193,11 +195,11 @@ el('rows').addEventListener('click',e=>{
 
 el('addBtn').onclick=()=>{
   const v=(el('addInput').value||'').replace(/[^0-9]/g,'');
-  if(!v){ say('Enter a project number.',false); return; }
+  if(!v){ say('Select a project to add.',false); return; }
   act(async()=>{ const d=await post('/api/tracked/add',{project_id:Number(v)}); el('addInput').value=''; return d; },
       v+' added to the tracked list (bottom of the order).');
 };
-el('addInput').addEventListener('keydown',e=>{ if(e.key==='Enter') el('addBtn').click(); });
+
 
 async function boot(){
   let me={}; try{ me=await (await fetch('/api/me'+location.search)).json(); }catch(e){}

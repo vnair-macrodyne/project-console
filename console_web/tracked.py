@@ -68,8 +68,10 @@ class LiveTrackedService:
                          "added_at": _iso(r["added_at"]), "changed_by": r["changed_by"],
                          "changed_at": _iso(r["changed_at"])})
         tracked = {r["id"] for r in rows}
+        # same list, order and labels as the Plan page's "Other projects" dropdown had (Vijay,
+        # 2026-11-11): every ETO project not already tracked, by project number
         candidates = [{"id": pid, "name": nm, "customer": cu}
-                      for pid, (nm, cu) in sorted(eto.items(), reverse=True) if pid not in tracked]
+                      for pid, (nm, cu) in sorted(eto.items()) if pid not in tracked]
         hist = [dict(h, at=_iso(h["at"])) for h in dao.history(50)]
         return {"rows": rows, "candidates": candidates, "history": hist,
                 "editable": dao.has_switch()}
