@@ -208,8 +208,14 @@ class LivePlanService(PlanService):
         items = self._wi_agg(pid)              # [{spec, ht, disc, wi, bud, act}] — work-item grain
         rem = self._wi_remaining(pid)          # {(SpecID, HourType): hours remaining to completion}
         base["machines"] = self._grid_wi(items, rem, self._spec_desc(pid))
-        if any(it["pct"] is not None
-               for m in base["machines"] for d in m["disciplines"] for it in d["items"]):
+        # PMs enter Remaining at MACHINE x DISCIPLINE (Vijay, 2026-11-11): each discipline row carries
+        # the latest saved figure, which the page shows in its input and derives % / earned / CPI from.
+        md_rem = self._md_remaining(pid)
+        for m in base["machines"]:
+            for d in m["disciplines"]:
+                d["remaining"] = md_rem.get((int(m["spec"]), str(d["discipline"])))
+        if md_rem or any(it["pct"] is not None
+                         for m in base["machines"] for d in m["disciplines"] for it in d["items"]):
             base["exists"] = True
         return base
 
@@ -476,9 +482,10 @@ class LivePlanService(PlanService):
                 "  SELECT SpecID, Discipline, RemainingHours,"
                 "         ROW_NUMBER() OVER (PARTITION BY SpecID, Discipline ORDER BY YearWeekKey DESC) rn"
                 "  FROM Reporting.tblProjectMachineDisciplineProgress"
-                "  WHERE ProjectID = ? AND RemainingHours IS NOT NULL) t WHERE rn = 1", pid)
-            for s, d, hrs in cur.fetchall():
-                out[(int(s), str(d))] = round(float(hrs), 2) if hrs is not None else None
+                "  WHERE ProjectID = ?) t WHERE rn = 1", pid)
+            for s, d, hrs in cur.fetchall():           # latest week wins, even when it was cleared
+                if hrs is not None:
+                    out[(int(s), str(d))] = round(float(hrs), 2)
         except Exception:
             pass
         return out
@@ -524,18 +531,49 @@ class LivePlanService(PlanService):
         # The payload posts every work-item cell in the grid; a blank remaining clears that cell.
         cells = payload.get("machine_discipline_progress") or []
         items = self._wi_agg(pid)              # ETO budget/actual per work item — for %-from-remaining + roll-up
-        cell_rem = {}
+        cell_rem, md_cells = {}, {}
         for c in cells:
             try:
-                spec, ht = int(c.get("spec")), int(c.get("hourtype"))
+                spec = int(c.get("spec"))
             except (TypeError, ValueError):
                 continue
-            cell_rem[(spec, ht)] = _remaining_in(c.get("remaining"))
-        self._save_wi_progress(cur, pid, fy, wk, key, by, items, cell_rem)
-        # Keep the legacy roll-up tables the dashboard / scorecard / Budgets read: DERIVE the machine×
-        # discipline and discipline % (budget-weighted) from the work items and write them, so those
-        # surfaces are unchanged and the PM still enters progress once — now at the work item.
-        md, disc = self._derive_rollups(items, cell_rem)
+            if c.get("hourtype") not in (None, ""):          # work-item cell
+                try:
+                    cell_rem[(spec, int(c.get("hourtype")))] = _remaining_in(c.get("remaining"))
+                except (TypeError, ValueError):
+                    pass
+                continue
+            disc = str(c.get("discipline") or "").strip()   # machine x discipline cell (the Plan page)
+            if disc:
+                md_cells[(spec, disc)] = _remaining_in(c.get("remaining"))
+        if cells and not cell_rem and not md_cells:
+            raise ValueError("No progress cells could be read from the form — nothing was saved.")
+        if cell_rem:
+            self._save_wi_progress(cur, pid, fy, wk, key, by, items, cell_rem)
+            md, disc = self._derive_rollups(items, cell_rem)
+        else:
+            md, disc = {}, {}
+        if md_cells:
+            # Remaining entered at MACHINE x DISCIPLINE (Vijay, 2026-11-11). Until 2026-11-11 these
+            # cells carried no hour type and were silently skipped, so nothing was saved. % = actual /
+            # (actual + remaining) on the cell's ETO actual; the discipline % is budget-weighted over
+            # its machines (weight = budget, or actual for unbudgeted work), as before.
+            agg = {}
+            for it in items:
+                a = agg.setdefault((it["spec"], it["disc"]), [0.0, 0.0])
+                a[0] += it["bud"]; a[1] += it["act"]
+            pairs = {}
+            for (spec, d), (b, a) in agg.items():
+                r = md_cells.get((spec, d))
+                pct = _pct_from_remaining(a, r) if (spec, d) in md_cells else None
+                if (spec, d) in md_cells:
+                    md[(spec, d)] = (r, pct)
+                pairs.setdefault(d, []).append((pct, b if b > 0 else a))
+            for key2, r in md_cells.items():               # a cell with no ETO hours at all
+                if key2 not in md:
+                    md[key2] = (r, _pct_from_remaining(0.0, r))
+            disc.update({d: v for d, v in ((d, _budget_weighted(p)) for d, p in pairs.items())
+                         if v is not None})
         self._save_md_derived(cur, pid, fy, wk, key, by, md)
         self._save_discipline_progress(cur, pid, fy, wk, key, by, disc)
         conn.commit()
@@ -737,8 +775,12 @@ class DemoPlanService(PlanService):
         cells = (rec or {}).get("cells", {})     # {(spec, ht): remaining hours}
         items = DemoPlanService._DEMO_ITEMS.get(pid, [])
         base["machines"] = LivePlanService._grid_wi(items, dict(cells))
-        if any(it["pct"] is not None
-               for m in base["machines"] for d in m["disciplines"] for it in d["items"]):
+        md = (rec or {}).get("md", {})            # {(spec, discipline): remaining} — what the page saves
+        for m in base["machines"]:
+            for d in m["disciplines"]:
+                d["remaining"] = md.get((int(m["spec"]), str(d["discipline"])))
+        if md or any(it["pct"] is not None
+                     for m in base["machines"] for d in m["disciplines"] for it in d["items"]):
             base["exists"] = True
         if rec:
             base.update(planned_ship=rec["planned_ship"],
@@ -749,14 +791,20 @@ class DemoPlanService(PlanService):
 
     def save_plan(self, payload):
         pid = int(payload["project_id"])
-        cells = {}
+        cells, md = {}, {}
         for c in (payload.get("machine_discipline_progress") or []):
             try:
-                spec, ht = int(c.get("spec")), int(c.get("hourtype"))
+                spec = int(c.get("spec"))
             except (TypeError, ValueError):
                 continue
-            cells[(spec, ht)] = _remaining_in(c.get("remaining"))
+            if c.get("hourtype") not in (None, ""):
+                cells[(spec, int(c.get("hourtype")))] = _remaining_in(c.get("remaining"))
+            elif str(c.get("discipline") or "").strip():
+                r = _remaining_in(c.get("remaining"))
+                if r is not None:
+                    md[(spec, str(c.get("discipline")).strip())] = r
         DemoPlanService._store[pid] = {
+            "md": md,
             "planned_ship": (payload.get("planned_ship") or None),
             "labour_runout": _ratio_pct(payload.get("labour_runout")),
             "material_runout": _ratio_pct(payload.get("material_runout")),
