@@ -572,8 +572,13 @@ class LiveQueryService(QueryService):
         # longer appears until the list is re-uploaded with it). Falls back to the banked console set
         # (vw_Console_BudgetCurrent) only if the active list is empty / not seeded.
         excl = self._excluded_ids()
-        active = self._active_ids()
-        if active:
+        try:
+            from console.domain.tracked import TrackedProjectDAO
+            tracked = TrackedProjectDAO(self._console_conn()).tracked_set()
+        except Exception:
+            tracked = None
+        active = tracked if tracked is not None else self._active_ids()
+        if tracked is not None or active:   # tracked list exists: it decides, even when empty
             ids = sorted(p for p in active if p not in excl)
         else:
             cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent "

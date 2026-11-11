@@ -261,12 +261,17 @@ class LivePMService(PMService):
         return TrackedProjectDAO(self._cc())
 
     def _budgeted_ids(self):
+        """The projects on the console = the TRACKED list (IsActive = 1), whether or not a budget
+        has been banked for them (Vijay, 2026-11-11: adding = adding to the tracked list; removing
+        = flag off; re-adding = flag back on, data kept). Before sql/022: the banked set minus
+        exclusions, as before."""
+        tracked = self._tracked().tracked_set()
+        if tracked is not None:
+            return sorted(tracked - self._excluded_ids())
         cur = self._cc().cursor()
         cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent")
         excl = self._excluded_ids()
-        ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
-        active = self._tracked().active_ids()          # one switch (2026-11-09): tracked list wins
-        return [p for p in ids if p in active] if active else ids
+        return [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
 
     def list_projects(self):
         budgeted_ids = set(self._budgeted_ids())
@@ -401,7 +406,25 @@ class LivePMService(PMService):
         tracked = self._tracked()
         cur = self._cc().cursor()
         cur.execute("SELECT 1 FROM Reporting.vw_Console_BudgetCurrent WHERE ProjectID = ?", pid)
-        if cur.fetchone():                         # already banked → just (re)track it
+        banked = cur.fetchone() is not None
+        if tracked.has_switch():
+            # Adding IS adding to the tracked list (first time: a new row; a removed project: its
+            # flag back on, history intact). The ETO budget is banked alongside when there is one
+            # and it isn't banked yet; a project with no ETO budget is still tracked.
+            readded = pid in {r["id"] for r in tracked.rows(include_removed=True)}
+            tracked.activate(pid, entered_by)
+            out = {"ok": True, "project_id": pid, "tracked": True, "version": None,
+                   "labour_hours": None, "readded": readded, "budget": "banked" if banked else None}
+            if not banked:
+                b = EtoBudgetDAO(self._ec(), self._hourtype_map()).get_current(pid)
+                if b is not None and b.discipline_hours:
+                    vid = BudgetDAO(self._cc()).upsert_version(
+                        b, effective=_dt.date.today(), source="ETO", created_by=(entered_by or "console"))
+                    out.update(version=int(vid), labour_hours=b.labour_budget_hours, budget="banked")
+                else:
+                    out["budget"] = "none in ETO yet"
+            return out
+        if banked:                                 # pre-sql/022: already banked → just (re)track it
             self._track_on(tracked, pid, entered_by)
             return {"ok": True, "project_id": pid, "tracked": True, "version": None,
                     "labour_hours": None, "readded": True}

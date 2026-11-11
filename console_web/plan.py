@@ -118,13 +118,16 @@ class LivePlanService(PlanService):
             return set()
 
     def _budgeted_ids(self):
+        """Projects on the console = the TRACKED list (IsActive = 1), banked budget or not
+        (Vijay, 2026-11-11). Before sql/022: the banked set minus exclusions, as before."""
+        from console.domain.tracked import TrackedProjectDAO
+        tracked = TrackedProjectDAO(self._cc()).tracked_set()
+        if tracked is not None:
+            return sorted(tracked - self._excluded_ids())
         cur = self._cc().cursor()
         cur.execute("SELECT DISTINCT ProjectID FROM Reporting.vw_Console_BudgetCurrent")
         excl = self._excluded_ids()
-        ids = [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
-        from console.domain.tracked import TrackedProjectDAO
-        active = TrackedProjectDAO(self._cc()).active_ids()   # one switch (2026-11-09)
-        return [p for p in ids if p in active] if active else ids
+        return [int(r[0]) for r in cur.fetchall() if int(r[0]) not in excl]
 
     def list_projects(self):
         # projects with a budget are the ones a plan is meaningful for; others can be brought in

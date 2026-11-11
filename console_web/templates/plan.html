@@ -368,7 +368,11 @@ el('addBtn').onclick=async()=>{
     const r=await fetch('/api/pm/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:Number(pid)})});
     const d=await r.json();
     if(!r.ok){ showTrackMsg('err', d.error||'Add failed'); }
-    else{ showTrackMsg('ok', `Project ${pid} added to the console.`); await loadProjects(pid); await el('proj').onchange(); }
+    else{
+      const what = d.readded ? `Project ${pid} is back on the console — its budget and saved plan are as you left them.`
+                             : `Project ${pid} added to the console.`;
+      const note = d.budget==='none in ETO yet' ? ' It has no ETO budget yet, so budget figures stay blank until one is entered in ETO.' : '';
+      showTrackMsg('ok', what+note); await loadProjects(pid); await el('proj').onchange(); }
   }catch(e){ showTrackMsg('err', String(e)); }
   el('addBtn').disabled=false;
 };

@@ -82,6 +82,21 @@ class TrackedProjectDAO:
             self._rollback()
             return set()
 
+    def tracked_set(self):
+        """The tracked list as the ONE switch (Vijay, 2026-11-11): the set of IsActive = 1 projects
+        — possibly EMPTY — once sql/022 is applied; None before it (callers then use their old
+        rule). Unlike active_ids(), an empty list here means "nothing is tracked", never "fall back
+        to every banked project", so removing the last project can't bring the others back."""
+        if not self.has_switch():
+            return None
+        try:
+            cur = self._conn.cursor()
+            cur.execute(f"SELECT ProjectID FROM {T_ACTIVE} WHERE IsActive = 1")
+            return {int(r[0]) for r in cur.fetchall()}
+        except Exception:
+            self._rollback()
+            return None
+
     def rows(self, include_removed=False) -> list:
         """Tracked rows ordered by priority (unprioritised last, then by project number)."""
         cur = self._conn.cursor()
