@@ -19,6 +19,7 @@ Workbook tabs
 Run from the repo root where ETO and the Reporting DB are reachable:
     python make_procurement_omnibus.py                      # the uploaded active-projects list, minus Remove-from-Console
     python make_procurement_omnibus.py 250005 260178        # or name projects
+    python make_procurement_omnibus.py --all                # EVERY project, all time, all statuses
 Writes Procurement_Omnibus_<YYYYMMDD>.xlsx here and prints a summary.
 """
 import sys, time, datetime as _dt
@@ -39,12 +40,12 @@ def po_order_dates(pids):
     """{PurchaseOrderID (str): order date} for every PO touching the given projects — the PO header
     PurchaseDate (one date per PO), merged onto the Omnibus PO rows by PO number."""
     from console.infra.connections import eto_connection
-    ids = ",".join(str(int(p)) for p in pids)
+    where = f"WHERE pod.ProjectID IN ({','.join(str(int(p)) for p in pids)})" if pids else ""
     c = eto_connection(); cur = c.cursor()
     cur.execute("SELECT DISTINCT poh.PurchaseOrderID, CAST(poh.PurchaseDate AS date) "
                 "FROM dbo.vwPurchaseOrderHeader poh "
                 "JOIN dbo.vwPurchaseOrderDetails pod ON pod.PurchaseOrderID = poh.PurchaseOrderID "
-                f"WHERE pod.ProjectID IN ({ids})")
+                f"{where}")
     m = {str(r[0]): r[1] for r in cur.fetchall()}
     c.close()
     return m
@@ -54,7 +55,7 @@ def released_by(pids):
     """{(ProjectID str, part number): (latest releaser 'Last, First', # release events)} — who most
     recently released the part and how many times (tblBOMReleaseHistory -> tblEmployee)."""
     from console.infra.connections import eto_connection
-    ids = ",".join(str(int(p)) for p in pids)
+    where = f"WHERE h.ProjectID IN ({','.join(str(int(p)) for p in pids)})" if pids else ""
     c = eto_connection(); cur = c.cursor()
     cur.execute(f"""
         WITH rw AS (
@@ -62,7 +63,7 @@ def released_by(pids):
                  ROW_NUMBER() OVER (PARTITION BY h.ProjectID, h.ItemID
                      ORDER BY h.ReleasedDateTime DESC, h.BOMReleaseHistoryID DESC) AS rn,
                  COUNT(*) OVER (PARTITION BY h.ProjectID, h.ItemID) AS RelCount
-          FROM dbo.tblBOMReleaseHistory h WHERE h.ProjectID IN ({ids})
+          FROM dbo.tblBOMReleaseHistory h {where}
         )
         SELECT rw.ProjectID, eim.ItemCompanyID,
                e.EmpLastName + ', ' + e.EmpFirstName AS ReleasedBy, rw.RelCount
@@ -130,56 +131,76 @@ def omnibus_rows(lto, items, cols_exc, podates, relby):
 
 
 def write_workbook(path, omni, omni_cols, reports, info_lines):
+    """Streams the workbook (openpyxl write-only mode) so an all-projects run of several hundred
+    thousand rows fits in memory and writes in minutes, not hours. Same tabs, headers, number
+    formats, filters and frozen header as before."""
     from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
     from console_web import exporters
     head_fill = PatternFill("solid", fgColor="1F3864")
     head_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
     body_font = Font(name="Arial", size=10)
+    aligns = {}
     widths = {"text": 20, "date": 12, "money": 14, "money2": 14, "num": 11, "int": 10, "id": 10}
+    wb = Workbook(write_only=True)
 
-    def table(ws, cols, rows):
+    def table(name, cols, rows):
         # cols: list of (key, label, type, align)
+        ws = wb.create_sheet(name[:31])
         for j, (k, lbl, typ, al) in enumerate(cols, 1):
-            c = ws.cell(1, j, lbl); c.fill = head_fill; c.font = head_font
-            c.alignment = Alignment(horizontal=al, vertical="center")
             ws.column_dimensions[get_column_letter(j)].width = max(widths.get(typ, 12), min(len(lbl) + 3, 34))
-        for i, row in enumerate(rows, 2):
-            for j, (k, lbl, typ, al) in enumerate(cols, 1):
-                cell = ws.cell(i, j)
-                exporters._put_cell(cell, row.get(k), typ)
-                cell.font = body_font
-                cell.alignment = Alignment(horizontal=al)
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{max(len(rows) + 1, 1)}"
         ws.freeze_panes = "B2"
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{max(len(rows) + 1, 1)}"
+        head = []
+        for k, lbl, typ, al in cols:
+            c = WriteOnlyCell(ws, value=lbl); c.fill = head_fill; c.font = head_font
+            c.alignment = Alignment(horizontal=al, vertical="center"); head.append(c)
+        ws.append(head)
+        for row in rows:
+            out = []
+            for k, lbl, typ, al in cols:
+                c = WriteOnlyCell(ws)
+                exporters._put_cell(c, row.get(k), typ)
+                c.font = body_font
+                c.alignment = aligns.setdefault(al, Alignment(horizontal=al))
+                out.append(c)
+            ws.append(out)
 
-    wb = Workbook()
-    ws = wb.active; ws.title = "Omnibus"
-    table(ws, omni_cols, omni)
+    table("Omnibus", omni_cols, omni)
     for name, res in reports:
         fcols, frows = exporters._flatten(res)
-        table(wb.create_sheet(name[:31]), [(c.key, c.label, c.type, c.align) for c in fcols], frows)
+        table(name, [(c.key, c.label, c.type, c.align) for c in fcols], frows)
     info = wb.create_sheet("Info")
-    for i, line in enumerate(info_lines, 1):
-        a = info.cell(i, 1, line[0]); a.font = Font(name="Arial", bold=(i == 1 or line[1] is not None), size=12 if i == 1 else 10)
-        if line[1] is not None:
-            info.cell(i, 2, line[1]).font = body_font
     info.column_dimensions["A"].width = 34; info.column_dimensions["B"].width = 90
+    for i, line in enumerate(info_lines, 1):
+        a = WriteOnlyCell(info, value=line[0])
+        a.font = Font(name="Arial", bold=(i == 1 or line[1] is not None), size=12 if i == 1 else 10)
+        row = [a]
+        if line[1] is not None:
+            b = WriteOnlyCell(info, value=line[1]); b.font = body_font; row.append(b)
+        info.append(row)
     wb.save(path)
 
 
 def main():
     from console_web.queries import LiveQueryService
     from console_web import etospec
-    pids = [int(a) for a in sys.argv[1:] if a.isdigit()] or tracked_projects()
+    all_mode = "--all" in sys.argv[1:]          # every project, all time, all statuses (2026-11-12)
+    pids = None if all_mode else ([int(a) for a in sys.argv[1:] if a.isdigit()] or tracked_projects())
     t0 = time.perf_counter()
-    print(f"make_procurement_omnibus — {time.strftime('%Y-%m-%d %H:%M')}  {len(pids)} project(s)")
+    print(f"make_procurement_omnibus — {time.strftime('%Y-%m-%d %H:%M')}  "
+          + ("ALL projects, all time" if all_mode else f"{len(pids)} project(s)"))
     svc = LiveQueryService()
-    lto = svc.run("released_toorder", pids)
-    req = svc.run("po_to_order", pids)
-    exc = svc.run("po_exceptions", pids)
-    lst = svc.run("po_listing", pids, active_only=False)   # same project set as the To procure lines
+    run = lambda q, **kw: svc.run(q, pids or [], all_projects=all_mode, **kw)
+    lto = run("released_toorder")
+    print(f"   Lines to Order          {time.perf_counter() - t0:7.1f}s")
+    req = run("po_to_order")
+    exc = run("po_exceptions")
+    print(f"   PO Exceptions           {time.perf_counter() - t0:7.1f}s")
+    lst = run("po_listing", active_only=False)   # same project set as the To procure lines
+    print(f"   All Purchase Orders     {time.perf_counter() - t0:7.1f}s")
     items = (lst.export or {}).get("items")
     podates = po_order_dates(pids)
     relby = released_by(pids)
@@ -201,9 +222,10 @@ def main():
     info = [("Procurement Omnibus", None),
             ("Generated", time.strftime("%Y-%m-%d %H:%M")),
             ("Source", "ETO production database (read-only), through the Sextant purchasing reports"),
-            ("Scope", "The uploaded active-projects list at run time, minus projects Removed-from-Console "
-                      "(the same set the project selector shows). Override by naming project numbers on the command line."),
-            ("Projects", ", ".join(str(p) for p in pids)),
+            ("Scope", ("EVERY project in ETO, all time: no project list and no date window (--all)." if all_mode else
+                       "The tracked projects at run time (the same set the project selector shows). "
+                       "Override by naming project numbers on the command line, or --all for every project.")),
+            ("Projects", "All" if all_mode else ", ".join(str(p) for p in pids)),
             ("", None)] + [(f"{s} (lines)", f"{counts[s]:,}") for s in STAGES] + [
             ("Overdue (on order)", f"{overdue:,}"),
             ("PO value, CAD (Cost column total)", f"${cost:,.2f}"),
@@ -215,16 +237,20 @@ def main():
             ("PO #", "Shown once the PO has been printed or emailed."),
             ("Order Date", "The PO header PurchaseDate — when the PO was placed (for a draft, the date it was raised in ETO). Blank on 'To procure' lines (no PO yet)."),
             ("Cost", "PO line total in CAD. Blank until a PO exists."),
-            ("Release Date", "First release-log entry for the project and part; blank for parts bought through a Non-BOM request."),
-            ("Released by", "Who most recently released the part to purchasing (latest BOM release-log entry)."),
-            ("# Releases", "How many times the part has been released on the project (BOM release-log events)."),
+            ("First / Latest Release Date", "The earliest and latest release (or Non-BOM request) behind the line. Each machine's released "
+                                            "quantity is shared out to its PO lines oldest PO first."),
+            ("Released by, Quantity Change", "Who made the latest release behind the line, and its quantity."),
+            ("Total Released", "All release / request quantity covering the line."),
+            ("# Releases", "How many release-log entries the part has on the project."),
+            ("Still to Order", "To-procure lines only: ETO's Required quantity (negative = a return)."),
+            ("Potential Over Order", "PO quantity no release or Non-BOM request covers."),
             ("Mfg Begins", "The machine's Mfg Begin date in ETO, where entered."),
             ("Lead Time", "ETO estimated lead time in days; on overdue PO lines, the part's average historical order-to-receipt days where no estimate exists."),
             ("Planned Ship, Permit Dates", "Blank: rules to be set."),
             ("Oversized, Inspected, Critical, LLT", "Item flags from the ETO item master."),
             ("Left out", "Freight, courier, cartage and brokerage lines; cancelled POs."),
             ("Other tabs", "Lines to Order, Purchase Requisitions, PO Exceptions and All Purchase Orders, as run at the same moment.")]
-    path = f"Procurement_Omnibus_{today:%Y%m%d}.xlsx"
+    path = f"Procurement_Omnibus_{'ALL_' if all_mode else ''}{today:%Y%m%d}.xlsx"
     write_workbook(path, omni, omni_cols,
                    [("Lines to Order", lto), ("Purchase Requisitions", req), ("PO Exceptions", exc), ("All Purchase Orders", lst)],
                    info)

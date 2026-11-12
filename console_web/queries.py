@@ -1157,10 +1157,14 @@ class LiveQueryService(QueryService):
         if raw is None or raw.empty:
             return None
         # Procure lines, plus Return lines (procured beyond need: Still to Order is negative) — Vijay, 2026-11-04
-        raw = raw[raw["ProjectID"].isin(pids)
-                  & raw["Action"].astype(str).str.strip().isin(["Procure", "Return"])].copy()
+        keep = raw["Action"].astype(str).str.strip().isin(["Procure", "Return"])
+        if pids:                                  # None = every project (Omnibus all-projects run)
+            keep &= raw["ProjectID"].isin(pids)
+        raw = raw[keep].copy()
         if raw.empty:
             return None
+        if not pids:
+            pids = sorted({int(p) for p in raw["ProjectID"].dropna()})
         ids = _ids_sql(pids)
         raw["SpecKey"] = pd.to_numeric(raw["SpecID"], errors="coerce").astype(float)
         rel = self._df(f"""SELECT ProjectID, CAST(SpecID AS float) AS SpecKey, ItemID AS ChildID,
@@ -1224,9 +1228,9 @@ class LiveQueryService(QueryService):
         import datetime as _dt
         import pandas as pd
         pids = [int(p) for p in project_ids] if project_ids else []
-        if not pids:
+        if not pids and not kw.get("all_projects"):
             return _released_toorder_result(None, _dt.date.today())
-        df = self._items_to_procure_df(pids)
+        df = self._items_to_procure_df(pids or None)   # all_projects=True: every project
         return _released_toorder_result(df, _dt.date.today())
 
     def _q_po_to_order(self, project_ids, date_from=None, date_to=None, **kw):
@@ -1289,7 +1293,7 @@ class LiveQueryService(QueryService):
             logging.getLogger(__name__).warning(
                 "PO exception enrichment query failed; using base query. %s", enrich_err)
             raw = self._df(etospec.query_po_exceptions(False, pids, dfrom, dto))
-        if pids:
+        if pids or kw.get("all_projects"):
             raw = self._attach_line_releases(raw, pids)
         as_of = _dt.date.today()
         items = etospec.exc_detail(raw, today=as_of)
@@ -1330,8 +1334,8 @@ class LiveQueryService(QueryService):
     def _attach_line_releases(self, raw, pids):
         """Credit each PO line to the release behind it, oldest PO first, and flag quantity no release
         covers as a potential over order (etospec.allocate_line_releases)."""
-        if raw is None or raw.empty or not pids:
-            return raw
+        if raw is None or raw.empty:
+            return raw                                    # pids None/empty = every project
         ev = self._df(etospec.query_release_events(pids))
         try:
             req = self._df(etospec.query_nonbom_events(pids))
@@ -1358,12 +1362,13 @@ class LiveQueryService(QueryService):
             self._attach_hist_lead(raw, overdue_only=False)
         except Exception:
             raw = self._df(etospec.query_po_exceptions(False, pids, dfrom, dto, all_statuses=True))
-        if pids:
+        if pids or kw.get("all_projects"):
             raw = self._attach_line_releases(raw, pids)
         as_of = _dt.date.today()
         items = etospec.po_listing_detail(raw, today=as_of)
         # ETO's Items to Procure (no PO yet, so no buyer) — Peter, 2026-11-03
-        tp = etospec.to_procure_detail(self._items_to_procure_df(pids) if pids else None, today=as_of)
+        tp = etospec.to_procure_detail(self._items_to_procure_df(pids or None)
+                                       if (pids or kw.get("all_projects")) else None, today=as_of)
         if tp is not None and not tp.empty:
             items = tp if items is None or items.empty else pd.concat([tp, items], ignore_index=True)
         return _spec_po_listing_result(items, f"As at {as_of:%b %d, %Y}{_po_window_label(dfrom, dto)}")

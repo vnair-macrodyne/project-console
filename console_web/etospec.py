@@ -998,7 +998,8 @@ def _bom_release_join(project_ids, pod_alias="pod", alias="bomrel"):
 def query_release_events(project_ids):
     """Every release-log entry for the given projects, with who made it — the raw material for
     matching each purchasing line to the release behind it (match_line_releases)."""
-    ids = ",".join(str(int(p)) for p in project_ids)
+    where = (f"WHERE h.ProjectID IN ({','.join(str(int(p)) for p in project_ids)})"
+             if project_ids else "")                    # None = every project
     return f"""
     SELECT h.ProjectID, CAST(h.SpecID AS float) AS SpecKey, h.ItemID, h.ReleasedDateTime,
            CAST(h.QuantityChange AS float) AS QtyChange, h.[Type] AS RelType,
@@ -1006,32 +1007,34 @@ def query_release_events(project_ids):
            e.EmpLastName + ', ' + e.EmpFirstName AS RelBy
     FROM dbo.tblBOMReleaseHistory h
     LEFT JOIN dbo.tblEmployee e ON e.EmployeeID = h.ReleasedByEmployeeID
-    WHERE h.ProjectID IN ({ids})
+    {where}
     """
 
 
 def query_po_line_keys(project_ids):
     """Every line on active POs for the projects (all statuses), with what release allocation needs."""
-    ids = ",".join(str(int(p)) for p in project_ids)
+    proj = (f" AND pod.ProjectID IN ({','.join(str(int(p)) for p in project_ids)})"
+            if project_ids else "")                     # None = every project
     return f"""
     SELECT pod.PurchaseDetailID AS DetailID, pod.ProjectID, CAST(pod.SpecID AS float) AS SpecKey,
            pod.ItemID, CAST(pod.PurchaseQty AS float) AS Qty, poh.PurchaseDate, poh.PurchaseOrderID
     FROM dbo.vwPurchaseOrderDetails pod
     JOIN dbo.vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
-    WHERE poh.PurchaseActive = 1 AND pod.ItemID IS NOT NULL AND pod.ProjectID IN ({ids})
+    WHERE poh.PurchaseActive = 1 AND pod.ItemID IS NOT NULL{proj}
     """
 
 
 def query_nonbom_events(project_ids):
     """ETO Non-BOM purchase requests for the projects, shaped like release events (RelType 'NonBOM'),
     so they count as cover for PO lines in allocate_line_releases (Vijay, 2026-11-04)."""
-    ids = ",".join(str(int(p)) for p in project_ids)
+    proj = (f"ProjectID IN ({','.join(str(int(p)) for p in project_ids)}) AND "
+            if project_ids else "")                     # None = every project
     return f"""
     SELECT ProjectID, CAST(SpecID AS float) AS SpecKey, ItemID, DateCreated AS ReleasedDateTime,
            CAST(PurchaseQty AS float) AS QtyChange, 'NonBOM' AS RelType, NonBOMID AS HistID,
            AddedByEmployee AS RelBy
     FROM dbo.vwPurchasingNonBOM
-    WHERE ProjectID IN ({ids}) AND ItemID IS NOT NULL
+    WHERE {proj}ItemID IS NOT NULL
     """
 
 
