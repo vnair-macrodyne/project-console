@@ -186,6 +186,7 @@ COLS_C = [
 COLS_D = [
     ("ProjectID",  "Project",         7,  "L", False),
     ("Machine",    "M/C",             6,  "C", False),
+    ("Queue",      "Queue",           14, "L", False),
     ("JobName",    "Job Name",        20, "L", False),
     ("Category",   "Labour Category", 16, "L", False),
     ("JobDetail",  "Job Detail",      18, "L", False),
@@ -205,6 +206,18 @@ COLS_E = [
 ]
 
 _AGG = ["Entries", "Hours", "OTHours", "LabourCost"]
+
+
+def query_machine_queue(project_ids=None):
+    """Each machine's CURRENT ETO queue (Pre-Sales / Sales / Engineering / Shipping And
+    Manufacturing ...), as ETO's own queue screens show it — vwQueueManagement.CurrentQueue, one row
+    per ProjectID + SpecID. A machine moves from Engineering to 'Shipping And Manufacturing' when it
+    is engineering-released (tblMasterQueue.EngRelease). Verified 2026-11-16
+    (console_diag_queue_status2.py)."""
+    proj = ""
+    if project_ids:
+        proj = " WHERE ProjectID IN (" + ",".join(str(int(p)) for p in project_ids) + ")"
+    return f"SELECT ProjectID, SpecID, CurrentQueue AS Queue FROM vwQueueManagement{proj}"
 
 
 def query_daily_labour(start_date, end_date, project_ids=None):
@@ -316,6 +329,9 @@ def build_report_d(df):
     hrs = lambda d: round(float(d["Hours"].sum()), 2)
     d0 = df.copy()
     d0["_M"] = d0["Machine"].apply(_mach_label) if "Machine" in d0.columns else ""
+    if "Queue" not in d0.columns:
+        d0["Queue"] = ""
+    d0["Queue"] = d0["Queue"].fillna("")
     for dept in sorted(d0["Department"].dropna().unique()):
         dsub = d0[d0["Department"] == dept]
         band(f"Department: {dept}", "l3_sub")
@@ -325,17 +341,17 @@ def build_report_d(df):
             band(f"{er.Employee}", "l2_sub")
             for cat in sorted(esub["Category"].dropna().unique()):
                 csub = esub[esub["Category"] == cat]
-                g = (csub.groupby(["ProjectID", "_M", "JobName", "JobDetail"], dropna=False)["Hours"]
+                g = (csub.groupby(["ProjectID", "_M", "Queue", "JobName", "JobDetail"], dropna=False)["Hours"]
                          .sum().reset_index())
                 g["_ms"] = g["_M"].apply(_mach_sort)
                 g = g.sort_values(["ProjectID", "_ms", "JobDetail"])
                 for _, r in g.iterrows():
-                    rows.append(([r.ProjectID, r._M, r.JobName, cat, r.JobDetail, round(r.Hours, 2)],
+                    rows.append(([r.ProjectID, r._M, r.Queue, r.JobName, cat, r.JobDetail, round(r.Hours, 2)],
                                  "detail"))
-                rows.append((["", "", "", f"{cat} — subtotal", "", hrs(csub)], "l1_sub"))
-            rows.append(([f"{er.Employee} — Subtotal", "", "", "", "", hrs(esub)], "l2_sub"))
-        rows.append(([f"{dept} — Department Total", "", "", "", "", hrs(dsub)], "l3_sub"))
-    rows.append((["GRAND TOTAL", "", "", "", "", hrs(d0)], "grand"))
+                rows.append((["", "", "", "", f"{cat} — subtotal", "", hrs(csub)], "l1_sub"))
+            rows.append(([f"{er.Employee} — Subtotal", "", "", "", "", "", hrs(esub)], "l2_sub"))
+        rows.append(([f"{dept} — Department Total", "", "", "", "", "", hrs(dsub)], "l3_sub"))
+    rows.append((["GRAND TOTAL", "", "", "", "", "", hrs(d0)], "grand"))
     return rows
 
 

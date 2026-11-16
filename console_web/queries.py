@@ -1062,6 +1062,11 @@ class LiveQueryService(QueryService):
         df = self._df(etospec.query_daily_labour(dfrom, dto, pids))
         if report_id in ("lab_disc", "lab_dsum"):
             df = _labour_add_discipline(df, self._hourdesc_map())
+        if report_id == "lab_d":
+            try:
+                df = _attach_queue(df, self._df(etospec.query_machine_queue(pids)))
+            except Exception:
+                df["Queue"] = ""          # queue view unreadable -> blank column, report still runs
         return _spec_labour_result(report_id, df, _window_label(dfrom, dto))
 
     def _q_lab_disc(self, project_ids, date_from=None, date_to=None, **kw):
@@ -2617,6 +2622,31 @@ def _window_label(dfrom, dto):
     if dfrom is None:
         return f"from project start through {dto:%b %d, %Y}"
     return f"{dfrom:%b %d, %Y} – {dto:%b %d, %Y}"
+
+
+def _attach_queue(df, qdf):
+    """Add each row's machine queue (ProjectID + SpecID) to the labour frame. Blank where ETO has
+    no queue row for that machine."""
+    if df is None or getattr(df, "empty", True):
+        if df is not None:
+            df["Queue"] = []
+        return df
+    qmap = {}
+    if qdf is not None and not qdf.empty:
+        for _, q in qdf.iterrows():
+            try:
+                qmap[(int(q.ProjectID), float(q.SpecID))] = (q.Queue or "").strip()
+            except (TypeError, ValueError):
+                continue
+
+    def look(r):
+        try:
+            return qmap.get((int(r.ProjectID), float(r.Machine)), "")
+        except (TypeError, ValueError):
+            return ""
+    df = df.copy()
+    df["Queue"] = df.apply(look, axis=1)
+    return df
 
 
 def _labour_add_discipline(df, xwalk):
@@ -4961,6 +4991,9 @@ class DemoQueryService(QueryService):
         df = self._demo_labour_df(project_ids, lifetime=lifetime)
         if report_id in ("lab_disc", "lab_dsum"):
             df = _labour_add_discipline(df, _DEMO_XWALK)
+        if report_id == "lab_d":
+            df["Queue"] = df["Machine"].apply(
+                lambda m: "Engineering" if m == 999 else ("Shipping And Manufacturing" if m else ""))
         label = ("from project start through Jul 25, 2026 (demo)" if lifetime
                  else "selected window (demo)")
         return _spec_labour_result(report_id, df, label)
