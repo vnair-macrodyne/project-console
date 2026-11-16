@@ -2653,8 +2653,12 @@ def _spec_labour_result(report_id, df, label):
     qcols = [QueryColumn(k, l, t, a, "", w) for (k, l, t, a, w) in etospec.web_columns(meta["cols"])]
     rows = etospec.web_rows(meta["cols"], grouped)
     cards = _spec_labour_cards(meta["cols"], grouped)
-    note = (f"{meta['title']} — {label}. Labour cost includes overtime and uses the rate on "
-            "each timecard. Figures run from project start through the end date.")
+    if any(c[0] == "LabourCost" for c in meta["cols"]):
+        note = (f"{meta['title']} — {label}. Labour cost includes overtime and uses the rate on "
+                "each timecard. Figures run from project start through the end date.")
+    else:
+        note = (f"{meta['title']} — {label}. Hours booked on timecards. M/C = machine; rework "
+                "(task 999) shows as M/C 999 with the Re-work category.")
     export = {"kind": "labour", "report_id": report_id, "rows": grouped, "label": label}
     return QueryResult(report_id, f"{L('labour')} — {meta['label']}", qcols, rows, cards, note, export)
 

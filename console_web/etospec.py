@@ -180,14 +180,16 @@ COLS_C = [
     ("LabourCost", "Labour Cost",     11, "R", True),
     ("PctDept",    "% of Dept Hrs",   9,  "R", True),
 ]
+# Employee Job Detail (Peter, 2026-11-16): + machine (M/C) after Project; OT Hours and Labour Cost
+# removed from THIS report only (the other labour reports keep them). Rework (task 999) rows show
+# M/C 999 with the 'Re-work' category.
 COLS_D = [
     ("ProjectID",  "Project",         7,  "L", False),
+    ("Machine",    "M/C",             6,  "C", False),
     ("JobName",    "Job Name",        20, "L", False),
     ("Category",   "Labour Category", 16, "L", False),
     ("JobDetail",  "Job Detail",      18, "L", False),
     ("Hours",      "Hours",           7,  "R", True),
-    ("OTHours",    "OT Hours",        7,  "R", True),
-    ("LabourCost", "Labour Cost",     11, "R", True),
 ]
 COLS_E = [
     ("ProjectID",  "Project ID",  7,  "L", False),
@@ -306,13 +308,16 @@ def build_report_c(df):
 
 def build_report_d(df):
     """Department -> Employee -> LABOUR CATEGORY -> job-detail rows (cumulative). The job details
-    are grouped by labour category with a per-category subtotal, then an employee subtotal and a
-    department total."""
+    are grouped by project, machine (M/C) and job detail within each labour category, with a
+    per-category subtotal, then an employee subtotal and a department total. Hours only."""
     rows = []
     n = len(COLS_D)
     band = lambda label, rt: rows.append(([label] + [""] * (n - 1), rt))
-    for dept in sorted(df["Department"].dropna().unique()):
-        dsub = df[df["Department"] == dept]
+    hrs = lambda d: round(float(d["Hours"].sum()), 2)
+    d0 = df.copy()
+    d0["_M"] = d0["Machine"].apply(_mach_label) if "Machine" in d0.columns else ""
+    for dept in sorted(d0["Department"].dropna().unique()):
+        dsub = d0[d0["Department"] == dept]
         band(f"Department: {dept}", "l3_sub")
         emps = dsub[["EmpNo", "Employee"]].drop_duplicates().sort_values("Employee")
         for _, er in emps.iterrows():
@@ -320,20 +325,17 @@ def build_report_d(df):
             band(f"{er.Employee}", "l2_sub")
             for cat in sorted(esub["Category"].dropna().unique()):
                 csub = esub[esub["Category"] == cat]
-                g = (csub.groupby(["ProjectID", "JobName", "JobDetail"], dropna=False)[_AGG]
-                         .sum().reset_index().sort_values(["ProjectID", "JobDetail"]))
+                g = (csub.groupby(["ProjectID", "_M", "JobName", "JobDetail"], dropna=False)["Hours"]
+                         .sum().reset_index())
+                g["_ms"] = g["_M"].apply(_mach_sort)
+                g = g.sort_values(["ProjectID", "_ms", "JobDetail"])
                 for _, r in g.iterrows():
-                    rows.append(([r.ProjectID, r.JobName, cat, r.JobDetail,
-                                  round(r.Hours, 2), round(r.OTHours, 2), round(r.LabourCost, 2)],
+                    rows.append(([r.ProjectID, r._M, r.JobName, cat, r.JobDetail, round(r.Hours, 2)],
                                  "detail"))
-                _, h, ot, c = _sums(csub)
-                rows.append((["", "", f"{cat} — subtotal", "", h, ot, c], "l1_sub"))
-            _, h, ot, c = _sums(esub)
-            rows.append(([f"{er.Employee} — Subtotal", "", "", "", h, ot, c], "l2_sub"))
-        _, h, ot, c = _sums(dsub)
-        rows.append(([f"{dept} — Department Total", "", "", "", h, ot, c], "l3_sub"))
-    _, h, ot, c = _sums(df)
-    rows.append((["GRAND TOTAL", "", "", "", h, ot, c], "grand"))
+                rows.append((["", "", "", f"{cat} — subtotal", "", hrs(csub)], "l1_sub"))
+            rows.append(([f"{er.Employee} — Subtotal", "", "", "", "", hrs(esub)], "l2_sub"))
+        rows.append(([f"{dept} — Department Total", "", "", "", "", hrs(dsub)], "l3_sub"))
+    rows.append((["GRAND TOTAL", "", "", "", "", hrs(d0)], "grand"))
     return rows
 
 
