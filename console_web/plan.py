@@ -495,8 +495,9 @@ class LivePlanService(PlanService):
         # % complete is now captured PER DISCIPLINE (drives the calculated run-out); the single
         # project PercentComplete is retired (dashboard derives it from the roll-up). Labour /
         # Material run-out are optional OVERRIDES — blank means "use the calculated figure".
-        lrun = _ratio_pct(payload.get("labour_runout"))    # optional override; 125 → 1.25
-        mrun = _ratio_pct(payload.get("material_runout"))  # optional override
+        # Run-out overrides were REMOVED 2026-11-17 (they polluted the calculated run-out): always
+        # store NULL, which also clears any override left on this week's entry.
+        lrun = mrun = None
         thr = _thr_in(payload.get("rework_threshold"))     # 1.0 (%) → 0.01 fraction
         ship = _as_date(payload.get("planned_ship"))
         by = (payload.get("entered_by") or None)
@@ -806,8 +807,8 @@ class DemoPlanService(PlanService):
         DemoPlanService._store[pid] = {
             "md": md,
             "planned_ship": (payload.get("planned_ship") or None),
-            "labour_runout": _ratio_pct(payload.get("labour_runout")),
-            "material_runout": _ratio_pct(payload.get("material_runout")),
+            "labour_runout": None,          # overrides removed 2026-11-17
+            "material_runout": None,
             "rework_threshold": _thr_in(payload.get("rework_threshold")),
             "cells": cells,
         }

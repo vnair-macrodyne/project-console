@@ -761,7 +761,6 @@ class LiveQueryService(QueryService):
                 rec["PctDone"] = rollup
                 rec["_PctInferred"] = inferred
             rec["MaterialCommittedFull"] = committed.get(pid)
-            rec["RunoutLabourPct"] = rec.pop("RunoutLabour", None)   # treat old manual as % override
             rows.append(_scorecard_row(pid, f, rec))
         return _scorecard_result(rows)
 
@@ -1067,6 +1066,11 @@ class LiveQueryService(QueryService):
                 df = _attach_queue(df, self._df(etospec.query_machine_queue(pids)))
             except Exception:
                 df["Queue"] = ""          # queue view unreadable -> blank column, report still runs
+            try:
+                rel = self._df(etospec.query_first_eng_release(pids))
+            except Exception:
+                rel = None                # event log unreadable -> every hour counts as pre-release
+            df = _attach_eng_pre_release(df, rel)
         return _spec_labour_result(report_id, df, _window_label(dfrom, dto))
 
     def _q_lab_disc(self, project_ids, date_from=None, date_to=None, **kw):
@@ -1798,7 +1802,6 @@ def _scorecard_result(rows):
         QueryColumn("CustAgreedDate", "Cust Agreed Ship", "date", "left"),
         QueryColumn("RunoutLabour", f"{labour} Run-out (hrs)", "hours", "right", calc=True),
         QueryColumn("RunoutPct", f"{labour} Run-out %", "pct", "right", calc=True),
-        QueryColumn("RunoutOverride", "Run-out src", "text", "left"),
         QueryColumn("CPI", "CPI", "num", "right", "Earning at Completion", calc=True),
         QueryColumn("EarningEAC", "Earning $", "money", "right", "Earning at Completion", calc=True),
         QueryColumn("SoldMargin", "Sold Margin", "pct", "right", "Earning at Completion"),
@@ -1833,7 +1836,7 @@ def _scorecard_result(rows):
             f"and budget, over budget (commitment-driven, not %-complete driven) — so it is never "
             f"below {material} % (money already consumed). Both colour green ≤95% of budget, amber "
             f"95–105%, red >105%. "
-            f"“Run-out src” shows “manual” only when a PM has entered an optional override. Earning at Completion "
+            f"Earning at Completion "
             f"projects what the job will actually return: CPI (earned ÷ actual — under 1.0 = "
             f"trending over), Earning $ = sold price − cost at completion (labour run-out priced "
             f"at the applied rate + material EAC), and Margin @ Completion vs the margin sold. "
@@ -2248,14 +2251,18 @@ def _scorecard_row(pid, f, rec):
     # falling back to the PM's typed run-out only when there's no % complete yet.
     _ro = _ev.compute(f.labour_budget_hours, f.labour_actual_hours, _num(rec.get("PctDone")))
     earning, margin = _earning_block(f, _ro)
-    # Material run-out — Carpedia commitment basis (committed POs floored at budget), unless the PM
-    # has typed an override (kept optional). RunoutMaterial in the overlay is that manual override.
+    # Material run-out — Carpedia commitment basis (committed POs floored at budget). Run-outs are
+    # ALWAYS calculated: the PM run-out overrides were removed 2026-11-17 (team: typed values must not
+    # pollute the calculation), so any override still stored in the overlay is ignored.
     _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget, f.material_actual)
-    _mat_ovr = _num(rec.get("RunoutMaterial"))
-    runout_mat_pct = _mat_ovr if _mat_ovr is not None else _mr["runout_pct"]
-    lab_ovr = _num(rec.get("RunoutLabourPct"))            # optional labour run-out % override
-    runout_lab_pct = lab_ovr if lab_ovr is not None else _ro.runout_pct
-    overridden = (_mat_ovr is not None) or (lab_ovr is not None)
+    runout_mat_pct = _mr["runout_pct"]
+    runout_lab_pct = _ro.runout_pct
+    # Run-out COSTS (shown on the Plan page summary): labour = hours run-out × applied $/hr (ETO cost ÷
+    # hours, the same rate the earning lens uses); material = the material EAC above; total = both.
+    _rate = getattr(f, "labour_rate", None)
+    lab_cost_eac = round(_ro.eac * _rate, 2) if (_ro.eac is not None and _rate) else None
+    cost_eac = (round(lab_cost_eac + _mr["eac"], 2)
+                if (lab_cost_eac is not None and _mr["eac"] is not None) else None)
     # Labour Actual / % are PLANNED (exclude rework 999); rework is its own hours + % of budget,
     # flagged against the per-project threshold (default 1%). Run-out / CPI / earning above stay on
     # the TOTAL actual (rework is still real spend). Vijay 2026-08-07.
@@ -2284,15 +2291,18 @@ def _scorecard_row(pid, f, rec):
         "NCCost": _num(rec.get("NCCost")),
         "PctDone": _num(rec.get("PctDone")),
         "CustAgreedDate": _iso(rec.get("CustAgreedDate") or rec.get("POShipDate")),
-        "RunoutLabour": (_ro.eac if _ro.eac is not None else _num(rec.get("RunoutLabour"))),
+        "RunoutLabour": _ro.eac,
         "RunoutPct": runout_lab_pct,
+        "RunoutStatus": _ro.status,
+        "RunoutConfidence": _ro.confidence,
+        "LabourCostEAC": lab_cost_eac,
+        "CostEAC": cost_eac,
         "RunoutMaterialPct": runout_mat_pct,
         "_tone": {"RunoutMaterialPct": _mat_runout_tone(runout_mat_pct, f.material_consumed_pct)},
         "_inf": (["PctDone", "RunoutLabour", "RunoutPct", "CPI", "EarningEAC", "MarginEAC"]
                  if rec.get("_PctInferred") else None),
         "MaterialEAC": _mr["eac"],
         "MaterialUnordered": _mr["unordered"],
-        "RunoutOverride": ("manual" if overridden else None),
         "CPI": (round(_ro.cpi, 3) if _ro.cpi is not None else None),
         "EarningEAC": earning,
         "SoldMargin": getattr(f, "sold_margin", None),
@@ -2416,7 +2426,6 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
     # Material run-out: Carpedia basis (committed POs floored at budget AND at consumption), override wins.
     _mr = _material_runout(rec.get("MaterialCommittedFull"), f.material_budget if f else None,
                            f.material_actual if f else None)
-    _mat_ovr = _num(rec.get("RunoutMaterial"))
     row = {
         "Rank": _int(rec.get("Rank")),
         "ProjectID": pid,
@@ -2428,9 +2437,9 @@ def _exec_row(pid, name, client, f, rec, disc_pct):
         "SlippageDays": _slip(planned, agreed),
         "PctDone": _frac(rec.get("PctDone")),
         "LabPctHrs": f.labour_consumed_pct if f else None,
-        "RunoutLabour": (_ro.runout_pct if _ro.runout_pct is not None else _num(rec.get("RunoutLabour"))),
+        "RunoutLabour": _ro.runout_pct,               # always calculated (overrides removed 2026-11-17)
         "MatPct": f.material_consumed_pct if f else None,
-        "RunoutMaterial": (_mat_ovr if _mat_ovr is not None else _mr["runout_pct"]),
+        "RunoutMaterial": _mr["runout_pct"],
         "PctDoneDelta": _frac(rec.get("PctDoneDelta")),
         "LabHrs2wk": _num(rec.get("LabHrs2wk")),
         "MatSpend2wk": _num(rec.get("MatSpend2wk")),
@@ -2649,6 +2658,47 @@ def _attach_queue(df, qdf):
     return df
 
 
+# Peter's "engineering hours before release to manufacturing" (2026-11-16): an hour counts when it is
+# an Engineering-department hour type, booked on a real machine (SpecID < 700 — not overhead, field
+# service, contingency or 999 rework), BEFORE that machine's FIRST engineering release. A machine
+# never released counts in full. Cut-off choice lives here: FIRST release (see
+# etospec.query_first_eng_release); switch the query to the latest release if that is agreed instead.
+_PRE_RELEASE_DEPT = "Engineering"
+_REAL_MACHINE_MAX = 700
+
+
+def _attach_eng_pre_release(df, rel):
+    if df is None or getattr(df, "empty", True):
+        if df is not None:
+            df["EngPreHours"] = []
+        return df
+    import pandas as pd
+    first = {}
+    if rel is not None and not rel.empty:
+        for _, x in rel.iterrows():
+            try:
+                first[(int(x.ProjectID), float(x.SpecID))] = pd.Timestamp(x.FirstRelease)
+            except (TypeError, ValueError):
+                continue
+
+    def pre(r):
+        try:
+            if r.Department != _PRE_RELEASE_DEPT:
+                return 0.0
+            m = float(r.Machine)
+            if m >= _REAL_MACHINE_MAX:
+                return 0.0
+            cut = first.get((int(r.ProjectID), m))
+            if cut is not None and pd.Timestamp(r.TimeDate) >= cut:
+                return 0.0
+            return float(r.Hours)
+        except (TypeError, ValueError):
+            return 0.0
+    df = df.copy()
+    df["EngPreHours"] = df.apply(pre, axis=1)
+    return df
+
+
 def _labour_add_discipline(df, xwalk):
     """Add a 'Discipline' column to the labour frame using the HourDescription→discipline crosswalk
     (the SAME map the dashboard uses). Category carries the HourDescription; task-999 rows arrive as
@@ -2688,7 +2738,11 @@ def _spec_labour_result(report_id, df, label):
                 "each timecard. Figures run from project start through the end date.")
     else:
         note = (f"{meta['title']} — {label}. Hours booked on timecards. M/C = machine; rework "
-                "(task 999) shows as M/C 999 with the Re-work category.")
+                "(task 999) shows as M/C 999 with the Re-work category. Queue = the machine's current "
+                "ETO queue. Eng Hrs Pre-Release = Engineering-department hours on a real machine "
+                "booked before that machine's first engineering release to manufacturing (all of "
+                "them if it has not been released yet); rework, field service and overhead lines "
+                "are excluded.")
     export = {"kind": "labour", "report_id": report_id, "rows": grouped, "label": label}
     return QueryResult(report_id, f"{L('labour')} — {meta['label']}", qcols, rows, cards, note, export)
 
@@ -4994,6 +5048,8 @@ class DemoQueryService(QueryService):
         if report_id == "lab_d":
             df["Queue"] = df["Machine"].apply(
                 lambda m: "Engineering" if m == 999 else ("Shipping And Manufacturing" if m else ""))
+            df["EngPreHours"] = [h if (d == "Engineering" and m and m < 700) else 0.0
+                                 for d, m, h in zip(df["Department"], df["Machine"], df["Hours"])]
         label = ("from project start through Jul 25, 2026 (demo)" if lifetime
                  else "selected window (demo)")
         return _spec_labour_result(report_id, df, label)

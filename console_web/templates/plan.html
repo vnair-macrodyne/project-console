@@ -103,6 +103,8 @@
     <div class="card" id="budgetCard">
       <h2>Budget &amp; Efficacy <span class="hint" id="budgetSrc" style="font-weight:400"></span></h2>
       <div class="kpis" id="budgetKpis"></div>
+      <div class="kpis" id="runoutKpis" style="margin-top:10px"></div>
+      <p class="hint" id="runoutNote" style="display:none;margin-top:6px"></p>
       <div id="budgetDisc" style="margin-top:12px"></div>
       <p class="hint" id="budgetEmpty" style="display:none">No budget on file for this project yet.</p>
     </div>
@@ -129,21 +131,6 @@
         entry. A machine worked but never budgeted is flagged so the plan can be corrected.</p>
       <p class="mdbanner" id="mdBanner" style="display:none"></p>
       <div id="mdGrid" style="margin-top:10px"></div>
-    </div>
-
-    <div class="card">
-      <h2>Run-out overrides <span class="hint" style="font-weight:400">— optional</span></h2>
-      <p class="hint">Leave blank to use the calculated run-out. Enter a value only to override it
-        (e.g. a known scope change the math can't see yet); the dashboard flags it as “manual”.
-        Material run-out is otherwise computed from committed POs, floored at budget.</p>
-      <div class="row">
-        <div class="fld"><label>Labour Run-out (% of budget)</label>
-          <div class="suffix"><input type="number" step="1" min="0" id="labour_runout" class="entry" placeholder="calc" style="width:110px"><span class="u">%</span></div>
-        </div>
-        <div class="fld"><label>Material Run-out (% of budget)</label>
-          <div class="suffix"><input type="number" step="1" min="0" id="material_runout" class="entry" placeholder="calc" style="width:110px"><span class="u">%</span></div>
-        </div>
-      </div>
     </div>
 
     <div class="card">
@@ -281,8 +268,6 @@ el('proj').onchange=async()=>{
   el('status').textContent=b.exists?'Updating this week':'New — first entry for this project';
   el('planned_ship').value=b.planned_ship||'';
   el('shipHint').style.display = b.planned_ship_default ? 'block' : 'none';
-  el('labour_runout').value=(b.labour_runout!=null?b.labour_runout:'');
-  el('material_runout').value=(b.material_runout!=null?b.material_runout:'');
   el('rework_threshold').value=(b.rework_threshold!=null?b.rework_threshold:'');
   buildMDGrid(b.machines||[]);
   el('form').style.display='block';
@@ -297,6 +282,38 @@ async function loadBudget(pid){
   let d={};
   try{ d=await (await fetch('/api/pm/budget/'+pid)).json(); }catch(e){ d={}; }
   renderBudget(d);
+  loadRunout(pid);
+}
+
+// Run-out (projected at completion) — the SAME calculated figures as the Project Scorecard, read
+// from it so the two never disagree. Reflects the last SAVED week (refreshes after Save).
+async function loadRunout(pid){
+  const box=el('runoutKpis'), note=el('runoutNote');
+  box.innerHTML=''; note.style.display='none';
+  let row=null;
+  try{
+    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({query_id:'scorecard',project_ids:[Number(pid)]})});
+    const d=await r.json();
+    row=(d.rows||[]).find(x=>String(x.ProjectID)===String(pid))||null;
+  }catch(e){ row=null; }
+  if(!row || el('proj').value!==String(pid)) return;
+  const tone=s=>({good:'good',warn:'warn',bad:'bad'}[s]||'');
+  const pct=v=>v!=null?Math.round(v*100)+'%':'—';
+  const inf=(row._inf||[]).includes('RunoutLabour')?' †':'';
+  const low=row.RunoutConfidence==='low'?' (early)':'';
+  box.innerHTML =
+    kpi('Labour run-out (hrs)', (row.RunoutLabour!=null?fmtN(row.RunoutLabour):'—')+inf, tone(row.RunoutStatus)) +
+    kpi('Labour run-out %', pct(row.RunoutPct)+low, tone(row.RunoutStatus)) +
+    kpi('Labour cost run-out', money(row.LabourCostEAC)) +
+    kpi('Material run-out', money(row.MaterialEAC), tone((row._tone||{}).RunoutMaterialPct)) +
+    kpi('Material run-out %', pct(row.RunoutMaterialPct), tone((row._tone||{}).RunoutMaterialPct)) +
+    kpi('Total cost run-out', money(row.CostEAC));
+  const bits=['Run-out = projected total at completion, as on the Project Scorecard (last saved week).',
+    'Labour: actual ÷ % complete, priced at the project\'s applied labour rate.',
+    'Material: the greater of committed POs, consumption and budget.'];
+  if(inf) bits.push('† no hours remaining entered yet — assumes on budget.');
+  note.textContent=bits.join(' '); note.style.display='block';
 }
 
 function renderBudget(d){
@@ -347,7 +364,6 @@ el('saveBtn').onclick=async()=>{
   const cells=(state.cells||[]).map(c=>({spec:c.spec, discipline:c.discipline, remaining:val(c.id)}));
   const payload={ project_id:Number(pid), entered_by:by,
     planned_ship:el('planned_ship').value||null,
-    labour_runout:val('labour_runout'), material_runout:val('material_runout'),
     rework_threshold:val('rework_threshold'), machine_discipline_progress:cells };
   el('saveBtn').disabled=true; showMsg('', 'Saving…');
   try{

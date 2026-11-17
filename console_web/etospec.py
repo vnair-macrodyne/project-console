@@ -191,6 +191,7 @@ COLS_D = [
     ("Category",   "Labour Category", 16, "L", False),
     ("JobDetail",  "Job Detail",      18, "L", False),
     ("Hours",      "Hours",           7,  "R", True),
+    ("EngPreHours", "Eng Hrs Pre-Release", 9, "R", True),
 ]
 COLS_E = [
     ("ProjectID",  "Project ID",  7,  "L", False),
@@ -220,6 +221,27 @@ def query_machine_queue(project_ids=None):
     return f"SELECT ProjectID, SpecID, CurrentQueue AS Queue FROM vwQueueManagement{proj}"
 
 
+def query_first_eng_release(project_ids=None):
+    """Each machine's FIRST engineering release to manufacturing (ProjectID + SpecID).
+    Engineering release is a stream of partial releases: every click is logged in tblEventLog as
+    'Queue Engineering Release Detail' (older ETO versions: 'Queue Engineering Release'), while
+    tblMasterQueue.EngReleaseDate holds only the LATEST click. First = MIN over the log, with the
+    master-queue date as a fallback for a machine that has no logged event. Verified 2026-11-16
+    (console_diag_queue_status3.py)."""
+    proj = ""
+    if project_ids:
+        proj = " AND ProjectID IN (" + ",".join(str(int(p)) for p in project_ids) + ")"
+    return f"""
+    SELECT ProjectID, SpecID, MIN(D) AS FirstRelease FROM (
+        SELECT ProjectID, SpecID, Raised AS D FROM tblEventLog
+        WHERE EventDescription IN ('Queue Engineering Release Detail', 'Queue Engineering Release'){proj}
+        UNION ALL
+        SELECT ProjectID, SpecID, EngReleaseDate AS D FROM tblMasterQueue
+        WHERE EngReleaseDate IS NOT NULL{proj}
+    ) x GROUP BY ProjectID, SpecID
+    """
+
+
 def query_daily_labour(start_date, end_date, project_ids=None):
     """Granular labour rows for TimeDate up to end-of-day(end). Half-open upper bound.
     start_date=None -> no lower bound (project lifetime-to-date). Optional project scope.
@@ -241,6 +263,7 @@ def query_daily_labour(start_date, end_date, project_ids=None):
         CASE WHEN tc.SpecID = 999 THEN 'Re-work'
              ELSE ht.HourDescription END             AS Category,
         tc.SpecID                                   AS Machine,
+        tc.TimeDate                                 AS TimeDate,
         ISNULL(tc.TimecardCustom1, '')              AS JobDetail,
         1                                           AS Entries,
         tc.HourTime                                 AS Hours,
@@ -327,7 +350,10 @@ def build_report_d(df):
     n = len(COLS_D)
     band = lambda label, rt: rows.append(([label] + [""] * (n - 1), rt))
     hrs = lambda d: round(float(d["Hours"].sum()), 2)
+    pre = lambda d: round(float(d["EngPreHours"].sum()), 2)
     d0 = df.copy()
+    if "EngPreHours" not in d0.columns:
+        d0["EngPreHours"] = 0.0
     d0["_M"] = d0["Machine"].apply(_mach_label) if "Machine" in d0.columns else ""
     if "Queue" not in d0.columns:
         d0["Queue"] = ""
@@ -341,17 +367,18 @@ def build_report_d(df):
             band(f"{er.Employee}", "l2_sub")
             for cat in sorted(esub["Category"].dropna().unique()):
                 csub = esub[esub["Category"] == cat]
-                g = (csub.groupby(["ProjectID", "_M", "Queue", "JobName", "JobDetail"], dropna=False)["Hours"]
-                         .sum().reset_index())
+                g = (csub.groupby(["ProjectID", "_M", "Queue", "JobName", "JobDetail"], dropna=False)
+                         [["Hours", "EngPreHours"]].sum().reset_index())
                 g["_ms"] = g["_M"].apply(_mach_sort)
                 g = g.sort_values(["ProjectID", "_ms", "JobDetail"])
                 for _, r in g.iterrows():
-                    rows.append(([r.ProjectID, r._M, r.Queue, r.JobName, cat, r.JobDetail, round(r.Hours, 2)],
+                    rows.append(([r.ProjectID, r._M, r.Queue, r.JobName, cat, r.JobDetail, round(r.Hours, 2),
+                                  round(r.EngPreHours, 2)],
                                  "detail"))
-                rows.append((["", "", "", "", f"{cat} — subtotal", "", hrs(csub)], "l1_sub"))
-            rows.append(([f"{er.Employee} — Subtotal", "", "", "", "", "", hrs(esub)], "l2_sub"))
-        rows.append(([f"{dept} — Department Total", "", "", "", "", "", hrs(dsub)], "l3_sub"))
-    rows.append((["GRAND TOTAL", "", "", "", "", "", hrs(d0)], "grand"))
+                rows.append((["", "", "", "", f"{cat} — subtotal", "", hrs(csub), pre(csub)], "l1_sub"))
+            rows.append(([f"{er.Employee} — Subtotal", "", "", "", "", "", hrs(esub), pre(esub)], "l2_sub"))
+        rows.append(([f"{dept} — Department Total", "", "", "", "", "", hrs(dsub), pre(dsub)], "l3_sub"))
+    rows.append((["GRAND TOTAL", "", "", "", "", "", hrs(d0), pre(d0)], "grand"))
     return rows
 
 
