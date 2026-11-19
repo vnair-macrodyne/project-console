@@ -210,15 +210,23 @@ _AGG = ["Entries", "Hours", "OTHours", "LabourCost"]
 
 
 def query_machine_queue(project_ids=None):
-    """Each machine's CURRENT ETO queue (Pre-Sales / Sales / Engineering / Shipping And
-    Manufacturing ...), as ETO's own queue screens show it — vwQueueManagement.CurrentQueue, one row
-    per ProjectID + SpecID. A machine moves from Engineering to 'Shipping And Manufacturing' when it
-    is engineering-released (tblMasterQueue.EngRelease). Verified 2026-11-16
-    (console_diag_queue_status2.py)."""
+    """Each machine's CURRENT ETO queue, by ProjectID + SpecID. ETO's own label
+    (vwQueueManagement.CurrentQueue) lumps every engineering-released machine into one
+    'Shipping And Manufacturing' bucket (QueueStatus 2). We split it with the machine's own
+    manufacturing-release flag (tblMasterQueue.MfgRelease): not yet released from manufacturing ->
+    'Manufacturing'; released -> 'Shipping'. Other queues keep ETO's label (Pre-Sales, Sales,
+    Engineering, ...). Verified 2026-11-16 (console_diag_queue_status2.py); split 2026-11-19."""
     proj = ""
     if project_ids:
-        proj = " WHERE ProjectID IN (" + ",".join(str(int(p)) for p in project_ids) + ")"
-    return f"SELECT ProjectID, SpecID, CurrentQueue AS Queue FROM vwQueueManagement{proj}"
+        proj = " WHERE qm.ProjectID IN (" + ",".join(str(int(p)) for p in project_ids) + ")"
+    return f"""
+    SELECT qm.ProjectID, qm.SpecID,
+           CASE WHEN qm.QueueStatus = 2
+                THEN CASE WHEN mq.MfgRelease = 1 THEN 'Shipping' ELSE 'Manufacturing' END
+                ELSE qm.CurrentQueue END AS Queue
+    FROM vwQueueManagement qm
+    LEFT JOIN tblMasterQueue mq ON mq.ProjectID = qm.ProjectID AND mq.SpecID = qm.SpecID{proj}
+    """
 
 
 def query_first_eng_release(project_ids=None):

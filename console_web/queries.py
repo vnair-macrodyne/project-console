@@ -2739,7 +2739,7 @@ def _spec_labour_result(report_id, df, label):
     else:
         note = (f"{meta['title']} — {label}. Hours booked on timecards. M/C = machine; rework "
                 "(task 999) shows as M/C 999 with the Re-work category. Queue = the machine's current "
-                "ETO queue. Eng Hrs Pre-Release = Engineering-department hours on a real machine "
+                "ETO queue (Manufacturing until the machine is manufacturing-released, then Shipping). Eng Hrs Pre-Release = Engineering-department hours on a real machine "
                 "booked before that machine's first engineering release to manufacturing (all of "
                 "them if it has not been released yet); rework, field service and overhead lines "
                 "are excluded.")
@@ -5047,7 +5047,7 @@ class DemoQueryService(QueryService):
             df = _labour_add_discipline(df, _DEMO_XWALK)
         if report_id == "lab_d":
             df["Queue"] = df["Machine"].apply(
-                lambda m: "Engineering" if m == 999 else ("Shipping And Manufacturing" if m else ""))
+                lambda m: "Engineering" if m == 999 else ("Manufacturing" if m else ""))
             df["EngPreHours"] = [h if (d == "Engineering" and m and m < 700) else 0.0
                                  for d, m, h in zip(df["Department"], df["Machine"], df["Hours"])]
         label = ("from project start through Jul 25, 2026 (demo)" if lifetime
