@@ -11,8 +11,10 @@ this one looks portfolio-wide, including machines that have gone all the way to 
   B. current queue distribution, portfolio-wide (vwQueueManagement)
   C. queue-release events in tblEventLog by type and year
   D. hour departments in use (tlkpHourTypes.HourDepartment) with hours
-  E. per-machine milestone spine for finished machines (Shipping/Accounting/Closed queues)
-  F. median days between consecutive milestones, from E
+  G. whether the 2026 manufacturing/shipping/accounting releases were a bulk backfill
+  E. per-machine milestone spine for finished machines ordered since 2019
+     (Shipping/Accounting/Closing/Closed queues)
+  F. milestone fill rate and median days from order date, from E
 
 Run:  python console_diag_phase_model.py   ->  diag_phase_model_<date>.txt beside it.
 """
@@ -21,7 +23,7 @@ import os
 import statistics
 import sys
 
-FINISHED = "('Shipping', 'Accounting', 'Closed')"
+FINISHED = "('Shipping', 'Accounting', 'Closing', 'Closed')"
 
 
 class Tee:
@@ -74,7 +76,8 @@ SPINE = f"""
 WITH m AS (
     SELECT qm.ProjectID, qm.SpecID, qm.CurrentQueue
     FROM vwQueueManagement qm
-    WHERE qm.CurrentQueue IN {FINISHED} AND qm.SpecID < 700
+    JOIN tblSpec sp_ok ON sp_ok.ProjectID = qm.ProjectID AND sp_ok.SpecID = qm.SpecID
+    WHERE qm.CurrentQueue IN {FINISHED} AND qm.SpecID < 700 AND sp_ok.SDate >= '2019-01-01'
 ),
 ev AS (
     SELECT e.ProjectID, e.SpecID,
@@ -95,36 +98,41 @@ hrs AS (
     SELECT tc.ProjectID, tc.SpecID,
         MIN(CASE WHEN ht.HourDepartment = 'Engineering'  THEN tc.TimeDate END) eng_hrs_first,
         MAX(CASE WHEN ht.HourDepartment = 'Engineering'  THEN tc.TimeDate END) eng_hrs_last,
-        MIN(CASE WHEN ht.HourDepartment <> 'Engineering' THEN tc.TimeDate END) other_hrs_first,
-        MAX(CASE WHEN ht.HourDepartment <> 'Engineering' THEN tc.TimeDate END) other_hrs_last
+        MIN(CASE WHEN ht.HourDepartment = 'Manufacturing' THEN tc.TimeDate END) mfg_hrs_first,
+        MAX(CASE WHEN ht.HourDepartment = 'Manufacturing' THEN tc.TimeDate END) mfg_hrs_last
     FROM tblTimecards tc
     JOIN m ON m.ProjectID = tc.ProjectID AND m.SpecID = tc.SpecID
     LEFT JOIN tlkpHourTypes ht ON ht.HourType = tc.HourType
     GROUP BY tc.ProjectID, tc.SpecID
 ),
 bom AS (
-    SELECT h.ProjectID, MIN(h.ReleasedDateTime) bom_first, MAX(h.ReleasedDateTime) bom_last
-    FROM tblBOMReleaseHistory h WHERE h.ProjectID IN (SELECT ProjectID FROM m) GROUP BY h.ProjectID
+    SELECT h.ProjectID, CAST(h.SpecID AS float) SpecID,
+           MIN(h.ReleasedDateTime) bom_first, MAX(h.ReleasedDateTime) bom_last
+    FROM tblBOMReleaseHistory h WHERE h.ProjectID IN (SELECT ProjectID FROM m)
+    GROUP BY h.ProjectID, CAST(h.SpecID AS float)
 ),
 po AS (
-    SELECT p.ProjectID, MIN(p.PurchaseDate) po_first
-    FROM vwPurchaseOrderHeader p WHERE p.ProjectID IN (SELECT ProjectID FROM m) GROUP BY p.ProjectID
+    SELECT pod.ProjectID, CAST(pod.SpecID AS float) SpecID, MIN(poh.PurchaseDate) po_first
+    FROM vwPurchaseOrderDetails pod
+    JOIN vwPurchaseOrderHeader poh ON poh.PurchaseOrderID = pod.PurchaseOrderID
+    WHERE pod.ProjectID IN (SELECT ProjectID FROM m)
+    GROUP BY pod.ProjectID, CAST(pod.SpecID AS float)
 )
 SELECT TOP 80 m.ProjectID, m.SpecID, m.CurrentQueue,
     sp.SDate order_date, ev.sales_rel, ev.pre_rel_first, hrs.eng_hrs_first,
     ev.eng_rel_first, bom.bom_first, po.po_first, ev.eng_rel_last, hrs.eng_hrs_last,
-    ev.mfg_rel, hrs.other_hrs_first, hrs.other_hrs_last, ev.ship_rel, ev.acc_rel, ev.close_rel
+    ev.mfg_rel, hrs.mfg_hrs_first, hrs.mfg_hrs_last, ev.ship_rel, ev.acc_rel, ev.close_rel
 FROM m
 JOIN tblSpec sp ON sp.ProjectID = m.ProjectID AND sp.SpecID = m.SpecID
 LEFT JOIN ev  ON ev.ProjectID  = m.ProjectID AND ev.SpecID  = m.SpecID
 LEFT JOIN hrs ON hrs.ProjectID = m.ProjectID AND hrs.SpecID = m.SpecID
-LEFT JOIN bom ON bom.ProjectID = m.ProjectID
-LEFT JOIN po  ON po.ProjectID  = m.ProjectID
+LEFT JOIN bom ON bom.ProjectID = m.ProjectID AND bom.SpecID = m.SpecID
+LEFT JOIN po  ON po.ProjectID  = m.ProjectID AND po.SpecID  = m.SpecID
 ORDER BY sp.SDate DESC
 """
 
 ORDER = ["order_date", "sales_rel", "pre_rel_first", "eng_hrs_first", "eng_rel_first", "bom_first",
-         "po_first", "eng_rel_last", "eng_hrs_last", "mfg_rel", "other_hrs_first", "other_hrs_last",
+         "po_first", "eng_rel_last", "eng_hrs_last", "mfg_rel", "mfg_hrs_first", "mfg_hrs_last",
          "ship_rel", "acc_rel", "close_rel"]
 
 
@@ -206,7 +214,21 @@ def main():
         "FROM tblTimecards tc LEFT JOIN tlkpHourTypes ht ON ht.HourType = tc.HourType "
         "GROUP BY ht.HourDepartment ORDER BY SUM(tc.HourTime) DESC", width=30)
 
-    rule("E. Milestone spine, finished machines (latest 80 by order date)")
+    rule("G. Were the 2026 manufacturing/shipping/accounting releases a bulk backfill?")
+    run(cur, "busiest days for each later-queue release event",
+        "SELECT TOP 30 EventDescription, CONVERT(date, Raised) day, COUNT(*) n, "
+        "COUNT(DISTINCT ProjectID) projects, MIN(RaisedByEmployee) by_min, MAX(RaisedByEmployee) by_max "
+        "FROM tblEventLog WHERE EventDescription IN ('Queue Manufacturing Release', "
+        "'Queue Shipping Release', 'Queue Accounting Release', 'Queue Closing Release') "
+        "GROUP BY EventDescription, CONVERT(date, Raised) ORDER BY COUNT(*) DESC", width=30)
+    run(cur, "Accounting-queue machines: order year vs ship-release year",
+        "SELECT YEAR(sp.SDate) order_yr, YEAR(mq.ShipReleaseDate) ship_rel_yr, COUNT(*) machines "
+        "FROM tblMasterQueue mq JOIN vwQueueManagement qm ON qm.ProjectID = mq.ProjectID "
+        "AND qm.SpecID = mq.SpecID JOIN tblSpec sp ON sp.ProjectID = mq.ProjectID AND sp.SpecID = mq.SpecID "
+        "WHERE qm.CurrentQueue = 'Accounting' GROUP BY YEAR(sp.SDate), YEAR(mq.ShipReleaseDate) "
+        "ORDER BY order_yr, ship_rel_yr", limit=60, width=14)
+
+    rule("E. Milestone spine, finished machines ordered since 2019 (latest 80 by order date)")
     cols, rows = run(cur, "per machine", SPINE, limit=80, width=11)
 
     rule("F. Milestone fill rate and timing, from E")
