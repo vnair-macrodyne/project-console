@@ -53,6 +53,12 @@ variable "staging_image_tag" {
   default     = "staging"
 }
 
+variable "dev_image_tag" {
+  description = "Image tag dev runs. Every build lands here first; use a unique tag per build."
+  type        = string
+  default     = "dev"
+}
+
 variable "prod_image_tag" {
   description = "Image tag prod runs. Promote by setting this to the tag staging has validated."
   type        = string
@@ -84,6 +90,12 @@ variable "sql_port" {
 # ── plan sizing (staging smaller than prod) ──────────────────────────────────────
 variable "staging_plan_sku" {
   description = "App Service Plan SKU for staging (Linux). B1 supports Hybrid Connections (5/plan)."
+  type        = string
+  default     = "B1"
+}
+
+variable "dev_plan_sku" {
+  description = "App Service Plan SKU for dev (Linux). B1 is the cheapest tier with Hybrid Connections."
   type        = string
   default     = "B1"
 }
@@ -138,6 +150,12 @@ variable "staging_store_db" {
   default     = "Macrodyne_Reporting_Staging"
 }
 
+variable "dev_store_db" {
+  description = "Reporting database name for dev."
+  type        = string
+  default     = "Macrodyne_Reporting_Dev"
+}
+
 variable "prod_store_db" {
   description = "Reporting database name for prod."
   type        = string
@@ -177,6 +195,24 @@ variable "prod_store_user" {
 
 variable "prod_store_pwd" {
   description = "Reporting-store SQL password for prod."
+  type        = string
+  sensitive   = true
+}
+
+variable "dev_secret_key" {
+  description = "Flask CONSOLE_SECRET_KEY for dev (fixed 64-hex string, DIFFERENT from staging and prod)."
+  type        = string
+  sensitive   = true
+}
+
+variable "dev_store_user" {
+  description = "Reporting-store SQL login for dev (write on Macrodyne_Reporting_Dev only)."
+  type        = string
+  sensitive   = true
+}
+
+variable "dev_store_pwd" {
+  description = "Reporting-store SQL password for dev."
   type        = string
   sensitive   = true
 }

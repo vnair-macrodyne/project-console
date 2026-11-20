@@ -153,8 +153,8 @@ When prod `Macrodyne_Reporting` is built out:
 1. Create/populate its objects (run the `sql/00x` scripts + `console_seed_hourtype.py` against it).
 2. In SSMS, grant `MacrodyneConsoleSvc` a **User Mapping** on `Macrodyne_Reporting`
    (`db_datareader` + `db_datawriter`, plus execute on the Reporting procs).
-3. Remove `CONSOLE_ENV=staging` from `console_secrets.ps1` (or set
-   `CONSOLE_STORE_DB=Macrodyne_Reporting`), and restart.
+3. Set `CONSOLE_ENV=prod` in `console_secrets.ps1` (do not just remove the line: an unset
+   `CONSOLE_ENV` now means **dev**, `Macrodyne_Reporting_Dev`), and restart.
 
 ---
 

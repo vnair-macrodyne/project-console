@@ -13,6 +13,7 @@ app_name_prefix     = "project-console"
 # ── registry + image ─────────────────────────────────────────────────────────────
 acr_name          = "acrprojectconsole"   # must be globally unique, 5-50 alphanumerics
 image_name        = "project-console"
+dev_image_tag     = "dev"
 staging_image_tag = "staging"
 prod_image_tag    = "prod"
 
@@ -26,6 +27,7 @@ sql_host = "MACRO-ETO-SVR"
 sql_port = 1433
 
 # ── plan sizing ──────────────────────────────────────────────────────────────────
+dev_plan_sku     = "B1"
 staging_plan_sku = "B1"     # supports Hybrid Connections (5 per plan)
 prod_plan_sku    = "P0v3"   # or a B-series if prod load is light
 
@@ -37,6 +39,7 @@ console_threads = 8
 console_auth = "ldap"
 
 # ── per-env Reporting database names (same server, different DB) ──────────────────
+dev_store_db     = "Macrodyne_Reporting_Dev"
 staging_store_db = "Macrodyne_Reporting_Staging"
 prod_store_db    = "Macrodyne_Reporting"
 
@@ -62,6 +65,9 @@ kv_admin_object_id = "00000000-0000-0000-0000-000000000000"
 # export TF_VAR_staging_secret_key=... etc. Generate each secret key with:
 #   python -c "import secrets; print(secrets.token_hex(32))"
 # ═════════════════════════════════════════════════════════════════════════════════
+# dev_secret_key     = "..."   # DIFFERENT from staging and prod
+# dev_store_user     = "MacrodyneConsoleSvcDev"
+# dev_store_pwd      = "..."
 # staging_secret_key = "..."
 # prod_secret_key    = "..."   # DIFFERENT from staging
 # staging_store_user = "MacrodyneConsoleSvcStg"

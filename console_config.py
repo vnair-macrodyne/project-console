@@ -15,6 +15,7 @@ Secrets (passwords) come from env only — never commit them to a profile file.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field, asdict
 
@@ -27,13 +28,48 @@ except ImportError:
     pass
 
 
+
+_log = logging.getLogger(__name__)
+
+# ── environments ────────────────────────────────────────────────────────────────
+# Each environment owns its Reporting database. None = keep the tenant profile's database
+# (prod). ETO is the same read-only Macrodyne_Production for every environment.
+ENV_STORE_DB: dict[str, str | None] = {
+    "dev": "Macrodyne_Reporting_Dev",
+    "staging": "Macrodyne_Reporting_Staging",
+    "prod": None,
+}
+ENVIRONMENTS = tuple(ENV_STORE_DB)
+
+
+class UnknownEnvironment(ValueError):
+    """CONSOLE_ENV is not one of ENVIRONMENTS."""
+
+
+# Unset CONSOLE_ENV means dev: a laptop, test run or script started without the variable
+# lands on the throwaway store, never on staging or prod. Every deployed env sets it
+# explicitly (Terraform app setting / NSSM AppEnvironmentExtra).
+ENV_WHEN_UNSET = "dev"
+
+
+def resolve_environment(raw: str | None) -> str:
+    """Return the validated environment name for a raw CONSOLE_ENV value."""
+    if raw is None:
+        _log.warning("CONSOLE_ENV not set; using %s", ENV_WHEN_UNSET)
+        return ENV_WHEN_UNSET
+    name = raw.strip().lower()
+    if name not in ENV_STORE_DB:
+        raise UnknownEnvironment(
+            f"CONSOLE_ENV={raw!r} is not one of {', '.join(ENVIRONMENTS)}")
+    return name
+
 @dataclass
 class TenantProfile:
     # ── identity / branding ────────────────────────────────────────────────
     product_name: str = "Sextant"             # white-labelable per tenant/reseller
     product_tagline: str = "The Data Console"  # descriptor shown beside the wordmark
     tenant_id: str = "macrodyne"
-    environment: str = "prod"                 # prod | staging (set from $CONSOLE_ENV)
+    environment: str = "prod"                 # dev | staging | prod (set from $CONSOLE_ENV)
     company_name: str = "Macrodyne Technologies Inc."
     header_color: str = "1F3864"
     logo_path: str = ""                        # optional header logo URL (served from /static);
@@ -158,10 +194,16 @@ class TenantProfile:
         # Reporting-store target is env-selectable so the SAME build points at staging or
         # prod without a code change. ETO stays prod read-only (its own eto_* config), so
         # staging tests run against a staging Reporting copy + the live read-only ETO.
-        #   CONSOLE_ENV=staging  -> default staging DB name (Macrodyne_Reporting_Staging)
+        #   CONSOLE_ENV=dev      -> Macrodyne_Reporting_Dev
+        #   CONSOLE_ENV=staging  -> Macrodyne_Reporting_Staging
+        #   CONSOLE_ENV=prod     -> the profile's reporting_database (Macrodyne_Reporting)
         #   CONSOLE_STORE_SERVER / CONSOLE_STORE_DB -> explicit override (win over CONSOLE_ENV)
-        if os.environ.get("CONSOLE_ENV", "").lower() in ("staging", "stage", "test"):
-            prof.reporting_database = "Macrodyne_Reporting_Staging"
+        # A misspelt CONSOLE_ENV raises rather than falling through to the production store;
+        # an unset one means dev (see ENV_WHEN_UNSET).
+        environment = resolve_environment(os.environ.get("CONSOLE_ENV"))
+        store_db = ENV_STORE_DB[environment]
+        if store_db is not None:
+            prof.reporting_database = store_db
         prof.reporting_server = os.environ.get("CONSOLE_STORE_SERVER", prof.reporting_server)
         prof.reporting_database = os.environ.get("CONSOLE_STORE_DB", prof.reporting_database)
         # ETO source is likewise env-selectable so a build running off-box (e.g. Azure App
@@ -171,7 +213,7 @@ class TenantProfile:
         #   CONSOLE_ETO_SERVER / CONSOLE_ETO_DB -> explicit override (win over the profile)
         prof.eto_server = os.environ.get("CONSOLE_ETO_SERVER", prof.eto_server)
         prof.eto_database = os.environ.get("CONSOLE_ETO_DB", prof.eto_database)
-        prof.environment = os.environ.get("CONSOLE_ENV", "prod").lower()
+        prof.environment = environment
         # auth (LDAP) config — env wins over profile
         prof.ldap_server = os.environ.get("CONSOLE_LDAP_SERVER", prof.ldap_server)
         prof.ad_domain = os.environ.get("CONSOLE_AD_DOMAIN", prof.ad_domain)

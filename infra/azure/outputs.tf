@@ -47,3 +47,23 @@ output "prod_identity_principal_id" {
   description = "Prod web app managed identity."
   value       = module.prod.identity_principal_id
 }
+
+output "dev_url" {
+  description = "Dev App Service URL."
+  value       = module.dev.app_url
+}
+
+output "dev_hybrid_connection" {
+  description = "Dev hybrid connection name + SQL endpoint to configure in HCM."
+  value       = "${module.dev.hybrid_connection_name} -> ${module.dev.sql_endpoint}"
+}
+
+output "dev_callback_url" {
+  description = "Register this on the Entra app registration (dev) when using Entra auth."
+  value       = module.dev.callback_url
+}
+
+output "dev_identity_principal_id" {
+  description = "Dev web app managed identity."
+  value       = module.dev.identity_principal_id
+}

@@ -1,4 +1,4 @@
-# Project Console — Azure infrastructure (staging + prod).
+# Project Console — Azure infrastructure (dev + staging + prod).
 #
 # Two fully separate App Services from ONE container image. The image is the env-driven build
 # from the repo Dockerfile; staging vs prod is nothing but a different CONSOLE_ENV + config, so
@@ -7,6 +7,11 @@
 #
 #   staging  -> app: <prefix>-staging   CONSOLE_ENV=staging  -> Reporting DB Macrodyne_Reporting_Staging
 #   prod     -> app: <prefix>-prod      CONSOLE_ENV=prod     -> Reporting DB Macrodyne_Reporting
+#   dev      -> app: <prefix>-dev       CONSOLE_ENV=dev      -> Reporting DB Macrodyne_Reporting_Dev
+#
+# Promotion path: dev (every build, breakable) -> staging (release candidate, PM sign-off)
+# -> prod (users). Each env has its own Reporting DB, SQL login and secret key, so a dev
+# experiment can never write into the data PMs rely on.
 #
 # On-prem SQL reach: NO VPN / ExpressRoute. Each space uses an App Service **Hybrid Connection**
 # (Azure Relay) to reach the on-prem SQL Server host:port. An on-prem Hybrid Connection Manager
@@ -72,7 +77,7 @@ resource "azurerm_relay_namespace" "console" {
 }
 
 # ── The two spaces ───────────────────────────────────────────────────────────────
-# Same module, invoked twice. Everything that differs between staging and prod is passed in.
+# Same module, invoked once per env. Everything that differs between staging and prod is passed in.
 
 module "staging" {
   source = "./modules/app_space"
@@ -153,6 +158,49 @@ module "prod" {
   secret_key = var.prod_secret_key
   store_user = var.prod_store_user
   store_pwd  = var.prod_store_pwd
+  eto_user   = var.eto_user
+  eto_pwd    = var.eto_pwd
+
+  entra_tenant_id     = var.entra_tenant_id
+  entra_client_id     = var.entra_client_id
+  entra_client_secret = var.entra_client_secret
+  entra_slo           = var.entra_slo
+
+  ldap_server = var.ldap_server
+  ad_domain   = var.ad_domain
+  ad_netbios  = var.ad_netbios
+
+  kv_admin_object_id = var.kv_admin_object_id
+}
+
+module "dev" {
+  source = "./modules/app_space"
+
+  env                 = "dev"
+  app_name            = "${var.app_name_prefix}-dev"
+  resource_group_name = azurerm_resource_group.console.name
+  location            = azurerm_resource_group.console.location
+  tags                = var.tags
+
+  plan_sku = var.dev_plan_sku
+
+  acr_login_server = azurerm_container_registry.acr.login_server
+  acr_id           = azurerm_container_registry.acr.id
+  image_name       = var.image_name
+  image_tag        = var.dev_image_tag
+
+  console_tenant  = var.console_tenant
+  console_auth    = var.console_auth
+  console_threads = var.console_threads
+
+  relay_namespace_name = azurerm_relay_namespace.console.name
+  sql_host             = var.sql_host
+  sql_port             = var.sql_port
+  store_db             = var.dev_store_db
+
+  secret_key = var.dev_secret_key
+  store_user = var.dev_store_user
+  store_pwd  = var.dev_store_pwd
   eto_user   = var.eto_user
   eto_pwd    = var.eto_pwd
 
